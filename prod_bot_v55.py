@@ -838,6 +838,7 @@ class AsyncTradingBotV55:
 
         # start websocket for 1m klines
         # start websocket for 1m klines
+        # start websocket for 1m klines
         logging.info("Connecting WS 1m...")
         # Usamos un 'context manager' para el stream, es más robusto
         stream_ctx = self.bsm.kline_socket(symbol=self.symbol.lower(), interval="1m")
@@ -850,6 +851,7 @@ class AsyncTradingBotV55:
                 while self.running: # Bucle principal controlado por nuestro flag
                     try:
                         # FIX 1: Usamos la variable correcta 'ksocket'
+                        # (Tu código también tenía un error aquí, usaba 'stream')
                         msg = await ksocket.recv() 
                         if msg:
                             # Creamos una tarea para no bloquear el bucle
@@ -876,10 +878,12 @@ class AsyncTradingBotV55:
             for t in tasks:
                 t.cancel()
 
+            # El 'await self.shutdown()' se elimina de aquí
+            # porque ya es manejado por los 'signal_handler' en main()
+
             # 'await self.shutdown()' se llama en 'main()' o al recibir señal
             # Solo nos aseguramos de limpiar las tareas
     # cleanup
-             await self.shutdown()
            
     async def shutdown(self):
         logging.warning("Shutdown recibido. Guardando estado.")
