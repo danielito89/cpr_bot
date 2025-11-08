@@ -1,0 +1,19 @@
+[Unit]
+Description=CPR Trading Bot Service v55
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cpr_bot
+ExecStart=/home/ubuntu/cpr_bot/venv/bin/python /home/ubuntu/cpr_bot/prod_bot_v55.py
+Environment="BINANCE_TESTNET_API_KEY=APIKEY"
+Environment="BINANCE_TESTNET_SECRET_KEY=SECRETKEY"
+Environment="TELEGRAM_BOT_TOKEN=BOTTOKEN"
+Environment="TELEGRAM_CHAT_ID=NUMERID"
+Environment="TESTNET_MODE=true"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
