@@ -288,27 +288,70 @@ class AsyncTradingBotV55:
         except Exception as e:
             logging.error("Error handling telegram message: %s", e)
 
+    # --- INICIO: Mensaje /status MEJORADO ---
     def _status_text(self):
-        s = "<b>Bot Status</b>\n"
-        s += f"<b>Symbol</b>: <code>{self.symbol}</code>\n"
-        s += f"<b>In position</b>: <code>{self.is_in_position}</code>\n"
-        if self.is_in_position:
-            s += f"<b>Side</b>: <code>{self.current_position_info.get('side')}</code>\n"
-            s += f"<b>Qty</b>: <code>{self.current_position_info.get('quantity')}</code>\n"
-            s += f"<b>Entry</b>: <code>{self.current_position_info.get('entry_price')}</code>\n"
-        s += f"<b>ATR(1h)</b>: <code>{self.cached_atr}</code>\n"
-        s += f"<b>EMA({self.ema_period})</b>: <code>{self.cached_ema}</code>\n"
-        s += f"<b>Daily loss limit</b>: <code>{DAILY_LOSS_LIMIT_PCT}%</code>\n"
-        return s
+        s = "<b>🤖 Bot Status</b>\n\n"
+        s += f"<b>Símbolo</b>: <code>{self.symbol}</code>\n"
 
+        # Añadir Tipo de Día
+        if self.daily_pivots:
+            cw = self.daily_pivots.get("width", 0)
+            is_ranging = self.daily_pivots.get("is_ranging_day", False)
+            day_type = "Rango (Ancho)" if is_ranging else "Tendencia (Estrecho)"
+            s += f"<b>Tipo de Día</b>: <code>{day_type} (CPR: {cw:.2f}%)</code>\n"
+        else:
+            s += "<b>Tipo de Día</b>: <code>Calculando...</code>\n"
+
+        s += f"<b>Posición</b>: <code>{'EN POSICIÓN' if self.is_in_position else 'Sin posición'}</code>\n"
+        if self.is_in_position:
+            side = self.current_position_info.get('side')
+            icon = "🔼" if side == "BUY" else "🔽"
+            s += f"  {icon} <b>Lado</b>: <code>{side}</code>\n"
+            s += f"  <b>Qty</b>: <code>{self.current_position_info.get('quantity')}</code>\n"
+            s += f"  <b>Entrada</b>: <code>{self.current_position_info.get('entry_price')}</code>\n"
+
+        s += "\n<b>Indicadores</b>\n"
+        s += f"  <b>ATR(1h)</b>: <code>{self.cached_atr:.2f}</code>\n"
+        s += f"  <b>EMA({self.ema_period})</b>: <code>{self.cached_ema:.2f}</code>\n"
+        
+        s += "\n<b>Gestión de Riesgo</b>\n"
+        pnl_diario = sum(t.get("pnl", 0) for t in self.daily_trade_stats)
+        s += f"  <b>PnL Hoy</b>: <code>{pnl_diario:.2f} USDT</code>\n"
+        s += f"  <b>Límite Pérdida</b>: <code>{DAILY_LOSS_LIMIT_PCT}%</code>\n"
+        
+        return s
+    # --- FIN: Mensaje /status MEJORADO ---
+
+    # --- INICIO: Mensaje /pivots MEJORADO (CON H1-H6) ---
     def _pivots_text(self):
         if not self.daily_pivots:
-            return "Pivotes no calculados aún."
-        s = "<b>Pivotes (hoy)</b>\n"
-        for k in ("P", "BC", "TC", "H1", "H2", "H3", "H4", "L1", "L2", "L3", "L4"):
-            v = self.daily_pivots.get(k)
-            s += f"<b>{k}</b>: <code>{v}</code>\n"
+            return "📐 Pivotes no calculados aún."
+        
+        s = "<b>📐 Pivotes Camarilla (Clásica)</b>\n\n"
+        
+        # Info de CPR
+        cw = self.daily_pivots.get("width", 0)
+        is_ranging = self.daily_pivots.get("is_ranging_day", False)
+        day_type = "Rango (CPR Ancho)" if is_ranging else "Tendencia (CPR Estrecho)"
+        s += f"<b>Análisis CPR: {day_type}</b> ({cw:.2f}%)\n"
+        s += f"  TC: <code>{self.daily_pivots.get('TC')}</code>\n"
+        s += f"  P:  <code>{self.daily_pivots.get('P')}</code>\n"
+        s += f"  BC: <code>{self.daily_pivots.get('BC')}</code>\n\n"
+        
+        s += "<b>Niveles Resistencia (H)</b>\n"
+        s += f"  H6 (Target): <code>{self.daily_pivots.get('H6')}</code>\n"
+        s += f"  H5 (Target): <code>{self.daily_pivots.get('H5')}</code>\n"
+        s += f"  H4 (Breakout): <code>{self.daily_pivots.get('H4')}</code>\n"
+        s += f"  H3 (Rango): <code>{self.daily_pivots.get('H3')}</code>\n\n"
+        
+        s += "<b>Niveles Soporte (L)</b>\n"
+        s += f"  L3 (Rango): <code>{self.daily_pivots.get('L3')}</code>\n"
+        s += f"  L4 (Breakout): <code>{self.daily_pivots.get('L4')}</code>\n"
+        s += f"  L5 (Target): <code>{self.daily_pivots.get('L5')}</code>\n"
+        s += f"  L6 (Target): <code>{self.daily_pivots.get('L6')}</code>\n"
+        
         return s
+    # --- FIN: Mensaje /pivots MEJORADO ---
 
     # -------------- BINANCE INFO & INDICATORS --------------
     @tenacity_retry_decorator_async()
@@ -382,6 +425,7 @@ class AsyncTradingBotV55:
         except Exception as e:
             logging.error("Error actualizando indicadores: %s", e)
 
+    # --- INICIO: CÁLCULO DE PIVOTES MEJORADO (CON DEBUG Y FÓRMULA CLÁSICA) ---
     @tenacity_retry_decorator_async()
     async def calculate_pivots(self):
         try:
@@ -389,31 +433,56 @@ class AsyncTradingBotV55:
             if len(kl) < 2:
                 raise Exception("Insufficient daily klines")
             y = kl[-2]
+            
+            # --- INICIO: DEBUGGING LOG ---
+            k_timestamp = datetime.utcfromtimestamp(y[0] / 1000).strftime('%Y-%m-%d')
             h, l, c = float(y[2]), float(y[3]), float(y[4])
+            
+            logging.info("-----------------------------------------------")
+            logging.info(f"--- DEBUG DATOS DE PIVOTES (Vela de: {k_timestamp}) ---")
+            logging.info(f"High (H): {h}")
+            logging.info(f"Low (L): {l}")
+            logging.info(f"Close (C): {c}")
+            logging.info("-----------------------------------------------")
+            # --- FIN: DEBUGGING LOG ---
+
             if l == 0:
                 raise Exception("Daily low zero")
+
+            # --- INICIO: Cálculos Clásicos de Camarilla (Tu fórmula) ---
             piv = (h + l + c) / 3.0
+            rng = h - l
+
+            # Niveles Rango (1-4)
+            r4 = c + (h - l) * 1.1 / 2
+            r3 = c + (h - l) * 1.1 / 4
+            r2 = c + (h - l) * 1.1 / 6
+            r1 = c + (h - l) * 1.1 / 12
+            s1 = c - (h - l) * 1.1 / 12
+            s2 = c - (h - l) * 1.1 / 6
+            s3 = c - (h - l) * 1.1 / 4
+            s4 = c - (h - l) * 1.1 / 2
+
+            # Niveles Target (5-6)
+            r5 = (h / l) * c
+            r6 = r5 + 1.168 * (r5 - r4)
+            s5 = c - (r5 - c)
+            s6 = c - (r6 - c)
+            # --- FIN: Cálculos Clásicos de Camarilla ---
+
+            # CPR (sigue siendo útil para el tipo de día)
             bc = (h + l) / 2.0
             tc = (piv - bc) + piv
             cw = abs(tc - bc) / piv * 100 if piv != 0 else 0
-            rng = h - l
-            r5 = (h / l) * c if l != 0 else c
+
             lvls = {
-                "P": piv,
-                "BC": bc,
-                "TC": tc,
-                "width": cw,
-                "is_ranging_day": cw > self.cpr_width_threshold,
-                "H1": c + rng * 1.1 / 12,
-                "H2": c + rng * 1.1 / 6,
-                "H3": c + rng * 1.1 / 4,
-                "H4": c + rng * 1.1 / 2,
-                "L1": c - rng * 1.1 / 12,
-                "L2": c - rng * 1.1 / 6,
-                "L3": c - rng * 1.1 / 4,
-                "L4": c - rng * 1.1 / 2,
+                "P": piv, "BC": bc, "TC": tc,
+                "width": cw, "is_ranging_day": cw > self.cpr_width_threshold,
+                "H1": r1, "H2": r2, "H3": r3, "H4": r4, "H5": r5, "H6": r6,
+                "L1": s1, "L2": s2, "L3": s3, "L4": s4, "L5": s5, "L6": s6,
             }
-            # quantize based on tick_size if available
+            
+            # (El resto de la función de cuantización)
             newp = {}
             for k, v in lvls.items():
                 if k not in ("width", "is_ranging_day"):
@@ -429,11 +498,12 @@ class AsyncTradingBotV55:
                         newp[k] = float(v)
                 else:
                     newp[k] = v
+                    
             self.daily_pivots = newp
             self.last_pivots_date = datetime.utcnow().date()
-            logging.info("Pivotes actualizados")
-            # send pivots to telegram
-            await self._tg_send(self._pivots_text())
+            logging.info("Pivotes (Camarilla Clásica) actualizados")
+            await self._tg_send(self._pivots_text()) # Enviar pivotes actualizados a Telegram
+
         except Exception as e:
             logging.error("Error calculating pivots: %s", e)
             if self.daily_pivots:
@@ -441,6 +511,7 @@ class AsyncTradingBotV55:
                 await self._tg_send("⚠️ <b>ALERTA</b>\nFallo al calcular pivotes. Usando niveles previos.")
             else:
                 await self._tg_send("🚨 <b>ERROR</b>\nFallo al calcular pivotes iniciales. Bot inactivo.")
+    # --- FIN: CÁLCULO DE PIVOTES MEJORADO ---
 
     # -------------- ACCOUNT & ORDERS (polling based) --------------
     @tenacity_retry_decorator_async()
@@ -570,7 +641,27 @@ class AsyncTradingBotV55:
                 # Send batch
                 results = await self.client.futures_place_batch_order(batchOrders=batch)
                 logging.info("SL/TP batch response: %s", results)
-                await self._tg_send(f"✅ <b>NUEVA ORDEN</b>\n{entry_type} {side} qty {self._format_qty(executed_qty)} @ {self._format_price(avg_price)}")
+                
+                # --- INICIO: Mensaje NUEVA ORDEN MEJORADO ---
+                try:
+                    # Crear mensaje de Telegram mejorado
+                    icon = "🔼" if side == SIDE_BUY else "🔽"
+                    tp_list_str = ", ".join([self._format_price(tp) for tp in tp_prices])
+                    
+                    msg = f"{icon} <b>NUEVA ORDEN: {entry_type}</b> {icon}\n\n"
+                    msg += f"<b>Símbolo</b>: <code>{self.symbol}</code>\n"
+                    msg += f"<b>Lado</b>: <code>{side}</code>\n"
+                    msg += f"<b>Cantidad</b>: <code>{self._format_qty(executed_qty)}</code>\n"
+                    msg += f"<b>Entrada</b>: <code>{self._format_price(avg_price)}</code>\n"
+                    msg += f"<b>SL</b>: <code>{self._format_price(sl_price)}</code>\n"
+                    msg += f"<b>TPs</b>: <code>{tp_list_str}</code>\n"
+                    msg += f"<b>ATR en Entrada</b>: <code>{self.cached_atr:.2f}</code>\n"
+                    
+                    await self._tg_send(msg)
+                except Exception as e:
+                    logging.error("Fallo enviando Telegram de nueva orden: %s", e)
+                # --- FIN: Mensaje NUEVA ORDEN MEJORADO ---
+                
             except Exception as e:
                 logging.error("Fallo creando SL/TP: %s", e)
                 await self._tg_send(f"⚠️ <b>FAIL-SAFE</b>\nFallo SL/TP: {e}")
@@ -721,38 +812,69 @@ class AsyncTradingBotV55:
                         self.last_known_position_qty = qty
                         await self._tg_send("🔁 Posición detectada por poll; bot sincronizado.")
                         self.save_state()
+                    
+                    # --- INICIO: Bloque CIERRE DE POSICIÓN MEJORADO (CON ROI) ---
                     # detect full close
                     if qty == 0 and self.is_in_position:
-                        # closed - log pnl using last trades
+                        logging.info("Posición cerrada detectada por poller.")
+                        pnl = 0.0
+                        close_px = 0.0
+                        roi = 0.0
+                        
+                        # Obtener PnL del último trade
                         try:
                             last_trade = (await self.client.futures_account_trades(symbol=self.symbol, limit=1))[0]
                             pnl = float(last_trade.get("realizedPnl", 0.0))
                             close_px = float(last_trade.get("price", 0.0))
-                        except Exception:
-                            pnl = 0.0
-                            close_px = 0.0
-                        # save CSV & daily stats
+                        except Exception as e:
+                            logging.error("Error al obtener último trade para PnL: %s", e)
+
+                        # Calcular ROI
+                        entry_price = self.current_position_info.get("entry_price", 0.0)
+                        quantity = self.current_position_info.get("quantity", 0.0)
+                        
+                        if entry_price > 0 and quantity > 0 and self.leverage > 0:
+                            initial_margin = (entry_price * quantity) / self.leverage
+                            if initial_margin > 0:
+                                roi = (pnl / initial_margin) * 100
+
+                        # Guardar CSV (con ROI corregido)
                         td = {
                             "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                             "entry_type": self.current_position_info.get("entry_type", "Unknown"),
                             "side": self.current_position_info.get("side", "Unknown"),
-                            "quantity": self.current_position_info.get("quantity", 0.0),
-                            "entry_price": self.current_position_info.get("entry_price", 0.0),
+                            "quantity": quantity,
+                            "entry_price": entry_price,
                             "mark_price_entry": self.current_position_info.get("mark_price_entry", 0.0),
                             "close_price_avg": close_px,
                             "pnl": pnl,
-                            "pnl_percent_roi": 0.0,
+                            "pnl_percent_roi": roi, # <-- ROI CORREGIDO
                             "cpr_width": self.daily_pivots.get("width", 0),
                             "atr_at_entry": self.current_position_info.get("atr_at_entry", 0),
                             "ema_filter": self.current_position_info.get("ema_at_entry", 0)
                         }
                         self._log_trade_to_csv(td)
-                        self.daily_trade_stats.append({"pnl": pnl, "roi": 0.0})
-                        await self._tg_send(f"📉 Posición cerrada. PnL: {pnl:+.2f} USDT")
+                        
+                        # Guardar stats diarias
+                        self.daily_trade_stats.append({"pnl": pnl, "roi": roi})
+                        
+                        # Enviar Telegram mejorado
+                        icon = "✅" if pnl >= 0 else "❌"
+                        msg = (
+                            f"{icon} <b>POSICIÓN CERRADA</b> {icon}\n\n"
+                            f"<b>Tipo</b>: <code>{self.current_position_info.get('entry_type', 'N/A')}</code>\n"
+                            f"<b>PnL</b>: <code>{pnl:+.2f} USDT</code>\n"
+                            f"<b>ROI</b>: <code>{roi:+.2f}%</code> (sobre margen inicial)\n"
+                        )
+                        await self._tg_send(msg)
+                        
+                        # Reset del estado
                         self.is_in_position = False
                         self.current_position_info = {}
                         self.last_known_position_qty = 0.0
                         self.save_state()
+                    # --- FIN: Bloque CIERRE DE POSICIÓN MEJORADO ---
+            
             except Exception as e:
                 logging.debug("Account poller error: %s", e)
             await asyncio.sleep(self.account_poll_interval)
@@ -836,9 +958,7 @@ class AsyncTradingBotV55:
         tasks.append(asyncio.create_task(self.account_poller_loop()))
         tasks.append(asyncio.create_task(self.telegram_poll_loop()))
 
-        # start websocket for 1m klines
-        # start websocket for 1m klines
-        # start websocket for 1m klines
+        # --- INICIO: BUCLE DE WEBSOCKET CORREGIDO ---
         logging.info("Connecting WS 1m...")
         # Usamos un 'context manager' para el stream, es más robusto
         stream_ctx = self.bsm.kline_socket(symbol=self.symbol.lower(), interval="1m")
@@ -847,16 +967,15 @@ class AsyncTradingBotV55:
             # 'async with' maneja la conexión y reconexión
             async with stream_ctx as ksocket:
                 logging.info("WS conectado, escuchando 1m klines...")
-
+                
                 while self.running: # Bucle principal controlado por nuestro flag
                     try:
                         # FIX 1: Usamos la variable correcta 'ksocket'
-                        # (Tu código también tenía un error aquí, usaba 'stream')
                         msg = await ksocket.recv() 
                         if msg:
                             # Creamos una tarea para no bloquear el bucle
                             asyncio.create_task(self.handle_kline_evt(msg))
-
+                    
                     except Exception as e:
                         # Error al recibir/procesar mensaje. Bucle interno.
                         logging.error(f"WS recv/handle error: {e}")
@@ -869,7 +988,7 @@ class AsyncTradingBotV55:
             # FIX 2: Indentación corregida. Error fatal que 'async with' no pudo manejar
             logging.critical(f"WS fatal connection error: {e}")
             await self._tg_send("🚨 <b>WS FATAL ERROR</b>\nRevisar logs.")
-
+        
         finally:
             # FIX 2: Indentación corregida.
             # El bucle ha terminado (sea por error o por shutdown)
@@ -877,13 +996,10 @@ class AsyncTradingBotV55:
             self.running = False
             for t in tasks:
                 t.cancel()
-
+            
             # El 'await self.shutdown()' se elimina de aquí
             # porque ya es manejado por los 'signal_handler' en main()
-
-            # 'await self.shutdown()' se llama en 'main()' o al recibir señal
-            # Solo nos aseguramos de limpiar las tareas
-    # cleanup
+        # --- FIN: BUCLE DE WEBSOCKET CORREGIDO ---
            
     async def shutdown(self):
         logging.warning("Shutdown recibido. Guardando estado.")
