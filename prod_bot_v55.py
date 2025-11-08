@@ -100,9 +100,9 @@ class AsyncTradingBotV55:
         atr_period=14,
         ranging_atr_mult=0.5,
         breakout_atr_sl_mult=1.0,
-        breakout_tp_mult=1.25,  # breakout TP multiplier default 1.25×ATR (user asked)
-        range_tp_mult=2.0,      # range TP multiplier default 2×ATR
-        ema_period=50,
+        breakout_tp_mult=1.25,
+        range_tp_mult=2.0,
+        ema_period=20,  # <-- CAMBIO: EMA 50 A 20 (Más rápido)
         ema_timeframe="1h",
     ):
         self.symbol = symbol
@@ -118,6 +118,10 @@ class AsyncTradingBotV55:
         self.range_tp_mult = range_tp_mult
         self.ema_period = ema_period
         self.ema_timeframe = ema_timeframe
+        
+        # --- AÑADIDO: Configuración RSI ---
+        self.rsi_period = 14
+        self.cached_rsi = None
 
         # Binance client & ws manager (created in run)
         self.client = None
@@ -192,6 +196,7 @@ class AsyncTradingBotV55:
             "last_pivots_date": str(self.last_pivots_date) if self.last_pivots_date else None,
             "cached_atr": float(self.cached_atr) if self.cached_atr else None,
             "cached_ema": float(self.cached_ema) if self.cached_ema else None,
+            "cached_rsi": float(self.cached_rsi) if self.cached_rsi else None, # <-- AÑADIDO: Guardar RSI
         }
         tmp = STATE_FILE + ".tmp"
         try:
@@ -219,6 +224,7 @@ class AsyncTradingBotV55:
             self.last_pivots_date = datetime.fromisoformat(lp).date() if lp else None
             self.cached_atr = state.get("cached_atr")
             self.cached_ema = state.get("cached_ema")
+            self.cached_rsi = state.get("cached_rsi") # <-- AÑADIDO: Cargar RSI
             logging.info("Estado cargado: %s", {k: state.get(k) for k in ("is_in_position", "last_known_position_qty", "last_pivots_date")})
         except Exception as e:
             logging.error("Error cargando estado, iniciando limpio: %s", e)
@@ -313,7 +319,8 @@ class AsyncTradingBotV55:
         s += "\n<b>Indicadores</b>\n"
         s += f"  <b>ATR(1h)</b>: <code>{self.cached_atr:.2f}</code>\n"
         s += f"  <b>EMA({self.ema_period})</b>: <code>{self.cached_ema:.2f}</code>\n"
-        
+        s += f"  <b>RSI({self.rsi_period})</b>: <code>{self.cached_rsi:.2f}</code>\n"
+
         s += "\n<b>Gestión de Riesgo</b>\n"
         pnl_diario = sum(t.get("pnl", 0) for t in self.daily_trade_stats)
         s += f"  <b>PnL Hoy</b>: <code>{pnl_diario:.2f} USDT</code>\n"
@@ -387,9 +394,10 @@ class AsyncTradingBotV55:
         kl = await self.client.futures_klines(symbol=self.symbol, interval=interval, limit=limit)
         return kl
 
+    # --- INICIO: update_indicators (CON RSI) ---
     async def update_indicators(self):
         try:
-            # ATR (manual)
+            # --- ATR (manual) ---
             kl = await self._get_klines(interval="1h", limit=50)
             highs = [float(k[2]) for k in kl]
             lows = [float(k[3]) for k in kl]
@@ -406,7 +414,8 @@ class AsyncTradingBotV55:
                     atr = (tr * alpha) + (atr * (1 - alpha))
                 self.cached_atr = atr
                 logging.info("ATR(%d) actualizado: %s", self.atr_period, self.cached_atr)
-            # EMA
+            
+            # --- EMA ---
             kl_ema = await self._get_klines(interval=self.ema_timeframe, limit=max(self.ema_period * 2, 100))
             closes_ema = [float(k[4]) for k in kl_ema]
             if len(closes_ema) >= self.ema_period:
@@ -416,16 +425,46 @@ class AsyncTradingBotV55:
                     ema = (price * alpha) + (ema * (1 - alpha))
                 self.cached_ema = ema
                 logging.info("EMA(%d) actualizado: %s", self.ema_period, self.cached_ema)
-            # Avg volume 1h
+            
+            # --- Avg volume 1h ---
             kl_v = await self._get_klines(interval="1h", limit=21)
             volumes = [float(k[5]) for k in kl_v[:-1]]
             if volumes:
                 self.cached_avg_vol = sum(volumes) / len(volumes)
                 logging.info("AvgVol(1h): %.2f", self.cached_avg_vol)
+
+            # --- INICIO: Cálculo RSI ---
+            kl_rsi = await self._get_klines(interval=self.ema_timeframe, limit=max(self.rsi_period * 5, 100))
+            closes_rsi = [float(k[4]) for k in kl_rsi]
+            if len(closes_rsi) < self.rsi_period + 1:
+                logging.warning("RSI: datos insuficientes")
+                return
+
+            deltas = [closes_rsi[i] - closes_rsi[i-1] for i in range(1, len(closes_rsi))]
+            gains = [d if d > 0 else 0 for d in deltas]
+            losses = [-d if d < 0 else 0 for d in deltas]
+
+            avg_gain = sum(gains[:self.rsi_period]) / self.rsi_period
+            avg_loss = sum(losses[:self.rsi_period]) / self.rsi_period
+
+            for i in range(self.rsi_period, len(gains)):
+                avg_gain = ((avg_gain * (self.rsi_period - 1)) + gains[i]) / self.rsi_period
+                avg_loss = ((avg_loss * (self.rsi_period - 1)) + losses[i]) / self.rsi_period
+
+            if avg_loss == 0:
+                self.cached_rsi = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                self.cached_rsi = 100 - (100 / (1 + rs))
+            
+            logging.info(f"RSI({self.rsi_period}) actualizado: {self.cached_rsi:.2f}")
+            # --- FIN: Cálculo RSI ---
+
         except Exception as e:
             logging.error("Error actualizando indicadores: %s", e)
+    # --- FIN: update_indicators ---
 
-    # --- INICIO: CÁLCULO DE PIVOTES MEJORADO (CON DEBUG Y FÓRMULA CLÁSICA) ---
+    # --- INICIO: CÁLCULO DE PIVOTES (CON DEBUG Y FÓRMULA CLÁSICA) ---
     @tenacity_retry_decorator_async()
     async def calculate_pivots(self):
         try:
@@ -511,7 +550,7 @@ class AsyncTradingBotV55:
                 await self._tg_send("⚠️ <b>ALERTA</b>\nFallo al calcular pivotes. Usando niveles previos.")
             else:
                 await self._tg_send("🚨 <b>ERROR</b>\nFallo al calcular pivotes iniciales. Bot inactivo.")
-    # --- FIN: CÁLCULO DE PIVOTES MEJORADO ---
+    # --- FIN: CÁLCULO DE PIVOTES ---
 
     # -------------- ACCOUNT & ORDERS (polling based) --------------
     @tenacity_retry_decorator_async()
@@ -684,6 +723,8 @@ class AsyncTradingBotV55:
                 self.save_state()
 
     # -------------- CORE STRATEGY: seek_new_trade (called on 1m candle close) --------------
+    
+    # --- INICIO: seek_new_trade (RSI + RANGO PURO + EMA20) ---
     async def seek_new_trade(self, kline):
         # kline: dict from websocket kline 'k'
         now_ts = time.time()
@@ -692,7 +733,7 @@ class AsyncTradingBotV55:
         if not self.daily_pivots:
             logging.debug("No pivots yet")
             return
-        if self.cached_atr is None or self.cached_ema is None:
+        if self.cached_atr is None or self.cached_ema is None or self.cached_rsi is None:
             logging.debug("Indicators not ready")
             return
         async with self.lock:
@@ -712,37 +753,53 @@ class AsyncTradingBotV55:
                     logging.debug("avg vol missing")
                     return
                 volume_confirmed = current_volume > (avg_vol * self.volume_factor)
+                
                 p = self.daily_pivots
                 atr = self.cached_atr
                 ema = self.cached_ema
+                rsi = self.cached_rsi
+                
                 side = None
                 entry_type = None
                 sl = None
                 tp_prices = []
-                # breakout long
-                if current_price > p["H4"] and volume_confirmed and current_price > ema:
+                
+                # --- ESTRATEGIA ACTUALIZADA ---
+                
+                # 1. Breakout Long (Filtro EMA(20) + RSI)
+                # Rompe H4, con volumen, con tendencia (EMA) Y NO está sobrecomprado (RSI < 75)
+                if current_price > p["H4"] and volume_confirmed and current_price > ema and rsi < 75:
                     side = SIDE_BUY
                     entry_type = "Breakout Long"
                     sl = current_price - atr * self.breakout_atr_sl_multiplier
                     tp_prices = [current_price + atr * self.breakout_tp_mult]
-                # breakout short
-                elif current_price < p["L4"] and volume_confirmed and current_price < ema:
+                
+                # 2. Breakout Short (Filtro EMA(20) + RSI)
+                # Rompe L4, con volumen, con tendencia (EMA) Y NO está sobrevendido (RSI > 25)
+                elif current_price < p["L4"] and volume_confirmed and current_price < ema and rsi > 25:
                     side = SIDE_SELL
                     entry_type = "Breakout Short"
                     sl = current_price + atr * self.breakout_atr_sl_multiplier
                     tp_prices = [current_price - atr * self.breakout_tp_mult]
-                # ranging long
-                elif current_price <= p["L3"] and volume_confirmed and current_price > ema:
+                
+                # 3. Ranging Long (Rango Puro: SIN EMA + RSI)
+                # Cae a L3 (soporte), con volumen, Y ESTÁ sobrevendido (RSI < 30)
+                elif current_price <= p["L3"] and volume_confirmed and rsi < 30:
                     side = SIDE_BUY
                     entry_type = "Ranging Long"
                     sl = p["L4"] - atr * self.ranging_atr_multiplier
                     tp_prices = [p["P"], p["H1"], p["H2"]]
-                # ranging short
-                elif current_price >= p["H3"] and volume_confirmed and current_price < ema:
+                
+                # 4. Ranging Short (Rango Puro: SIN EMA + RSI)
+                # Sube a H3 (resistencia), con volumen, Y ESTÁ sobrecomprado (RSI > 70)
+                elif current_price >= p["H3"] and volume_confirmed and rsi > 70:
                     side = SIDE_SELL
                     entry_type = "Ranging Short"
                     sl = p["H4"] + atr * self.ranging_atr_multiplier
                     tp_prices = [p["P"], p["L1"], p["L2"]]
+                
+                # --- FIN ESTRATEGIA ---
+
                 # if found signal
                 if side:
                     balance = await self._get_account_balance()
@@ -761,8 +818,7 @@ class AsyncTradingBotV55:
                     # format TPs (for breakout we keep only first TP as ATR-based)
                     if entry_type.startswith("Breakout"):
                         tp_prices = [current_price + (atr * self.breakout_tp_mult) if side == SIDE_BUY else current_price - (atr * self.breakout_tp_mult)]
-                        # optionally add smaller TP if you want multi TP; we keep single for breakouts to avoid distant TP
-                    # limit to take_profit_levels
+                    
                     tp_prices = tp_prices[: self.take_profit_levels]
                     tp_prices_fmt = [float(self._format_price(tp)) for tp in tp_prices]
                     logging.info("SIGNAL %s %s ; qty %s ; SL %s ; TPs %s", entry_type, side, qty, sl, tp_prices_fmt)
@@ -770,11 +826,11 @@ class AsyncTradingBotV55:
                     await self._place_bracket_order(side, qty, current_price, sl, tp_prices_fmt, entry_type)
             except Exception as e:
                 logging.error("seek_new_trade error: %s", e)
+    # --- FIN: seek_new_trade ---
 
     # -------------- DAILY LOSS CHECK --------------
     async def _daily_loss_exceeded(self, balance):
         # Sum daily pnl in USD from daily_trade_stats
-        # If not tracked, approximate by sum of daily_trade_stats
         pnl = sum(t.get("pnl", 0) for t in self.daily_trade_stats)
         loss_limit = -abs((DAILY_LOSS_LIMIT_PCT / 100.0) * balance)
         return pnl <= loss_limit
@@ -851,7 +907,7 @@ class AsyncTradingBotV55:
                             "pnl_percent_roi": roi, # <-- ROI CORREGIDO
                             "cpr_width": self.daily_pivots.get("width", 0),
                             "atr_at_entry": self.current_position_info.get("atr_at_entry", 0),
-                            "ema_filter": self.current_position_info.get("ema_at_entry", 0)
+                            "ema_filter": self.current_position_info.get("ema_at_entry", 0) # Nota: Este campo ya no se usa en L3/H3
                         }
                         self._log_trade_to_csv(td)
                         
@@ -873,7 +929,7 @@ class AsyncTradingBotV55:
                         self.current_position_info = {}
                         self.last_known_position_qty = 0.0
                         self.save_state()
-                    # --- FIN: Bloque CIERRE DE POSICIÓN MEJORADO ---
+                    # --- FIN: Bloque CIERRE DE POSICIÓN ---
             
             except Exception as e:
                 logging.debug("Account poller error: %s", e)
