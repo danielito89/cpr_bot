@@ -837,27 +837,47 @@ class AsyncTradingBotV55:
         tasks.append(asyncio.create_task(self.telegram_poll_loop()))
 
         # start websocket for 1m klines
+        # start websocket for 1m klines
         logging.info("Connecting WS 1m...")
-        kline_stream = self.bsm.kline_socket(symbol=self.symbol.lower(), interval="1m")
+        # Usamos un 'context manager' para el stream, es más robusto
+        stream_ctx = self.bsm.kline_socket(symbol=self.symbol.lower(), interval="1m")
+
         try:
-            while True:
-                try:
-                    msg = await stream.recv()
-            # schedule handle
-                    asyncio.create_task(self.handle_kline_evt(msg))
-                except Exception as e:
-                    logging.error("WS fatal error: %s", e)
-                    await self._tg_send("🚨 <b>WS ERROR</b>\nReiniciando WS.")
-                    await asyncio.sleep(3)
-                    break
-         except Exception as e:
-             logging.error("WS fatal error: %s", e)
-             await self._tg_send("🚨 <b>WS ERROR</b>\nReiniciando WS.")
-         finally:
-    # cancel background tasks
-             self.running = False
-             for t in tasks:
-                 t.cancel()
+            # 'async with' maneja la conexión y reconexión
+            async with stream_ctx as ksocket:
+                logging.info("WS conectado, escuchando 1m klines...")
+
+                while self.running: # Bucle principal controlado por nuestro flag
+                    try:
+                        # FIX 1: Usamos la variable correcta 'ksocket'
+                        msg = await ksocket.recv() 
+                        if msg:
+                            # Creamos una tarea para no bloquear el bucle
+                            asyncio.create_task(self.handle_kline_evt(msg))
+
+                    except Exception as e:
+                        # Error al recibir/procesar mensaje. Bucle interno.
+                        logging.error(f"WS recv/handle error: {e}")
+                        await self._tg_send("🚨 <b>WS ERROR INTERNO</b>\nReiniciando conexión.")
+                        await asyncio.sleep(5)
+                        # Rompemos el bucle interno, 'async with' intentará reconectar
+                        break 
+
+        except Exception as e:
+            # FIX 2: Indentación corregida. Error fatal que 'async with' no pudo manejar
+            logging.critical(f"WS fatal connection error: {e}")
+            await self._tg_send("🚨 <b>WS FATAL ERROR</b>\nRevisar logs.")
+
+        finally:
+            # FIX 2: Indentación corregida.
+            # El bucle ha terminado (sea por error o por shutdown)
+            logging.warning("Saliendo del bucle WS. Iniciando apagado...")
+            self.running = False
+            for t in tasks:
+                t.cancel()
+
+            # 'await self.shutdown()' se llama en 'main()' o al recibir señal
+            # Solo nos aseguramos de limpiar las tareas
     # cleanup
              await self.shutdown()
            
