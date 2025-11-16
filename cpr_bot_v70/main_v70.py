@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # main_v70.py
-# Versión: v70 (Arquitectura Refactorizada)
-# 1. Lógica centralizada en BotControllerV70
-# 2. Importa módulos de bot_core (utils, pivots, indicators)
-# 3. Importa TelegramHandler
+# Versión: v70 (Refactorizada con StateManager)
 
 import os
 import sys
@@ -18,7 +15,6 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timedelta, time as dt_time
 from logging.handlers import RotatingFileHandler
 
-# Cliente de Binance
 from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 
@@ -31,6 +27,7 @@ from bot_core.utils import (
 )
 from bot_core.pivots import calculate_pivots_from_data
 from bot_core.indicators import calculate_atr, calculate_ema, calculate_median_volume
+from bot_core.state import StateManager # <-- ¡NUEVO!
 from telegram.handler import TelegramHandler
 # --- FIN NUEVOS IMPORTS ---
 
@@ -45,8 +42,7 @@ CSV_FILE = os.path.join(DATA_DIR, "trades_log_v70.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# --- Configuración de Logging ---
-logger = setup_logging(LOG_FILE) # Usamos nuestra función de utils
+logger = setup_logging(LOG_FILE)
 
 # --- Cargar Variables de Entorno ---
 API_KEY = os.environ.get("BINANCE_API_KEY") 
@@ -94,12 +90,17 @@ class BotControllerV70:
         self.range_tp_mult = range_tp_mult
         self.ema_period = ema_period
         self.ema_timeframe = ema_timeframe
+        self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
 
         # --- Clientes y Handlers ---
         self.client = None
         self.bsm = None
+
+        # --- CAMBIO v70: Crear instancias de los manejadores ---
+        self.state = StateManager(STATE_FILE)
         self.telegram_handler = TelegramHandler(
-            bot_instance=self, 
+            bot_controller=self, 
+            state_manager=self.state, # Pasa el estado
             token=TELEGRAM_BOT_TOKEN, 
             chat_id=TELEGRAM_CHAT_ID
         )
@@ -108,94 +109,36 @@ class BotControllerV70:
         self.tick_size = None
         self.step_size = None
 
-        # --- Estado de Indicadores ---
-        self.cached_atr = None
-        self.cached_ema = None
-        self.cached_median_vol = None 
-        self.daily_pivots = {}
-        self.last_pivots_date = None
-
-        # --- Estado de Posición ---
-        self.is_in_position = False
-        self.current_position_info = {}
-        self.last_known_position_qty = 0.0
-        self.sl_moved_to_be = False
-        self.trade_cooldown_until = 0
-
-        # --- Estado de PnL ---
-        self.daily_trade_stats = []
-        self.start_of_day = datetime.utcnow().date()
-        self.daily_start_balance = None
-        self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
-
         # --- Control ---
-        self.lock = asyncio.Lock()
+        self.lock = asyncio.Lock() # Lock principal para seek_trade y check_position
         self.running = True
-        self.trading_paused = False
         self.account_poll_interval = 5.0
         self.indicator_update_interval_minutes = 15
 
-    # --- Lógica de Estado (Se moverá a state.py) ---
+        # --- FIN __init__ ---
+
+
+    # --- Lógica de Estado (Ahora delega al StateManager) ---
 
     def save_state(self):
-        state = {
-            "is_in_position": self.is_in_position,
-            "current_position_info": self.current_position_info, # Sanitizar JSON se moverá aquí
-            "sl_moved_to_be": self.sl_moved_to_be,
-            "last_known_position_qty": float(self.last_known_position_qty),
-            "trade_cooldown_until": self.trade_cooldown_until,
-            "daily_trade_stats": self.daily_trade_stats,
-            "last_pivots_date": str(self.last_pivots_date) if self.last_pivots_date else None,
-            "cached_atr": float(self.cached_atr) if self.cached_atr else None,
-            "cached_ema": float(self.cached_ema) if self.cached_ema else None,
-            "trading_paused": self.trading_paused,
-            "daily_start_balance": self.daily_start_balance
-        }
-        # (Aquí iría la lógica de sanitizar JSON y atomic_save)
-        try:
-            with open(STATE_FILE + ".tmp", "w") as f:
-                json.dump(state, f, indent=2)
-            shutil.move(STATE_FILE + ".tmp", STATE_FILE)
-            logging.info("Estado guardado atómicamente.")
-        except Exception as e:
-            logging.error(f"Error guardando estado: {e}")
+        self.state.save_state()
 
     def load_state(self):
-        if not os.path.exists(STATE_FILE):
-            logging.info("No state file, iniciando limpio.")
-            return
-        try:
-            with open(STATE_FILE, "r") as f:
-                state = json.load(f)
-            self.is_in_position = state.get("is_in_position", False)
-            self.current_position_info = state.get("current_position_info", {})
-            self.sl_moved_to_be = state.get("sl_moved_to_be", False)
-            self.last_known_position_qty = state.get("last_known_position_qty", 0.0)
-            self.trade_cooldown_until = state.get("trade_cooldown_until", 0)
-            self.daily_trade_stats = state.get("daily_trade_stats", [])
-            lp = state.get("last_pivots_date")
-            self.last_pivots_date = datetime.fromisoformat(lp).date() if lp else None
-            self.cached_atr = state.get("cached_atr")
-            self.cached_ema = state.get("cached_ema")
-            self.trading_paused = state.get("trading_paused", False)
-            self.daily_start_balance = state.get("daily_start_balance", None)
-            logging.info("Estado cargado.")
-        except Exception as e:
-            logging.error(f"Error cargando estado: {e}")
+        self.state.load_state()
 
     # --- Comandos de Telegram (Llamados por TelegramHandler) ---
 
     async def pause_trading(self):
-        self.trading_paused = True
+        self.state.trading_paused = True
         self.save_state()
         logging.info("Trading pausado por comando de Telegram.")
 
     async def resume_trading(self):
-        self.trading_paused = False
+        self.state.trading_paused = False
         self.save_state()
         logging.info("Trading reanudado por comando de Telegram.")
 
-    # --- Conexiones de Binance (Se moverá a client.py o similar) ---
+    # --- Conexiones de Binance ---
 
     @tenacity_retry_decorator_async()
     async def _get_klines(self, interval="1h", limit=50):
@@ -231,17 +174,16 @@ class BotControllerV70:
 
     async def update_indicators(self):
         try:
-            # 1. Obtener datos
             kl_1h = await self._get_klines(interval="1h", limit=50)
             kl_ema = await self._get_klines(interval=self.ema_timeframe, limit=max(self.ema_period * 2, 100))
             kl_1m = await self._get_klines(interval="1m", limit=61)
 
-            # 2. Calcular y guardar (usando módulos importados)
-            self.cached_atr = calculate_atr(kl_1h, self.atr_period)
-            self.cached_ema = calculate_ema(kl_ema, self.ema_period)
-            self.cached_median_vol = calculate_median_volume(kl_1m)
+            # Guardar en el estado
+            self.state.cached_atr = calculate_atr(kl_1h, self.atr_period)
+            self.state.cached_ema = calculate_ema(kl_ema, self.ema_period)
+            self.state.cached_median_vol = calculate_median_volume(kl_1m)
 
-            logging.info(f"Indicadores actualizados: ATR={self.cached_atr:.2f}, EMA={self.cached_ema:.2f}, VolMed={self.cached_median_vol:.0f}")
+            logging.info(f"Indicadores actualizados: ATR={self.state.cached_atr:.2f}, EMA={self.state.cached_ema:.2f}, VolMed={self.state.cached_median_vol:.0f}")
 
         except Exception as e:
             logging.error(f"Error actualizando indicadores: {e}")
@@ -250,23 +192,21 @@ class BotControllerV70:
 
     async def calculate_pivots(self):
         try:
-            # 1. Obtener datos
             kl_1d = await self._get_klines(interval="1d", limit=2)
             if len(kl_1d) < 2:
                 raise Exception("Insufficient daily klines for pivots")
 
-            y = kl_1d[-2] # Vela del día anterior
+            y = kl_1d[-2]
             h, l, c = float(y[2]), float(y[3]), float(y[4])
 
-            # 2. Calcular y guardar (usando módulo importado)
-            self.daily_pivots = calculate_pivots_from_data(
+            # Guardar en el estado
+            self.state.daily_pivots = calculate_pivots_from_data(
                 h, l, c, self.tick_size, self.cpr_width_threshold
             )
 
-            if self.daily_pivots:
-                self.last_pivots_date = datetime.utcnow().date()
+            if self.state.daily_pivots:
+                self.state.last_pivots_date = datetime.utcnow().date()
                 logging.info("Pivotes (Camarilla Clásica) actualizados")
-                # Enviar a Telegram (usando el handler)
                 await self.telegram_handler._send_message(self.telegram_handler._pivots_text())
             else:
                 raise Exception("Cálculo de pivotes devolvió None")
@@ -278,7 +218,6 @@ class BotControllerV70:
     # --- Lógica de Órdenes (Se moverá a orders.py) ---
 
     async def _place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
-        # (Copiado de v68)
         try:
             mark_price_entry = float((await self.client.futures_mark_price(symbol=self.symbol))["markPrice"])
             logging.info("Enviando MARKET %s %s %s", side, qty, self.symbol)
@@ -288,7 +227,7 @@ class BotControllerV70:
         except BinanceAPIException as e:
             logging.error(f"Market order failed: {e}")
             await self.telegram_handler._send_message(f"❌ <b>ERROR ENTRY</b>\n{e}")
-            self.trade_cooldown_until = time.time() + 300
+            self.state.trade_cooldown_until = time.time() + 300
             return
 
         filled, attempts, order_id = False, 0, market.get("orderId")
@@ -307,7 +246,7 @@ class BotControllerV70:
         if not filled:
             logging.error("Market order not confirmed filled; cooldown set")
             await self.telegram_handler._send_message("❌ <b>ERROR CRÍTICO</b>\nMARKET no confirmado FILLED.")
-            self.trade_cooldown_until = time.time() + 300
+            self.state.trade_cooldown_until = time.time() + 300
             return
 
         sl_order_id = None
@@ -360,21 +299,22 @@ class BotControllerV70:
             await self.close_position_manual(reason="Fallo al crear SL/TP batch")
             return 
 
-        self.is_in_position = True
-        self.current_position_info = {
+        # --- Actualizar el ESTADO ---
+        self.state.is_in_position = True
+        self.state.current_position_info = {
             "side": side, "quantity": executed_qty, "entry_price": avg_price,
             "entry_type": entry_type, "mark_price_entry": mark_price_entry,
-            "atr_at_entry": self.cached_atr, "tps_hit_count": 0,
+            "atr_at_entry": self.state.cached_atr, "tps_hit_count": 0,
             "entry_time": time.time(), "sl_order_id": sl_order_id,
             "total_pnl": 0.0, "mark_price": mark_price_entry,
             "unrealized_pnl": 0.0,
         }
-        self.last_known_position_qty = executed_qty
-        self.sl_moved_to_be = False
-        self.trade_cooldown_until = time.time() + 300
+        self.state.last_known_position_qty = executed_qty
+        self.state.sl_moved_to_be = False
+        self.state.trade_cooldown_until = time.time() + 300
         self.save_state()
+        # --- Fin de actualizar estado ---
 
-        # Enviar mensaje de Telegram
         icon = "🔼" if side == SIDE_BUY else "🔽"
         tp_list_str = ", ".join([format_price(self.tick_size, tp) for tp in tp_prices])
         msg = f"{icon} <b>NUEVA ORDEN: {entry_type}</b> {icon}\n\n" \
@@ -384,17 +324,16 @@ class BotControllerV70:
               f"<b>Entrada</b>: <code>{format_price(self.tick_size, avg_price)}</code>\n" \
               f"<b>SL</b>: <code>{format_price(self.tick_size, sl_price)}</code> (ID: {sl_order_id})\n" \
               f"<b>TPs</b>: <code>{tp_list_str}</code>\n" \
-              f"<b>ATR en Entrada</b>: <code>{self.cached_atr:.2f if self.cached_atr else 'N/A'}</code>\n"
+              f"<b>ATR en Entrada</b>: <code>{self.state.cached_atr:.2f if self.state.cached_atr else 'N/A'}</code>\n"
         await self.telegram_handler._send_message(msg)
 
     async def _move_sl_to_be(self, remaining_qty_float):
-        # (Copiado de v68)
-        if self.sl_moved_to_be: return
+        if self.state.sl_moved_to_be: return
         logging.info("Moviendo SL a Break-Even (disparado por TP2)...")
         try:
-            entry_price = self.current_position_info.get("entry_price")
-            side = self.current_position_info.get("side")
-            old_sl_id = self.current_position_info.get("sl_order_id")
+            entry_price = self.state.current_position_info.get("entry_price")
+            side = self.state.current_position_info.get("side")
+            old_sl_id = self.state.current_position_info.get("sl_order_id")
 
             if not entry_price or not side:
                 logging.warning("No se puede mover SL a BE, falta info de entrada.")
@@ -419,8 +358,8 @@ class BotControllerV70:
             )
 
             new_sl_id = new_sl_order.get("orderId")
-            self.sl_moved_to_be = True
-            self.current_position_info["sl_order_id"] = new_sl_id
+            self.state.sl_moved_to_be = True
+            self.state.current_position_info["sl_order_id"] = new_sl_id
             self.save_state()
             await self.telegram_handler._send_message(f"🛡️ <b>TP2 ALCANZADO</b>\nSL movido a BE: <code>{format_price(self.tick_size, entry_price)}</code> (ID: {new_sl_id})")
 
@@ -429,7 +368,6 @@ class BotControllerV70:
             await self.telegram_handler._send_message("⚠️ Error al mover SL a Break-Even.")
 
     async def close_position_manual(self, reason="Manual Close"):
-        # (Copiado de v68)
         logging.warning(f"Cerrando posición manualmente: {reason}")
         try:
             await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
@@ -438,11 +376,11 @@ class BotControllerV70:
 
             if qty == 0:
                 logging.info("Intento de cierre manual, pero la posición ya es 0.")
-                if self.is_in_position:
-                    self.is_in_position = False
-                    self.current_position_info = {}
-                    self.last_known_position_qty = 0.0
-                    self.sl_moved_to_be = False
+                if self.state.is_in_position:
+                    self.state.is_in_position = False
+                    self.state.current_position_info = {}
+                    self.state.last_known_position_qty = 0.0
+                    self.state.sl_moved_to_be = False
                     self.save_state()
                 return
 
@@ -460,21 +398,20 @@ class BotControllerV70:
     # --- Lógica de Riesgo/Estrategia (Se moverá a risk.py) ---
 
     async def seek_new_trade(self, kline):
-        # (Copiado de v68)
-        if self.trading_paused: return
-        if time.time() < self.trade_cooldown_until: return
-        if not self.daily_pivots: return
-        if not all([self.cached_atr, self.cached_ema, self.cached_median_vol]):
+        if self.state.trading_paused: return
+        if time.time() < self.state.trade_cooldown_until: return
+        if not self.state.daily_pivots: return
+        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]):
             logging.debug("Indicators not ready")
             return
 
         async with self.lock:
-            if self.is_in_position: return
+            if self.state.is_in_position: return
 
             current_price = float(kline["c"])
             current_volume = float(kline["q"])
 
-            median_vol = self.cached_median_vol
+            median_vol = self.state.cached_median_vol
             if not median_vol or median_vol == 0:
                 logging.debug("median vol (1m, USDT) es 0 o None")
                 return
@@ -482,9 +419,9 @@ class BotControllerV70:
             required_volume = median_vol * self.volume_factor
             volume_confirmed = current_volume > required_volume
 
-            p = self.daily_pivots
-            atr = self.cached_atr
-            ema = self.cached_ema
+            p = self.state.daily_pivots
+            atr = self.state.cached_atr
+            ema = self.state.cached_ema
             side, entry_type, sl, tp_prices = None, None, None, []
 
             if current_price > p["H4"]:
@@ -524,7 +461,7 @@ class BotControllerV70:
                 if balance is None: return
                 if await self._daily_loss_exceeded(balance):
                     await self.telegram_handler._send_message("❌ <b>Daily loss limit reached</b> — trading paused.")
-                    self.trade_cooldown_until = time.time() + 86400
+                    self.state.trade_cooldown_until = time.time() + 86400
                     return
 
                 invest = balance * self.investment_pct
@@ -542,8 +479,8 @@ class BotControllerV70:
                 await self._place_bracket_order(side, qty, current_price, sl, tp_prices_fmt, entry_type)
 
     async def _daily_loss_exceeded(self, balance):
-        total_pnl = self.current_position_info.get("total_pnl", 0)
-        total_pnl += sum(t.get("pnl", 0) for t in self.daily_trade_stats)
+        total_pnl = self.state.current_position_info.get("total_pnl", 0)
+        total_pnl += sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
         loss_limit = -abs((self.daily_loss_limit_pct / 100.0) * balance)
         return total_pnl <= loss_limit
 
@@ -556,11 +493,10 @@ class BotControllerV70:
             return
         k = msg.get("k", {})
         if not k.get("x", False): return
-        if not self.is_in_position:
+        if not self.state.is_in_position:
             await self.seek_new_trade(k)
 
     async def check_position_state(self):
-        # (Copiado de v68)
         async with self.lock:
             try:
                 pos = await self._get_current_position()
@@ -568,29 +504,29 @@ class BotControllerV70:
 
                 qty = abs(float(pos.get("positionAmt", 0)))
 
-                if not self.is_in_position:
+                if not self.state.is_in_position:
                     if qty > 0:
                         logging.info("Detected open position by poll; syncing state")
-                        self.is_in_position = True
-                        self.current_position_info = {
+                        self.state.is_in_position = True
+                        self.state.current_position_info = {
                             "quantity": qty, "entry_price": float(pos.get("entryPrice", 0.0)),
                             "side": SIDE_BUY if float(pos.get("positionAmt", 0)) > 0 else SIDE_SELL,
                             "tps_hit_count": 0, "entry_time": time.time(), "total_pnl": 0.0,
                             "mark_price": float(pos.get("markPrice", 0.0)),
                             "unrealized_pnl": float(pos.get("unRealizedProfit", 0.0)),
                         }
-                        self.last_known_position_qty = qty
+                        self.state.last_known_position_qty = qty
                         await self.telegram_handler._send_message("🔁 Posición detectada por poll; bot sincronizado.")
                         self.save_state()
                     return 
 
                 if qty > 0:
-                    self.current_position_info['mark_price'] = float(pos.get("markPrice", 0.0))
-                    self.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit", 0.0))
+                    self.state.current_position_info['mark_price'] = float(pos.get("markPrice", 0.0))
+                    self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit", 0.0))
 
                 if qty == 0:
                     logging.info("Posición cerrada detectada (qty 0).")
-                    pnl = 0.0; close_px = 0.0; roi = 0.0
+                    pnl, close_px, roi = 0.0, 0.0, 0.0
                     try:
                         last_trade = (await self.client.futures_account_trades(symbol=self.symbol, limit=1))[0]
                         pnl = float(last_trade.get("realizedPnl", 0.0))
@@ -598,9 +534,9 @@ class BotControllerV70:
                     except Exception as e:
                         logging.error(f"Error al obtener último trade para PnL: {e}")
 
-                    total_pnl = self.current_position_info.get("total_pnl", 0) + pnl
-                    entry_price = self.current_position_info.get("entry_price", 0.0)
-                    quantity = self.current_position_info.get("quantity", 0.0)
+                    total_pnl = self.state.current_position_info.get("total_pnl", 0) + pnl
+                    entry_price = self.state.current_position_info.get("entry_price", 0.0)
+                    quantity = self.state.current_position_info.get("quantity", 0.0)
 
                     if entry_price > 0 and quantity > 0 and self.leverage > 0:
                         initial_margin = (entry_price * quantity) / self.leverage
@@ -609,56 +545,56 @@ class BotControllerV70:
 
                     td = {
                         "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "entry_type": self.current_position_info.get("entry_type", "Unknown"),
-                        "side": self.current_position_info.get("side", "Unknown"),
+                        "entry_type": self.state.current_position_info.get("entry_type", "Unknown"),
+                        "side": self.state.current_position_info.get("side", "Unknown"),
                         "quantity": quantity, "entry_price": entry_price,
-                        "mark_price_entry": self.current_position_info.get("mark_price_entry", 0.0),
+                        "mark_price_entry": self.state.current_position_info.get("mark_price_entry", 0.0),
                         "close_price_avg": close_px, "pnl": total_pnl, "pnl_percent_roi": roi, 
-                        "cpr_width": self.daily_pivots.get("width", 0),
-                        "atr_at_entry": self.current_position_info.get("atr_at_entry", 0),
-                        "ema_filter": self.current_position_info.get("ema_at_entry", 0)
+                        "cpr_width": self.state.daily_pivots.get("width", 0),
+                        "atr_at_entry": self.state.current_position_info.get("atr_at_entry", 0),
+                        "ema_filter": self.state.current_position_info.get("ema_at_entry", 0)
                     }
                     self._log_trade_to_csv(td)
-                    self.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
+                    self.state.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
 
                     icon = "✅" if total_pnl >= 0 else "❌"
                     msg = f"{icon} <b>POSICIÓN CERRADA</b> {icon}\n\n" \
-                          f"<b>Tipo</b>: <code>{self.current_position_info.get('entry_type', 'N/A')}</code>\n" \
+                          f"<b>Tipo</b>: <code>{self.state.current_position_info.get('entry_type', 'N/A')}</code>\n" \
                           f"<b>PnL Total</b>: <code>{total_pnl:+.2f} USDT</code>\n" \
                           f"<b>ROI</b>: <code>{roi:+.2f}%</code> (sobre margen inicial)\n"
                     await self.telegram_handler._send_message(msg)
 
-                    self.is_in_position = False
-                    self.current_position_info = {}
-                    self.last_known_position_qty = 0.0
-                    self.sl_moved_to_be = False
+                    self.state.is_in_position = False
+                    self.state.current_position_info = {}
+                    self.state.last_known_position_qty = 0.0
+                    self.state.sl_moved_to_be = False
                     self.save_state()
                     return 
 
-                if qty < self.last_known_position_qty:
+                if qty < self.state.last_known_position_qty:
                     partial_pnl = 0.0
                     try:
                         last_trade = (await self.client.futures_account_trades(symbol=self.symbol, limit=1))[0]
                         partial_pnl = float(last_trade.get("realizedPnl", 0.0))
                     except Exception: pass
 
-                    tp_hit_count = self.current_position_info.get("tps_hit_count", 0) + 1
-                    self.current_position_info["tps_hit_count"] = tp_hit_count
-                    self.current_position_info["total_pnl"] = self.current_position_info.get("total_pnl", 0) + partial_pnl
+                    tp_hit_count = self.state.current_position_info.get("tps_hit_count", 0) + 1
+                    self.state.current_position_info["tps_hit_count"] = tp_hit_count
+                    self.state.current_position_info["total_pnl"] = self.state.current_position_info.get("total_pnl", 0) + partial_pnl
 
                     logging.info(f"TP PARCIAL ALCANZADO (TP{tp_hit_count}). Qty restante: {qty}. PnL: {partial_pnl}")
                     await self.telegram_handler._send_message(f"🎯 <b>TP{tp_hit_count} ALCANZADO</b>\nPnL: <code>{partial_pnl:+.2f}</code> | Qty restante: {qty}")
 
-                    self.last_known_position_qty = qty
+                    self.state.last_known_position_qty = qty
                     self.save_state()
 
-                    if tp_hit_count == 2 and not self.sl_moved_to_be:
+                    if tp_hit_count == 2 and not self.state.sl_moved_to_be:
                         await self._move_sl_to_be(qty)
 
-                if (not self.sl_moved_to_be and 
-                    self.current_position_info.get("entry_type", "").startswith("Ranging")):
+                if (not self.state.sl_moved_to_be and 
+                    self.state.current_position_info.get("entry_type", "").startswith("Ranging")):
 
-                    entry_time = self.current_position_info.get("entry_time", 0)
+                    entry_time = self.state.current_position_info.get("entry_time", 0)
                     if entry_time > 0 and (time.time() - entry_time) / 3600 > 6:
                         logging.warning(f"TIME STOP (6h) triggered for Ranging trade. Closing position.")
                         await self.telegram_handler._send_message(f"⏳ <b>CIERRE POR TIEMPO</b>\nTrade de Rango superó 6h. Cerrando.")
@@ -721,10 +657,10 @@ class BotControllerV70:
     async def timed_tasks_loop(self):
         logging.info("Timed tasks loop started")
 
-        if self.daily_start_balance is None:
-             self.daily_start_balance = await self._get_account_balance()
-             self.start_of_day = datetime.utcnow().date()
-             logging.info(f"Balance inicial de {self.start_of_day} seteado: {self.daily_start_balance}")
+        if self.state.daily_start_balance is None:
+             self.state.daily_start_balance = await self._get_account_balance()
+             self.state.start_of_day = datetime.utcnow().date()
+             logging.info(f"Balance inicial de {self.state.start_of_day} seteado: {self.state.daily_start_balance}")
 
         await asyncio.gather(self.calculate_pivots(), self.update_indicators())
         last_indicator_update = datetime.utcnow()
@@ -733,15 +669,15 @@ class BotControllerV70:
             try:
                 now = datetime.utcnow()
 
-                if now.time() >= dt_time(0, 1) and now.date() > self.start_of_day:
+                if now.time() >= dt_time(0, 1) and now.date() > self.state.start_of_day:
                     logging.info("--- NUEVO DÍA UTC ---")
-                    self.daily_start_balance = await self._get_account_balance()
-                    self.daily_trade_stats = []
-                    self.start_of_day = now.date()
-                    logging.info(f"Balance de inicio de día {self.start_of_day} seteado: {self.daily_start_balance}")
+                    self.state.daily_start_balance = await self._get_account_balance()
+                    self.state.daily_trade_stats = []
+                    self.state.start_of_day = now.date()
+                    logging.info(f"Balance de inicio de día {self.state.start_of_day} seteado: {self.state.daily_start_balance}")
                     self.save_state()
 
-                if now.time() >= dt_time(0, 2) and (self.last_pivots_date is None or now.date() > self.last_pivots_date):
+                if now.time() >= dt_time(0, 2) and (self.state.last_pivots_date is None or now.date() > self.state.last_pivots_date):
                     await self.calculate_pivots()
 
                 if (now - last_indicator_update).total_seconds() >= self.indicator_update_interval_minutes * 60:
@@ -755,29 +691,29 @@ class BotControllerV70:
 
     # -------------- START / RUN --------------
     async def run(self):
-        logging.info(f"Iniciando bot asíncrono v70 (Arquitectura Refactorizada)...")
+        logging.info(f"Iniciando bot asíncrono v70...")
         if TESTNET_MODE:
             logging.warning("¡¡¡ ATENCIÓN: v70 corriendo en MODO TESTNET !!!")
 
         self.client = await AsyncClient.create(API_KEY, API_SECRET, testnet=TESTNET_MODE)
         self.bsm = BinanceSocketManager(self.client)
         await self._get_exchange_info()
-        self.load_state()
+        self.load_state() # Carga el estado en self.state
 
         if not TESTNET_MODE:
             try:
                 pos = await self._get_current_position()
                 if pos and float(pos.get("positionAmt", 0)) != 0:
                     logging.warning("Reconciliación: posición activa encontrada, sincronizando.")
-                    self.is_in_position = True
-                    if not self.current_position_info:
-                        self.current_position_info = {
+                    self.state.is_in_position = True
+                    if not self.state.current_position_info:
+                        self.state.current_position_info = {
                             "quantity": abs(float(pos["positionAmt"])),
                             "entry_price": float(pos.get("entryPrice", 0.0)),
                             "side": SIDE_BUY if float(pos.get("positionAmt", 0)) > 0 else SIDE_SELL,
                             "tps_hit_count": 0, "entry_time": time.time(), "total_pnl": 0.0,
                         }
-                    self.last_known_position_qty = abs(float(pos["positionAmt"]))
+                    self.state.last_known_position_qty = abs(float(pos["positionAmt"]))
                     await self.telegram_handler._send_message("🤖 Bot reiniciado y reconciliado: posición activa encontrada.")
                     self.save_state()
                 else:
