@@ -1,36 +1,27 @@
 #!/usr/bin/env python3
 # main_v70.py
-# Versión: v70.2 (Lógica de órdenes movida a OrdersManager)
+# Versión: v70.3 (Arquitectura Refactorizada Completa)
+# El controlador principal solo inicializa y orquesta los managers.
 
 import os
 import sys
-import time
-import json
-import shutil
 import asyncio
 import logging
 import signal
-import statistics 
-from decimal import Decimal, ROUND_DOWN
-from datetime import datetime, timedelta, time as dt_time
-from logging.handlers import RotatingFileHandler
+from datetime import datetime, time as dt_time
 
 from binance import AsyncClient, BinanceSocketManager
-from binance.exceptions import BinanceAPIException
 
-# --- NUEVOS IMPORTS v70 ---
-from bot_core.utils import (
-    setup_logging, tenacity_retry_decorator_async, 
-    format_price, format_qty, CSV_HEADER,
-    SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET, 
-    STOP_MARKET, TAKE_PROFIT_MARKET
-)
+# --- Módulos Principales ---
+from bot_core.utils import setup_logging, tenacity_retry_decorator_async
 from bot_core.pivots import calculate_pivots_from_data
 from bot_core.indicators import calculate_atr, calculate_ema, calculate_median_volume
 from bot_core.state import StateManager
-from bot_core.orders import OrdersManager # <-- ¡NUEVO!
+from bot_core.orders import OrdersManager
+from bot_core.risk import RiskManager
+from bot_core.streams import StreamManager
 from telegram.handler import TelegramHandler
-# --- FIN NUEVOS IMPORTS ---
+# --- Fin Imports ---
 
 # --- Configuración de Archivos ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +29,7 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LOG_FILE = os.path.join(LOG_DIR, "trading_bot_v70.log")
 STATE_FILE = os.path.join(BASE_DIR, "bot_state_v70.json")
-CSV_FILE = os.path.join(DATA_DIR, "trades_log_v70.csv")
+CSV_FILE = os.path.join(DATA_DIR, "trades_log_v70.csv") # Pasado al RiskManager
 
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -92,11 +83,13 @@ class BotControllerV70:
         self.ema_period = ema_period
         self.ema_timeframe = ema_timeframe
         self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
+        self.CSV_FILE = CSV_FILE # Pasar la ruta del CSV
 
         # --- Clientes y Handlers ---
         self.client = None
         self.bsm = None
 
+        # --- Inicialización de Módulos ---
         self.state = StateManager(STATE_FILE)
         self.telegram_handler = TelegramHandler(
             bot_controller=self, 
@@ -104,9 +97,10 @@ class BotControllerV70:
             token=TELEGRAM_BOT_TOKEN, 
             chat_id=TELEGRAM_CHAT_ID
         )
-        # El OrdersManager se inicializará en self.run()
-        # después de tener el tick_size y el client.
+        # (El resto se inicializa en self.run())
         self.orders_manager = None
+        self.risk_manager = None
+        self.stream_manager = None
 
         # --- Reglas de Exchange ---
         self.tick_size = None
@@ -119,15 +113,10 @@ class BotControllerV70:
         self.indicator_update_interval_minutes = 15
 
     # --- Lógica de Estado (Delega al StateManager) ---
-
-    def save_state(self):
-        self.state.save_state()
-
-    def load_state(self):
-        self.state.load_state()
+    def save_state(self): self.state.save_state()
+    def load_state(self): self.state.load_state()
 
     # --- Comandos de Telegram (Llamados por TelegramHandler) ---
-
     async def pause_trading(self):
         self.state.trading_paused = True
         self.save_state()
@@ -139,12 +128,10 @@ class BotControllerV70:
         logging.info("Trading reanudado por comando de Telegram.")
 
     async def close_position_manual(self, reason="Comando /cerrar de Telegram"):
-        # Pasa la llamada al OrdersManager
         if self.orders_manager:
             await self.orders_manager.close_position_manual(reason)
 
     # --- Conexiones de Binance ---
-
     @tenacity_retry_decorator_async()
     async def _get_klines(self, interval="1h", limit=50):
         return await self.client.futures_klines(symbol=self.symbol, interval=interval, limit=limit)
@@ -168,6 +155,7 @@ class BotControllerV70:
         info = await self.client.futures_exchange_info()
         for s in info["symbols"]:
             if s["symbol"] == self.symbol:
+                filters = {f["filterType"]: f for f in s["filters"]}
                 self.tick_size = filters["PRICE_FILTER"]["tickSize"]
                 self.step_size = filters["LOT_SIZE"]["stepSize"]
                 logging.info(f"Reglas {self.symbol}: Tick {self.tick_size}, Step {self.step_size}")
@@ -175,7 +163,6 @@ class BotControllerV70:
         raise Exception("Symbol not found in exchange info")
 
     # --- Lógica de Indicadores (Orquestador) ---
-
     async def update_indicators(self):
         try:
             kl_1h = await self._get_klines(interval="1h", limit=50)
@@ -187,12 +174,10 @@ class BotControllerV70:
             self.state.cached_median_vol = calculate_median_volume(kl_1m)
 
             logging.info(f"Indicadores actualizados: ATR={self.state.cached_atr:.2f}, EMA={self.state.cached_ema:.2f}, VolMed={self.state.cached_median_vol:.0f}")
-
         except Exception as e:
             logging.error(f"Error actualizando indicadores: {e}")
 
     # --- Lógica de Pivotes (Orquestador) ---
-
     async def calculate_pivots(self):
         try:
             kl_1d = await self._get_klines(interval="1d", limit=2)
@@ -217,267 +202,7 @@ class BotControllerV70:
             logging.error(f"Error al calcular pivotes: {e}")
             await self.telegram_handler._send_message("🚨 <b>ERROR</b>\nFallo al calcular pivotes iniciales. Bot inactivo.")
 
-    # --- Lógica de Riesgo/Estrategia (Se moverá a risk.py) ---
-
-    async def seek_new_trade(self, kline):
-        if self.state.trading_paused: return
-        if time.time() < self.state.trade_cooldown_until: return
-        if not self.state.daily_pivots: return
-        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]):
-            logging.debug("Indicators not ready")
-            return
-
-        async with self.lock:
-            if self.state.is_in_position: return
-
-            current_price = float(kline["c"])
-            current_volume = float(kline["q"])
-
-            median_vol = self.state.cached_median_vol
-            if not median_vol or median_vol == 0:
-                logging.debug("median vol (1m, USDT) es 0 o None")
-                return
-
-            required_volume = median_vol * self.volume_factor
-            volume_confirmed = current_volume > required_volume
-
-            p = self.state.daily_pivots
-            atr = self.state.cached_atr
-            ema = self.state.cached_ema
-            side, entry_type, sl, tp_prices = None, None, None, []
-
-            if current_price > p["H4"]:
-                if volume_confirmed and current_price > ema:
-                    side, entry_type = SIDE_BUY, "Breakout Long"
-                    sl = current_price - atr * self.breakout_atr_sl_multiplier
-                    tp_prices = [current_price + atr * self.breakout_tp_mult]
-                else:
-                    logging.info(f"[DEBUG H4] Rechazado. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f}), EMA: {current_price > ema}")
-
-            elif current_price < p["L4"]:
-                if volume_confirmed and current_price < ema:
-                    side, entry_type = SIDE_SELL, "Breakout Short"
-                    sl = current_price + atr * self.breakout_atr_sl_multiplier
-                    tp_prices = [current_price - atr * self.breakout_tp_mult]
-                else:
-                    logging.info(f"[DEBUG L4] Rechazado. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f}), EMA: {current_price < ema}")
-
-            elif current_price <= p["L3"]:
-                if volume_confirmed:
-                    side, entry_type = SIDE_BUY, "Ranging Long"
-                    sl = p["L4"] - atr * self.ranging_atr_multiplier
-                    tp_prices = [p["P"], p["H1"], p["H2"]]
-                else:
-                    logging.info(f"[DEBUG L3] Rechazado. Precio OK. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f})")
-
-            elif current_price >= p["H3"]:
-                if volume_confirmed:
-                    side, entry_type = SIDE_SELL, "Ranging Short"
-                    sl = p["H4"] + atr * self.ranging_atr_multiplier
-                    tp_prices = [p["P"], p["L1"], p["L2"]]
-                else:
-                    logging.info(f"[DEBUG H3] Rechazado. Precio OK. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f})")
-
-            if side:
-                balance = await self._get_account_balance()
-                if balance is None: return
-                if await self._daily_loss_exceeded(balance):
-                    await self.telegram_handler._send_message("❌ <b>Daily loss limit reached</b> — trading paused.")
-                    self.state.trade_cooldown_until = time.time() + 86400
-                    return
-
-                invest = balance * self.investment_pct
-                qty = float(format_qty(self.step_size, (invest * self.leverage) / current_price))
-                if qty <= 0:
-                    logging.warning("Qty computed 0; skip")
-                    return
-
-                if entry_type.startswith("Breakout"):
-                    tp_prices = [tp_prices[0]]
-
-                tp_prices_fmt = [float(format_price(self.tick_size, tp)) for tp in tp_prices if tp is not None]
-
-                logging.info(f"!!! SEÑAL !!! {entry_type} {side} ; qty {qty} ; SL {sl} ; TPs {tp_prices_fmt}")
-                # --- CAMBIO v70: Llamar al OrdersManager ---
-                await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tp_prices_fmt, entry_type)
-
-    async def _daily_loss_exceeded(self, balance):
-        total_pnl = self.state.current_position_info.get("total_pnl", 0)
-        total_pnl += sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
-        loss_limit = -abs((self.daily_loss_limit_pct / 100.0) * balance)
-        return total_pnl <= loss_limit
-
-    # --- Lógica de Streams (Se moverá a streams.py) ---
-
-    async def handle_kline_evt(self, msg):
-        if not msg: return
-        if msg.get("e") == "error":
-            logging.error(f"WS error event: {msg}")
-            return
-        k = msg.get("k", {})
-        if not k.get("x", False): return
-        if not self.state.is_in_position:
-            await self.seek_new_trade(k)
-
-    async def check_position_state(self):
-        async with self.lock:
-            try:
-                pos = await self._get_current_position()
-                if not pos: return
-
-                qty = abs(float(pos.get("positionAmt", 0)))
-
-                if not self.state.is_in_position:
-                    if qty > 0:
-                        logging.info("Detected open position by poll; syncing state")
-                        self.state.is_in_position = True
-                        self.state.current_position_info = {
-                            "quantity": qty, "entry_price": float(pos.get("entryPrice", 0.0)),
-                            "side": SIDE_BUY if float(pos.get("positionAmt", 0)) > 0 else SIDE_SELL,
-                            "tps_hit_count": 0, "entry_time": time.time(), "total_pnl": 0.0,
-                            "mark_price": float(pos.get("markPrice", 0.0)),
-                            "unrealized_pnl": float(pos.get("unRealizedProfit", 0.0)),
-                        }
-                        self.state.last_known_position_qty = qty
-                        await self.telegram_handler._send_message("🔁 Posición detectada por poll; bot sincronizado.")
-                        self.save_state()
-                    return 
-
-                if qty > 0:
-                    self.state.current_position_info['mark_price'] = float(pos.get("markPrice", 0.0))
-                    self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit", 0.0))
-
-                if qty == 0:
-                    logging.info("Posición cerrada detectada (qty 0).")
-                    pnl, close_px, roi = 0.0, 0.0, 0.0
-                    try:
-                        last_trade = (await self.client.futures_account_trades(symbol=self.symbol, limit=1))[0]
-                        pnl = float(last_trade.get("realizedPnl", 0.0))
-                        close_px = float(last_trade.get("price", 0.0))
-                    except Exception as e:
-                        logging.error(f"Error al obtener último trade para PnL: {e}")
-
-                    total_pnl = self.state.current_position_info.get("total_pnl", 0) + pnl
-                    entry_price = self.state.current_position_info.get("entry_price", 0.0)
-                    quantity = self.state.current_position_info.get("quantity", 0.0)
-
-                    if entry_price > 0 and quantity > 0 and self.leverage > 0:
-                        initial_margin = (entry_price * quantity) / self.leverage
-                        if initial_margin > 0:
-                            roi = (total_pnl / initial_margin) * 100
-
-                    td = {
-                        "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "entry_type": self.state.current_position_info.get("entry_type", "Unknown"),
-                        "side": self.state.current_position_info.get("side", "Unknown"),
-                        "quantity": quantity, "entry_price": entry_price,
-                        "mark_price_entry": self.state.current_position_info.get("mark_price_entry", 0.0),
-                        "close_price_avg": close_px, "pnl": total_pnl, "pnl_percent_roi": roi, 
-                        "cpr_width": self.state.daily_pivots.get("width", 0),
-                        "atr_at_entry": self.state.current_position_info.get("atr_at_entry", 0),
-                        "ema_filter": self.state.current_position_info.get("ema_at_entry", 0)
-                    }
-                    self._log_trade_to_csv(td)
-                    self.state.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
-
-                    icon = "✅" if total_pnl >= 0 else "❌"
-                    msg = f"{icon} <b>POSICIÓN CERRADA</b> {icon}\n\n" \
-                          f"<b>Tipo</b>: <code>{self.state.current_position_info.get('entry_type', 'N/A')}</code>\n" \
-                          f"<b>PnL Total</b>: <code>{total_pnl:+.2f} USDT</code>\n" \
-                          f"<b>ROI</b>: <code>{roi:+.2f}%</code> (sobre margen inicial)\n"
-                    await self.telegram_handler._send_message(msg)
-
-                    self.state.is_in_position = False
-                    self.state.current_position_info = {}
-                    self.state.last_known_position_qty = 0.0
-                    self.state.sl_moved_to_be = False
-                    self.save_state()
-                    return 
-
-                if qty < self.state.last_known_position_qty:
-                    partial_pnl = 0.0
-                    try:
-                        last_trade = (await self.client.futures_account_trades(symbol=self.symbol, limit=1))[0]
-                        partial_pnl = float(last_trade.get("realizedPnl", 0.0))
-                    except Exception: pass
-
-                    tp_hit_count = self.state.current_position_info.get("tps_hit_count", 0) + 1
-                    self.state.current_position_info["tps_hit_count"] = tp_hit_count
-                    self.state.current_position_info["total_pnl"] = self.state.current_position_info.get("total_pnl", 0) + partial_pnl
-
-                    logging.info(f"TP PARCIAL ALCANZADO (TP{tp_hit_count}). Qty restante: {qty}. PnL: {partial_pnl}")
-                    await self.telegram_handler._send_message(f"🎯 <b>TP{tp_hit_count} ALCANZADO</b>\nPnL: <code>{partial_pnl:+.2f}</code> | Qty restante: {qty}")
-
-                    self.state.last_known_position_qty = qty
-                    self.save_state()
-
-                    if tp_hit_count == 2 and not self.state.sl_moved_to_be:
-                        # --- CAMBIO v70: Llamar al OrdersManager ---
-                        await self.orders_manager.move_sl_to_be(qty)
-
-                if (not self.state.sl_moved_to_be and 
-                    self.state.current_position_info.get("entry_type", "").startswith("Ranging")):
-
-                    entry_time = self.state.current_position_info.get("entry_time", 0)
-                    if entry_time > 0 and (time.time() - entry_time) / 3600 > 6:
-                        logging.warning(f"TIME STOP (6h) triggered for Ranging trade. Closing position.")
-                        await self.telegram_handler._send_message(f"⏳ <b>CIERRE POR TIEMPO</b>\nTrade de Rango superó 6h. Cerrando.")
-                        await self.close_position_manual(reason="Time Stop 6h")
-
-            except BinanceAPIException as e:
-                if e.code == -1003: logging.warning("Rate limit (-1003) en check_position_state.")
-                else: logging.error(f"Error de API en check_position_state: {e}", exc_info=True)
-            except Exception as e:
-                logging.error(f"Error en check_position_state: {e}", exc_info=True)
-
-    async def account_poller_loop(self):
-        logging.info("Poller de cuenta iniciado (intervalo %.1fs)", self.account_poll_interval)
-        while self.running:
-            await self.check_position_state()
-            await asyncio.sleep(self.account_poll_interval)
-
-    async def run_user_data_loop(self):
-        logging.info("User Data Stream (UDS) conectando...")
-        while self.running:
-            try:
-                async with self.bsm.futures_user_socket() as user_socket:
-                    logging.info("User Data Stream (UDS) conectado.")
-                    while self.running:
-                        msg = await user_socket.recv()
-                        if msg:
-                            asyncio.create_task(self._handle_user_data_message(msg))
-            except Exception as e:
-                logging.error(f"Error en User Data Stream (UDS): {e}. Reconectando en 5s...")
-                await self.telegram_handler._send_message("🔌 <b>ALERTA UDS</b>\nStream de usuario desconectado. Reconectando...")
-                await asyncio.sleep(5)
-
-    async def _handle_user_data_message(self, msg):
-        try:
-            event_type = msg.get('e')
-            if event_type == 'ORDER_TRADE_UPDATE':
-                order_data = msg.get('o', {})
-                if (order_data.get('s') == self.symbol and 
-                    order_data.get('X') == 'FILLED'):
-                    order_type = order_data.get('o')
-                    if order_type in [STOP_MARKET, TAKE_PROFIT_MARKET]:
-                        logging.info(f"UDS: ¡Evento de {order_type} detectado! Forzando chequeo de posición.")
-                        await self.check_position_state()
-        except Exception as e:
-            logging.error(f"Error al manejar mensaje de UDS: {e}", exc_info=True)
-
-    def _log_trade_to_csv(self, trade_data):
-        file_exists = os.path.isfile(CSV_FILE)
-        try:
-            with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
-                import csv as _csv
-                writer = _csv.DictWriter(f, fieldnames=CSV_HEADER)
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow(trade_data)
-            logging.info("Trade cerrado guardado en CSV.")
-        except Exception as e:
-            logging.error(f"Error al guardar CSV: {e}")
-
+    # --- Tareas de Fondo ---
     async def timed_tasks_loop(self):
         logging.info("Timed tasks loop started")
 
@@ -515,24 +240,29 @@ class BotControllerV70:
 
     # -------------- START / RUN --------------
     async def run(self):
-        logging.info(f"Iniciando bot asíncrono v70...")
-        if TESTNET_MODE:
-            logging.warning("¡¡¡ ATENCIÓN: v70 corriendo en MODO TESTNET !!!")
+        logging.info(f"Iniciando bot asíncrono v70 (Arquitectura Refactorizada)...")
 
         self.client = await AsyncClient.create(API_KEY, API_SECRET, testnet=TESTNET_MODE)
         self.bsm = BinanceSocketManager(self.client)
-        await self._get_exchange_info() # Obtiene tick_size y step_size
+        await self._get_exchange_info()
 
-        # --- CAMBIO v70: Inicializar el OrdersManager AHORA ---
+        # --- Inicializar Módulos que dependen del client ---
         self.orders_manager = OrdersManager(
             client=self.client,
             state=self.state,
             telegram_handler=self.telegram_handler,
-            config=self # Pasa toda la instancia del bot como config
+            config=self # Pasa la config principal
+        )
+        self.risk_manager = RiskManager(bot_controller=self)
+        self.stream_manager = StreamManager(
+            bot_controller=self,
+            risk_manager=self.risk_manager,
+            telegram_handler=self.telegram_handler
         )
 
-        self.load_state() # Carga el estado en self.state
+        self.load_state()
 
+        # --- Lógica de Reconciliación ---
         if not TESTNET_MODE:
             try:
                 pos = await self._get_current_position()
@@ -556,38 +286,19 @@ class BotControllerV70:
         else:
              logging.info("Modo Testnet: reconciliación de posiciones omitida.")
 
+        # --- Iniciar Tareas de Fondo ---
         self.running = True
-        tasks = []
-        tasks.append(asyncio.create_task(self.timed_tasks_loop()))
-        tasks.append(asyncio.create_task(self.account_poller_loop()))
-        tasks.append(asyncio.create_task(self.telegram_handler.start_polling()))
-        tasks.append(asyncio.create_task(self.run_user_data_loop()))
+        tasks = await self.stream_manager.get_tasks() # Obtiene klines, UDS, poller, telegram
+        tasks.append(asyncio.create_task(self.timed_tasks_loop())) # Añade el loop de indicadores/pivotes
 
-        logging.info("Connecting WS (Klines) 1m...")
-        stream_ctx = self.bsm.kline_socket(symbol=self.symbol.lower(), interval="1m")
-
+        logging.info("Todos los módulos inicializados. Corriendo tareas principales...")
         try:
-            async with stream_ctx as ksocket:
-                logging.info("WS (Klines) conectado, escuchando 1m klines...")
-                while self.running:
-                    try:
-                        msg = await ksocket.recv() 
-                        if msg:
-                            asyncio.create_task(self.handle_kline_evt(msg))
-                    except Exception as e:
-                        logging.error(f"WS (Klines) recv/handle error: {e}")
-                        await self.telegram_handler._send_message("🚨 <b>WS KLINE ERROR</b>\nReiniciando conexión.")
-                        await asyncio.sleep(5)
-                        break 
-        except Exception as e:
-            logging.critical(f"WS (Klines) fatal connection error: {e}")
-            await self.telegram_handler._send_message("🚨 <b>WS KLINE FATAL ERROR</b>\nRevisar logs.")
-
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            logging.info("Tareas principales canceladas.")
         finally:
-            logging.warning("Saliendo del bucle WS (Klines). Iniciando apagado...")
-            self.running = False
-            for t in tasks:
-                t.cancel()
+            logging.warning("Bucle principal finalizado. Iniciando apagado...")
+            await self.shutdown()
 
     async def shutdown(self):
         logging.warning("Shutdown recibido. Guardando estado.")
