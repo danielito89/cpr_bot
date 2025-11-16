@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # main_v70.py
-# Versión: v70 (Refactorizada con StateManager)
+# Versión: v70.2 (Lógica de órdenes movida a OrdersManager)
 
 import os
 import sys
@@ -27,7 +27,8 @@ from bot_core.utils import (
 )
 from bot_core.pivots import calculate_pivots_from_data
 from bot_core.indicators import calculate_atr, calculate_ema, calculate_median_volume
-from bot_core.state import StateManager # <-- ¡NUEVO!
+from bot_core.state import StateManager
+from bot_core.orders import OrdersManager # <-- ¡NUEVO!
 from telegram.handler import TelegramHandler
 # --- FIN NUEVOS IMPORTS ---
 
@@ -96,29 +97,28 @@ class BotControllerV70:
         self.client = None
         self.bsm = None
 
-        # --- CAMBIO v70: Crear instancias de los manejadores ---
         self.state = StateManager(STATE_FILE)
         self.telegram_handler = TelegramHandler(
             bot_controller=self, 
-            state_manager=self.state, # Pasa el estado
+            state_manager=self.state,
             token=TELEGRAM_BOT_TOKEN, 
             chat_id=TELEGRAM_CHAT_ID
         )
+        # El OrdersManager se inicializará en self.run()
+        # después de tener el tick_size y el client.
+        self.orders_manager = None
 
         # --- Reglas de Exchange ---
         self.tick_size = None
         self.step_size = None
 
         # --- Control ---
-        self.lock = asyncio.Lock() # Lock principal para seek_trade y check_position
+        self.lock = asyncio.Lock()
         self.running = True
         self.account_poll_interval = 5.0
         self.indicator_update_interval_minutes = 15
 
-        # --- FIN __init__ ---
-
-
-    # --- Lógica de Estado (Ahora delega al StateManager) ---
+    # --- Lógica de Estado (Delega al StateManager) ---
 
     def save_state(self):
         self.state.save_state()
@@ -137,6 +137,11 @@ class BotControllerV70:
         self.state.trading_paused = False
         self.save_state()
         logging.info("Trading reanudado por comando de Telegram.")
+
+    async def close_position_manual(self, reason="Comando /cerrar de Telegram"):
+        # Pasa la llamada al OrdersManager
+        if self.orders_manager:
+            await self.orders_manager.close_position_manual(reason)
 
     # --- Conexiones de Binance ---
 
@@ -163,7 +168,6 @@ class BotControllerV70:
         info = await self.client.futures_exchange_info()
         for s in info["symbols"]:
             if s["symbol"] == self.symbol:
-                filters = {f["filterType"]: f for f in s["filters"]}
                 self.tick_size = filters["PRICE_FILTER"]["tickSize"]
                 self.step_size = filters["LOT_SIZE"]["stepSize"]
                 logging.info(f"Reglas {self.symbol}: Tick {self.tick_size}, Step {self.step_size}")
@@ -178,7 +182,6 @@ class BotControllerV70:
             kl_ema = await self._get_klines(interval=self.ema_timeframe, limit=max(self.ema_period * 2, 100))
             kl_1m = await self._get_klines(interval="1m", limit=61)
 
-            # Guardar en el estado
             self.state.cached_atr = calculate_atr(kl_1h, self.atr_period)
             self.state.cached_ema = calculate_ema(kl_ema, self.ema_period)
             self.state.cached_median_vol = calculate_median_volume(kl_1m)
@@ -199,7 +202,6 @@ class BotControllerV70:
             y = kl_1d[-2]
             h, l, c = float(y[2]), float(y[3]), float(y[4])
 
-            # Guardar en el estado
             self.state.daily_pivots = calculate_pivots_from_data(
                 h, l, c, self.tick_size, self.cpr_width_threshold
             )
@@ -214,186 +216,6 @@ class BotControllerV70:
         except Exception as e:
             logging.error(f"Error al calcular pivotes: {e}")
             await self.telegram_handler._send_message("🚨 <b>ERROR</b>\nFallo al calcular pivotes iniciales. Bot inactivo.")
-
-    # --- Lógica de Órdenes (Se moverá a orders.py) ---
-
-    async def _place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
-        try:
-            mark_price_entry = float((await self.client.futures_mark_price(symbol=self.symbol))["markPrice"])
-            logging.info("Enviando MARKET %s %s %s", side, qty, self.symbol)
-            market = await self.client.futures_create_order(
-                symbol=self.symbol, side=side, type=ORDER_TYPE_MARKET, quantity=format_qty(self.step_size, qty)
-            )
-        except BinanceAPIException as e:
-            logging.error(f"Market order failed: {e}")
-            await self.telegram_handler._send_message(f"❌ <b>ERROR ENTRY</b>\n{e}")
-            self.state.trade_cooldown_until = time.time() + 300
-            return
-
-        filled, attempts, order_id = False, 0, market.get("orderId")
-        avg_price, executed_qty = 0.0, 0.0
-
-        while attempts < 15:
-            try:
-                status = await self.client.futures_get_order(symbol=self.symbol, orderId=order_id)
-                if status.get("status") == "FILLED":
-                    filled, avg_price, executed_qty = True, float(status.get("avgPrice", 0)), abs(float(status.get("executedQty", 0)))
-                    break
-            except Exception: pass
-            attempts += 1
-            await asyncio.sleep(0.5 + attempts * 0.1)
-
-        if not filled:
-            logging.error("Market order not confirmed filled; cooldown set")
-            await self.telegram_handler._send_message("❌ <b>ERROR CRÍTICO</b>\nMARKET no confirmado FILLED.")
-            self.state.trade_cooldown_until = time.time() + 300
-            return
-
-        sl_order_id = None
-        try:
-            batch = []
-            num_tps = min(len(tp_prices), self.take_profit_levels)
-            if num_tps == 0: raise Exception("No TP prices")
-            tp_qty_per = Decimal(str(executed_qty)) / Decimal(str(num_tps))
-
-            sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            if (side == SIDE_BUY and float(sl_price) >= float((await self.client.futures_mark_price(symbol=self.symbol))["markPrice"])) or \
-               (side == SIDE_SELL and float(sl_price) <= float((await self.client.futures_mark_price(symbol=self.symbol))["markPrice"])):
-                raise Exception("SL already surpassed by market price (fail-safe).")
-
-            batch.append({
-                "symbol": self.symbol, "side": sl_side, "type": STOP_MARKET,
-                "quantity": format_qty(self.step_size, executed_qty), "stopPrice": format_price(self.tick_size, sl_price),
-                "reduceOnly": "true"
-            })
-
-            remaining = Decimal(str(executed_qty))
-            for i, tp in enumerate(tp_prices[:num_tps]):
-                qty_dec = tp_qty_per if i < num_tps - 1 else remaining
-                qty_str = format_qty(self.step_size, qty_dec)
-
-                if i == num_tps - 1 and remaining > 0 and remaining < Decimal(str(self.step_size)):
-                    continue
-
-                remaining -= Decimal(qty_str)
-                mark_price = float((await self.client.futures_mark_price(symbol=self.symbol))["markPrice"])
-                tp_f = float(tp)
-
-                if (side == SIDE_BUY and tp_f <= mark_price) or (side == SIDE_SELL and tp_f >= mark_price):
-                    batch.append({"symbol": self.symbol, "side": sl_side, "type": ORDER_TYPE_MARKET, "quantity": qty_str, "reduceOnly": "true"})
-                else:
-                    batch.append({"symbol": self.symbol, "side": sl_side, "type": TAKE_PROFIT_MARKET, "quantity": qty_str, "stopPrice": format_price(self.tick_size, tp_f), "reduceOnly": "true"})
-
-            results = await self.client.futures_place_batch_order(batchOrders=batch)
-            logging.info(f"SL/TP batch response: {results}")
-
-            if results and len(results) > 0 and "orderId" in results[0]:
-                sl_order_id = results[0]["orderId"]
-                logging.info(f"SL Order ID guardado: {sl_order_id}")
-            else:
-                logging.error("No se pudo obtener el orderId del SL del batch response.")
-
-        except Exception as e:
-            logging.error(f"Fallo creando SL/TP: {e}")
-            await self.telegram_handler._send_message(f"⚠️ <b>FAIL-SAFE</b>\nFallo SL/TP: {e}")
-            await self.close_position_manual(reason="Fallo al crear SL/TP batch")
-            return 
-
-        # --- Actualizar el ESTADO ---
-        self.state.is_in_position = True
-        self.state.current_position_info = {
-            "side": side, "quantity": executed_qty, "entry_price": avg_price,
-            "entry_type": entry_type, "mark_price_entry": mark_price_entry,
-            "atr_at_entry": self.state.cached_atr, "tps_hit_count": 0,
-            "entry_time": time.time(), "sl_order_id": sl_order_id,
-            "total_pnl": 0.0, "mark_price": mark_price_entry,
-            "unrealized_pnl": 0.0,
-        }
-        self.state.last_known_position_qty = executed_qty
-        self.state.sl_moved_to_be = False
-        self.state.trade_cooldown_until = time.time() + 300
-        self.save_state()
-        # --- Fin de actualizar estado ---
-
-        icon = "🔼" if side == SIDE_BUY else "🔽"
-        tp_list_str = ", ".join([format_price(self.tick_size, tp) for tp in tp_prices])
-        msg = f"{icon} <b>NUEVA ORDEN: {entry_type}</b> {icon}\n\n" \
-              f"<b>Símbolo</b>: <code>{self.symbol}</code>\n" \
-              f"<b>Lado</b>: <code>{side}</code>\n" \
-              f"<b>Cantidad</b>: <code>{format_qty(self.step_size, executed_qty)}</code>\n" \
-              f"<b>Entrada</b>: <code>{format_price(self.tick_size, avg_price)}</code>\n" \
-              f"<b>SL</b>: <code>{format_price(self.tick_size, sl_price)}</code> (ID: {sl_order_id})\n" \
-              f"<b>TPs</b>: <code>{tp_list_str}</code>\n" \
-              f"<b>ATR en Entrada</b>: <code>{self.state.cached_atr:.2f if self.state.cached_atr else 'N/A'}</code>\n"
-        await self.telegram_handler._send_message(msg)
-
-    async def _move_sl_to_be(self, remaining_qty_float):
-        if self.state.sl_moved_to_be: return
-        logging.info("Moviendo SL a Break-Even (disparado por TP2)...")
-        try:
-            entry_price = self.state.current_position_info.get("entry_price")
-            side = self.state.current_position_info.get("side")
-            old_sl_id = self.state.current_position_info.get("sl_order_id")
-
-            if not entry_price or not side:
-                logging.warning("No se puede mover SL a BE, falta info de entrada.")
-                return
-
-            if old_sl_id:
-                try:
-                    await self.client.futures_cancel_order(symbol=self.symbol, orderId=old_sl_id)
-                    logging.info(f"Antiguo SL (ID: {old_sl_id}) cancelado.")
-                except BinanceAPIException as e:
-                    if e.code == -2011: logging.warning("SL antiguo ya no existía.")
-                    else: raise e
-            else:
-                logging.warning("No se encontró old_sl_id para cancelar.")
-
-            sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            new_sl_order = await self.client.futures_create_order(
-                symbol=self.symbol, side=sl_side, type=STOP_MARKET,
-                quantity=format_qty(self.step_size, remaining_qty_float),
-                stopPrice=format_price(self.tick_size, entry_price),
-                reduceOnly="true"
-            )
-
-            new_sl_id = new_sl_order.get("orderId")
-            self.state.sl_moved_to_be = True
-            self.state.current_position_info["sl_order_id"] = new_sl_id
-            self.save_state()
-            await self.telegram_handler._send_message(f"🛡️ <b>TP2 ALCANZADO</b>\nSL movido a BE: <code>{format_price(self.tick_size, entry_price)}</code> (ID: {new_sl_id})")
-
-        except Exception as e:
-            logging.error(f"Error moviendo SL a BE: {e}")
-            await self.telegram_handler._send_message("⚠️ Error al mover SL a Break-Even.")
-
-    async def close_position_manual(self, reason="Manual Close"):
-        logging.warning(f"Cerrando posición manualmente: {reason}")
-        try:
-            await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
-            pos = await self._get_current_position()
-            qty = float(pos.get("positionAmt", 0))
-
-            if qty == 0:
-                logging.info("Intento de cierre manual, pero la posición ya es 0.")
-                if self.state.is_in_position:
-                    self.state.is_in_position = False
-                    self.state.current_position_info = {}
-                    self.state.last_known_position_qty = 0.0
-                    self.state.sl_moved_to_be = False
-                    self.save_state()
-                return
-
-            close_side = SIDE_SELL if qty > 0 else SIDE_BUY
-            await self.client.futures_create_order(
-                symbol=self.symbol, side=close_side, type=ORDER_TYPE_MARKET,
-                quantity=format_qty(self.step_size, abs(qty)),
-                reduceOnly="true"
-            )
-            logging.info(f"Orden MARKET de cierre enviada. Razón: {reason}")
-        except Exception as e:
-            logging.error(f"Error en _close_position_manual: {e}")
-            await self.telegram_handler._send_message(f"🚨 <b>ERROR</b>\nFallo al intentar cierre manual ({reason}).")
 
     # --- Lógica de Riesgo/Estrategia (Se moverá a risk.py) ---
 
@@ -476,7 +298,8 @@ class BotControllerV70:
                 tp_prices_fmt = [float(format_price(self.tick_size, tp)) for tp in tp_prices if tp is not None]
 
                 logging.info(f"!!! SEÑAL !!! {entry_type} {side} ; qty {qty} ; SL {sl} ; TPs {tp_prices_fmt}")
-                await self._place_bracket_order(side, qty, current_price, sl, tp_prices_fmt, entry_type)
+                # --- CAMBIO v70: Llamar al OrdersManager ---
+                await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tp_prices_fmt, entry_type)
 
     async def _daily_loss_exceeded(self, balance):
         total_pnl = self.state.current_position_info.get("total_pnl", 0)
@@ -589,7 +412,8 @@ class BotControllerV70:
                     self.save_state()
 
                     if tp_hit_count == 2 and not self.state.sl_moved_to_be:
-                        await self._move_sl_to_be(qty)
+                        # --- CAMBIO v70: Llamar al OrdersManager ---
+                        await self.orders_manager.move_sl_to_be(qty)
 
                 if (not self.state.sl_moved_to_be and 
                     self.state.current_position_info.get("entry_type", "").startswith("Ranging")):
@@ -697,7 +521,16 @@ class BotControllerV70:
 
         self.client = await AsyncClient.create(API_KEY, API_SECRET, testnet=TESTNET_MODE)
         self.bsm = BinanceSocketManager(self.client)
-        await self._get_exchange_info()
+        await self._get_exchange_info() # Obtiene tick_size y step_size
+
+        # --- CAMBIO v70: Inicializar el OrdersManager AHORA ---
+        self.orders_manager = OrdersManager(
+            client=self.client,
+            state=self.state,
+            telegram_handler=self.telegram_handler,
+            config=self # Pasa toda la instancia del bot como config
+        )
+
         self.load_state() # Carga el estado en self.state
 
         if not TESTNET_MODE:
@@ -727,7 +560,7 @@ class BotControllerV70:
         tasks = []
         tasks.append(asyncio.create_task(self.timed_tasks_loop()))
         tasks.append(asyncio.create_task(self.account_poller_loop()))
-        tasks.append(asyncio.create_task(self.telegram_handler.start_polling())) # <-- Tarea de Telegram
+        tasks.append(asyncio.create_task(self.telegram_handler.start_polling()))
         tasks.append(asyncio.create_task(self.run_user_data_loop()))
 
         logging.info("Connecting WS (Klines) 1m...")
