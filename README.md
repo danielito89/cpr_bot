@@ -1,61 +1,192 @@
-Trading bot para Binance Futures (testnet)
+# CPRBot (v65) - Bot de Trading para Binance Futures
 
-1. Estrategia:
-La estrategia del bot es un modelo híbrido que combina Pivotes Camarilla con un filtro de Media Móvil Exponencial (EMA) y un filtro de Volumen.
-Intenta operar de dos maneras diferentes, dependiendo de dónde se encuentre el precio en relación con los niveles de Camarilla:
+Este es un bot de trading algorítmico, totalmente asíncrono, diseñado para operar en Binance Futures. Utiliza una estrategia híbrida que combina Pivotes Camarilla y CPR (Central Pivot Range) con filtros de tendencia (EMA) y volumen (Mediana de USDT).
 
-Operativa de Rango (Mean Reversion):
+## ⚠️ Advertencia de Riesgo Fundamental
 
-Señal Larga: Si el precio cae al nivel L3 (soporte de rango) Y el precio está por encima de la EMA(50) Y el volumen es alto, el bot compra, esperando que el precio "rebote" hacia el centro (P).
+**NO ES UN CONSEJO FINANCIERO. ÚSELO BAJO SU PROPIO RIESGO.**
+El trading de futuros es extremadamente arriesgado y puede resultar en la pérdida total de su capital. Este software se proporciona "tal cual", sin garantías de ningún tipo.
 
-Señal Corta: Si el precio sube al nivel H3 (resistencia de rango) Y el precio está por debajo de la EMA(50) Y el volumen es alto, el bot vende, esperando que el precio "rebote" hacia el centro (P).
+Se recomienda encarecidamente:
+1.  Probar exhaustivamente en **Testnet** (aunque los datos de volumen no son fiables).
+2.  Ejecutar la validación con el `backtester.py` incluido.
+3.  Si decide operar en **Mainnet (dinero real)**, comience con los parámetros de riesgo más bajos posibles (`investment_pct = 0.01`, `leverage = 3`) y monitoree de cerca.
 
-Operativa de Breakout (Ruptura):
+---
 
-Señal Larga: Si el precio supera el nivel H4 (ruptura alcista) Y el precio está por encima de la EMA(50) Y el volumen es alto, el bot compra, esperando que la tendencia continúe.
+## ⚙️ Características Principales
 
-Señal Corta: Si el precio rompe el nivel L4 (ruptura bajista) Y el precio está por debajo de la EMA(50) Y el volumen es alto, el bot vende, esperando que la tendencia continúe.
+* **100% Asíncrono:** Construido con `asyncio`, `httpx` y `python-binance` para un alto rendimiento y bajo consumo de recursos.
+* **Estrategia Híbrida:** Reacciona tanto a escenarios de rango (L3/H3) como de ruptura (L4/H4) en los pivotes Camarilla.
+* **Filtros de Estrategia:**
+    * **Filtro de Tendencia (EMA 20):** Se aplica *solo* a las operaciones de breakout (L4/H4) para operar a favor de la tendencia.
+    * **Filtro de Volumen (Mediana de USDT):** Protege contra entradas sin "convicción". Utiliza la **mediana** del volumen en USDT de 1m (últimos 60p) para ser robusto contra los *glitches* y valores atípicos.
+* **Gestión de Riesgo Avanzada:**
+    * **Stop-Loss a Break-Even:** Mueve automáticamente el SL al precio de entrada después de que se alcanza el **TP2**.
+    * **Stop por Tiempo (Time Stop):** Cierra automáticamente las operaciones de *rango* (L3/H3) si no se han movido a BE después de 6 horas.
+    * **Límite de Pérdida Diaria:** Pausa la apertura de nuevas operaciones si el PnL del día alcanza un umbral negativo.
+* **Persistencia de Estado:** Guarda el estado completo del bot (`bot_state_v65.json`) de forma atómica, permitiendo que el bot se reinicie y continúe gestionando posiciones abiertas.
+* **Control Total por Telegram:** Permite el monitoreo y control en tiempo real a través de comandos de bot.
 
-En ambos casos, la EMA(50) actúa como un filtro de tendencia general: el bot solo buscará largos si el precio está por encima de la media móvil y solo buscará cortos si está por debajo.
+---
 
-¿Ajusta por Volumen?
-Sí, pero más que "ajustar", lo utiliza como un filtro de confirmación crucial. El bot no entra en ninguna operación a menos que el volumen confirme el movimiento.
+## 🛠️ Instalación y Configuración
 
-Así es como funciona en el código:
+El bot está diseñado para correr como un servicio `systemd` en un servidor Linux (ej. Ubuntu en AWS Lightsail).
 
-Cálculo de Volumen Promedio: El bot calcula el volumen promedio de las últimas 20 velas de 1 hora (_get_avg_volume_1h).
+### 1. Requisitos Previos
 
-Factor de Volumen: Tiene un multiplicador (volume_factor, por defecto 1.5).
+* Un servidor Linux (se recomienda Ubuntu 22.04).
+* Python 3.10 o superior.
+* Una cuenta de Binance Futures (Mainnet).
 
-Confirmación: Al cerrarse cada vela de 1 minuto, comprueba: volume_confirmed = current_volume > (avg_vol * self.volume_factor)
+### 2. Pasos de Instalación
 
-Todas las 4 señales de entrada (Rango Largo/Corto, Breakout Largo/Corto) requieren que volume_confirmed sea True para poder ejecutarse.
+1.  Clonar el repositorio:
+    ```bash
+    git clone [URL_DE_TU_REPOSITORIO]
+    cd cpr_bot
+    ```
 
-2. Seguridad
-La seguridad del bot es buena y sigue las mejores prácticas modernas para un proyecto de este tipo.
+2.  Crear y activar un entorno virtual (venv):
+    ```bash
+    python3.10 -m venv venv
+    source venv/bin/activate
+    ```
 
-Gestión de Secretos: No hay claves de API ni tokens de Telegram escritos en el código. Todo se carga de forma segura desde las variables de entorno (os.environ.get). Esto es lo más importante.
+3.  Instalar las dependencias:
+    ```bash
+    # (Asegúrate de tener python3.10-dev y build-essential si la compilación falla)
+    # sudo apt install python3.10-dev build-essential
+    
+    pip install --upgrade pip setuptools wheel
+    pip install python-binance httpx tenacity "pandas<2.2"
+    ```
 
-Autenticación de Comandos: El bot no obedece a cualquiera. En la función _handle_telegram_message, comprueba explícitamente que el chat_id del mensaje sea el mismo que el TELEGRAM_CHAT_ID configurado en el entorno. Si otra persona encuentra tu bot y le escribe, el bot ignorará el comando.
+### 3. Configuración del Servicio
 
-Comunicaciones Cifradas: Todas las conexiones, tanto a Binance como a Telegram, se realizan sobre HTTPS, por lo que el tráfico está cifrado.
+El bot se ejecuta como un servicio `systemd` para asegurar que corra 24/7 y se reinicie automáticamente.
 
-3. Estabilidad
-La estabilidad del bot es excelente y está diseñado para ser muy robusto.
+1.  Edita el archivo de servicio `cpr_bot.service` para asegurarte de que los nombres de archivo coincidan con la última versión (ej. `prod_bot_v65.py`).
 
-Resiliencia de Red (Binance): El decorador @tenacity_retry_decorator_async se aplica a todas las llamadas críticas a la API de Binance (obtener klines, calcular pivotes, obtener balance, etc.). Si Binance da un error temporal o tu servidor tiene un micro-corte de red, el bot no se caerá; reintentará la llamada de forma inteligente (con espera exponencial) hasta 5 veces antes de fallar.
+    ```ini
+    [Unit]
+    Description=CPR Trading Bot Service v65
+    After=network.target
+    
+    [Service]
+    Type=simple
+    User=ubuntu
+    WorkingDirectory=/home/ubuntu/cpr_bot
+    
+    # Asegúrate de que esta ruta apunte a tu script v65
+    ExecStart=/home/ubuntu/cpr_bot/venv/bin/python /home/ubuntu/cpr_bot/prod_bot_v65.py
+    
+    # --- ¡VARIABLES DE ENTORNO CRÍTICAS! ---
+    # Claves de MAINNET
+    Environment="BINANCE_API_KEY=TU_CLAVE_API_MAINNET"
+    Environment="BINANCE_SECRET_KEY=TU_SECRETO_API_MAINNET"
+    
+    # Claves de Telegram
+    Environment="TELEGRAM_BOT_TOKEN=TU_TOKEN_DE_TELEGRAM"
+    Environment="TELEGRAM_CHAT_ID=TU_ID_DE_CHAT_NUMERICO"
+    
+    # Configuración del Bot
+    Environment="TESTNET_MODE=false" # ¡Poner en 'false' para Mainnet!
+    Environment="DAILY_LOSS_LIMIT_PCT=5.0" # 5%
+    
+    Environment="PYTHONUNBUFFERED=1" 
+    Restart=always 
+    RestartSec=10
+    
+    [Install]
+    WantedBy=multi-user.target
+    ```
 
-Reconexión de Websocket: El bucle principal async def run utiliza async with self.bsm.kline_socket(...). Este "context manager" de la librería de Binance está diseñado específicamente para manejar reconexiones automáticamente. Si la conexión del websocket se cae, la librería la reestablecerá por su cuenta, asegurando que el bot no se quede "ciego".
+2.  Copia el archivo al directorio de `systemd`:
+    ```bash
+    sudo cp cpr_bot.service /etc/systemd/system/cpr_bot.service
+    ```
 
-Guardado de Estado "Atómico": La función save_state primero escribe en un archivo temporal (.tmp) y solo cuando tiene éxito, lo mueve para reemplazar al archivo de estado principal. Esto previene que tu archivo bot_state_v55.json se corrompa si el bot se apaga o crashea justo en mitad de un guardado.
+### 4. Configuración de Seguridad de Binance (Obligatorio)
 
-Apagado Limpio (Graceful Shutdown): El bot incluye manejadores de señales para SIGINT y SIGTERM. Cuando systemd (el gestor de servicios de tu servidor) le dice al bot que se detenga (sudo systemctl stop cpr_bot.service), el bot lo detecta, llama a await self.shutdown(), guarda su estado por última vez y se cierra limpiamente.
+La API de Mainnet **NO** funcionará si no haces esto:
 
-4. Consumo de Recursos
-El consumo de recursos es extremadamente bajo.
+1.  **Obtén la IP Estática** de tu servidor (en Lightsail, crea una "Static IP" y asóciala).
+2.  **Ve a Binance > Gestión de API**.
+3.  Crea una nueva clave de API.
+4.  Selecciona **"Restringir el acceso a direcciones IP fiables"**.
+5.  Pega la IP estática de tu servidor en la lista blanca.
+6.  **Habilita Permisos:** Asegúrate de que *solo* estén marcadas `[X] Habilitar lectura` y `[X] Habilitar futuros`.
+7.  **IMPORTANTE:** Asegúrate de que `[ ] Habilitar Retiros` esté **DESMARCADO**.
 
-CPU: El bot está construido sobre asyncio. Esto significa que pasa el 99.9% de su tiempo "dormido" (en estado await), sin consumir CPU. Solo se "despierta" en ráfagas de milisegundos para procesar un evento (un tick de websocket, una respuesta de Telegram) y se vuelve a dormir.
+---
 
-Memoria (RAM): El uso de memoria es muy bajo. No usa librerías pesadas como pandas. El estado que guarda en memoria (pivotes, indicadores, estado de posición) es un diccionario de Python muy pequeño.
+## 🚀 Uso
 
-Conclusión de Recursos: Este bot podría correr sin problemas en el servidor VPS más pequeño y barato que exista (como un t2.micro de AWS o similar) y aún le sobraría el 90% de los recursos.
+Una vez configurado el archivo `.service`:
+
+1.  **Recargar Systemd:**
+    ```bash
+    sudo systemctl daemon-reload
+    ```
+
+2.  **Iniciar el Bot:**
+    ```bash
+    sudo systemctl start cpr_bot.service
+    ```
+
+3.  **Monitorear Logs en Vivo:**
+    ```bash
+    journalctl -u cpr_bot.service -f
+    ```
+
+4.  **Habilitar Auto-arranque** (para que el bot se inicie si el servidor se reinicia):
+    ```bash
+    sudo systemctl enable cpr_bot.service
+    ```
+
+---
+
+## 🤖 Comandos de Telegram
+
+Puedes controlar el bot en tiempo real desde el chat de Telegram que configuraste:
+
+* `/status` - Muestra un informe completo: estado (activo/pausado), PnL del día, indicadores actuales y detalles de la posición abierta.
+* `/pivots` - Muestra los niveles de pivote Camarilla (H1-L6) y CPR del día.
+* `/pausar` - Pausa el bot. No buscará *nuevas* entradas. La gestión de posiciones activas continúa.
+* `/resumir` - Reanuda la búsqueda de nuevas entradas.
+* `/cerrar` - Cierra la posición actualmente abierta a precio de mercado. (¡Comando de emergencia!).
+* `/forzar_indicadores` - Fuerza un recálculo inmediato de EMA, ATR y Mediana de Volumen.
+* `/forzar_pivotes` - Fuerza un recálculo inmediato de los pivotes diarios.
+* `/limit` - Muestra el límite de pérdida diaria configurado (%).
+* `/restart` - Apaga y reinicia el bot de forma segura (systemd lo reiniciará).
+
+---
+
+## 📈 Backtesting
+
+El repositorio incluye `download_data.py` y `backtester.py` para validar la estrategia.
+
+1.  **Instalar Dependencias:**
+    ```bash
+    source venv/bin/activate
+    # (Asegúrate de haber instalado python3.10-dev build-essential)
+    pip install "pandas<2.2"
+    ```
+
+2.  **Descargar Datos Históricos:**
+    *Aviso: Este proceso usa las claves de Mainnet, tarda mucho (horas) y consume mucha RAM (requiere `swap` en servidores pequeños).*
+    ```bash
+    # (Modifica START_DATE en el script si quieres menos datos)
+    BINANCE_API_KEY="..." BINANCE_SECRET_KEY="..." python download_data.py
+    ```
+
+3.  **Ejecutar el Backtest:**
+    ```bash
+    python backtester.py
+    ```
+    El script imprimirá un resumen de resultados (PnL Neto, Win Rate, etc.) y guardará un CSV (`backtest_results_v65.csv`) con cada trade.
+
+4.  **Optimizar:**
+    Abre `backtester.py` y edita los parámetros en el **"Bloque 1: Configuración"** (ej. `EMA_PERIOD`, `VOLUME_FACTOR`) para encontrar la configuración más rentable.
