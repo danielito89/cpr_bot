@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # main_v81.py
-# Versión: v81 (Gestión Dinámica de Pares - Ahorro de RAM)
+# Versión: v81.1 (Gestión Dinámica + Fix Crítico Websocket Futures)
 
 import os
 import sys
@@ -27,7 +27,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TESTNET_MODE = os.environ.get("TESTNET_MODE", "false").lower() in ("1", "true", "yes")
 
-# PARES INICIALES (Opcional: Puedes dejarlo vacío y empezar con /start en Telegram)
+# PARES INICIALES
 INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"] 
 
 # Configuración Ganadora (Backtest 6 Meses)
@@ -63,10 +63,22 @@ class BotOrchestrator:
         self.DEFAULT_CONFIG = DEFAULT_CONFIG # Para acceso desde Handler
 
     async def start(self):
-        logging.info(f"Iniciando Orquestador v81 (Dinámico)...")
+        logging.info(f"Iniciando Orquestador v81.1 (Dinámico + Fix WS)...")
         
+        # 1. Inicializar Cliente Binance
         self.client = await AsyncClient.create(API_KEY, API_SECRET, testnet=TESTNET_MODE)
+        
+        # --- FIX CRÍTICO: Forzar Websocket de FUTUROS ---
         self.bsm = BinanceSocketManager(self.client)
+        
+        if TESTNET_MODE:
+            self.bsm.STREAM_URL = 'wss://stream.binancefuture.com/ws/'
+            logging.warning("BSM configurado para TESTNET Futures")
+        else:
+            # URL de Mainnet Futures (¡Vital!)
+            self.bsm.STREAM_URL = 'wss://fstream.binance.com/ws/'
+            logging.info("BSM configurado para MAINNET Futures")
+        # -----------------------------------------------
         
         self.telegram_handler = TelegramHandler(
             orchestrator=self,
@@ -81,7 +93,7 @@ class BotOrchestrator:
         for sym in INITIAL_SYMBOLS:
             await self.add_pair(sym)
 
-        await self.telegram_handler._send_message(f"🚀 <b>Orquestador v81 Iniciado</b>\nPares: {', '.join(self.strategies.keys())}")
+        await self.telegram_handler._send_message(f"🚀 <b>Orquestador v81.1 Iniciado</b>\nPares: {', '.join(self.strategies.keys())}")
 
         try:
             # Mantener vivo el orquestador esperando a Telegram
