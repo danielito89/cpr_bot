@@ -1,192 +1,124 @@
-# CPRBot (v70) - Bot de Trading para Binance Futures
+# CPRBot (v81) - Bot de Trading Multi-Par para Binance Futures
 
-Este es un bot de trading algorítmico, totalmente asíncrono, diseñado para operar en Binance Futures. Utiliza una estrategia híbrida que combina Pivotes Camarilla y CPR (Central Pivot Range) con filtros de tendencia (EMA) y volumen (Mediana de USDT).
+CPRBot es un sistema de trading algorítmico avanzado, modular y totalmente asíncrono, diseñado para operar múltiples pares simultáneamente en Binance Futures.
 
-## ⚠️ Advertencia de Riesgo Fundamental
+Utiliza una estrategia híbrida que combina **Pivotes Camarilla** y **CPR (Central Pivot Range)** con filtros de tendencia (EMA), volumen (Mediana de USDT) y confirmación de velas.
 
-**NO ES UN CONSEJO FINANCIERO. ÚSELO BAJO SU PROPIO RIESGO.**
-El trading de futuros es extremadamente arriesgado y puede resultar en la pérdida total de su capital. Este software se proporciona "tal cual", sin garantías de ningún tipo.
+## ⚠️ Advertencia de Riesgo
 
-Se recomienda encarecidamente:
-1.  Probar exhaustivamente en **Testnet** (aunque los datos de volumen no son fiables).
-2.  Ejecutar la validación con el `backtester.py` incluido.
-3.  Si decide operar en **Mainnet (dinero real)**, comience con los parámetros de riesgo más bajos posibles (`investment_pct = 0.01`, `leverage = 3`) y monitoree de cerca.
-
----
-
-## ⚙️ Características Principales
-
-* **100% Asíncrono:** Construido con `asyncio`, `httpx` y `python-binance` para un alto rendimiento y bajo consumo de recursos.
-* **Estrategia Híbrida:** Reacciona tanto a escenarios de rango (L3/H3) como de ruptura (L4/H4) en los pivotes Camarilla.
-* **Filtros de Estrategia:**
-    * **Filtro de Tendencia (EMA 20):** Se aplica *solo* a las operaciones de breakout (L4/H4) para operar a favor de la tendencia.
-    * **Filtro de Volumen (Mediana de USDT):** Protege contra entradas sin "convicción". Utiliza la **mediana** del volumen en USDT de 1m (últimos 60p) para ser robusto contra los *glitches* y valores atípicos.
-* **Gestión de Riesgo Avanzada:**
-    * **Stop-Loss a Break-Even:** Mueve automáticamente el SL al precio de entrada después de que se alcanza el **TP2**.
-    * **Stop por Tiempo (Time Stop):** Cierra automáticamente las operaciones de *rango* (L3/H3) si no se han movido a BE después de 6 horas.
-    * **Límite de Pérdida Diaria:** Pausa la apertura de nuevas operaciones si el PnL del día alcanza un umbral negativo.
-* **Persistencia de Estado:** Guarda el estado completo del bot (`bot_state_v65.json`) de forma atómica, permitiendo que el bot se reinicie y continúe gestionando posiciones abiertas.
-* **Control Total por Telegram:** Permite el monitoreo y control en tiempo real a través de comandos de bot.
+**ESTE SOFTWARE ES PARA FINES EDUCATIVOS. ÚSELO BAJO SU PROPIO RIESGO.**
+El trading de futuros conlleva un alto riesgo de pérdida de capital.
+* **Estado:** Probado en Mainnet (v81).
+* **Recomendación:** Inicie siempre con el mínimo apalancamiento y capital (`investment_pct=0.01`, `leverage=3`) hasta familiarizarse con el sistema.
 
 ---
 
-## 🛠️ Instalación y Configuración
+## 🚀 Novedades en v81: Arquitectura Dinámica
 
-El bot está diseñado para correr como un servicio `systemd` en un servidor Linux (ej. Ubuntu en AWS Lightsail).
-
-### 1. Requisitos Previos
-
-* Un servidor Linux (se recomienda Ubuntu 22.04).
-* Python 3.10 o superior.
-* Una cuenta de Binance Futures (Mainnet).
-
-### 2. Pasos de Instalación
-
-1.  Clonar el repositorio:
-    ```bash
-    git clone [URL_DE_TU_REPOSITORIO]
-    cd cpr_bot
-    ```
-
-2.  Crear y activar un entorno virtual (venv):
-    ```bash
-    python3.10 -m venv venv
-    source venv/bin/activate
-    ```
-
-3.  Instalar las dependencias:
-    ```bash
-    # (Asegúrate de tener python3.10-dev y build-essential si la compilación falla)
-    # sudo apt install python3.10-dev build-essential
-    
-    pip install --upgrade pip setuptools wheel
-    pip install python-binance httpx tenacity "pandas<2.2"
-    ```
-
-### 3. Configuración del Servicio
-
-El bot se ejecuta como un servicio `systemd` para asegurar que corra 24/7 y se reinicie automáticamente.
-
-1.  Edita el archivo de servicio `cpr_bot.service` para asegurarte de que los nombres de archivo coincidan con la última versión (ej. `prod_bot_v65.py`).
-
-    ```ini
-    [Unit]
-    Description=CPR Trading Bot Service v65
-    After=network.target
-    
-    [Service]
-    Type=simple
-    User=ubuntu
-    WorkingDirectory=/home/ubuntu/cpr_bot
-    
-    # Asegúrate de que esta ruta apunte a tu script v65
-    ExecStart=/home/ubuntu/cpr_bot/venv/bin/python /home/ubuntu/cpr_bot/prod_bot_v65.py
-    
-    # --- ¡VARIABLES DE ENTORNO CRÍTICAS! ---
-    # Claves de MAINNET
-    Environment="BINANCE_API_KEY=TU_CLAVE_API_MAINNET"
-    Environment="BINANCE_SECRET_KEY=TU_SECRETO_API_MAINNET"
-    
-    # Claves de Telegram
-    Environment="TELEGRAM_BOT_TOKEN=TU_TOKEN_DE_TELEGRAM"
-    Environment="TELEGRAM_CHAT_ID=TU_ID_DE_CHAT_NUMERICO"
-    
-    # Configuración del Bot
-    Environment="TESTNET_MODE=false" # ¡Poner en 'false' para Mainnet!
-    Environment="DAILY_LOSS_LIMIT_PCT=5.0" # 5%
-    
-    Environment="PYTHONUNBUFFERED=1" 
-    Restart=always 
-    RestartSec=10
-    
-    [Install]
-    WantedBy=multi-user.target
-    ```
-
-2.  Copia el archivo al directorio de `systemd`:
-    ```bash
-    sudo cp cpr_bot.service /etc/systemd/system/cpr_bot.service
-    ```
-
-### 4. Configuración de Seguridad de Binance (Obligatorio)
-
-La API de Mainnet **NO** funcionará si no haces esto:
-
-1.  **Obtén la IP Estática** de tu servidor (en Lightsail, crea una "Static IP" y asóciala).
-2.  **Ve a Binance > Gestión de API**.
-3.  Crea una nueva clave de API.
-4.  Selecciona **"Restringir el acceso a direcciones IP fiables"**.
-5.  Pega la IP estática de tu servidor en la lista blanca.
-6.  **Habilita Permisos:** Asegúrate de que *solo* estén marcadas `[X] Habilitar lectura` y `[X] Habilitar futuros`.
-7.  **IMPORTANTE:** Asegúrate de que `[ ] Habilitar Retiros` esté **DESMARCADO**.
+La versión v81 introduce un **Orquestador Central** que permite:
+* **Multi-Par Real:** Operar BTC, ETH, SOL, y cualquier otro par simultáneamente.
+* **Gestión Dinámica:** Iniciar (`/start`) y detener (`/stop`) bots específicos desde Telegram sin reiniciar el servidor.
+* **Eficiencia de Recursos:** Los bots detenidos liberan memoria RAM completamente, ideal para servidores pequeños (como AWS Lightsail).
+* **Arquitectura Modular:** Código separado en `bot_core` (lógica pura) y `telegram` (comunicación).
 
 ---
 
-## 🚀 Uso
+## ⚙️ Estrategia y Gestión de Riesgo
 
-Una vez configurado el archivo `.service`:
+El bot ejecuta una estrategia validada estadísticamente (Profit Factor > 1.6 en backtests de 6 meses):
 
-1.  **Recargar Systemd:**
-    ```bash
-    sudo systemctl daemon-reload
-    ```
+### Entradas
+1.  **Niveles Clave:** Busca rupturas en **H4/L4** (Breakout) o reversiones en **L3/H3** (Rango).
+2.  **Filtro de Tendencia:** Usa una **EMA 20** para filtrar operaciones a favor de la tendencia en breakouts.
+3.  **Filtro de Volumen:** Calcula la **Mediana de Volumen (USDT)** de los últimos 60 minutos. Solo opera si el volumen actual supera esa mediana por un factor (x1.3).
+4.  **Confirmación de Vela:** Exige que la vela de señal tenga el color correcto (Verde para Long, Roja para Short).
 
-2.  **Iniciar el Bot:**
-    ```bash
-    sudo systemctl start cpr_bot.service
-    ```
-
-3.  **Monitorear Logs en Vivo:**
-    ```bash
-    journalctl -u cpr_bot.service -f
-    ```
-
-4.  **Habilitar Auto-arranque** (para que el bot se inicie si el servidor se reinicia):
-    ```bash
-    sudo systemctl enable cpr_bot.service
-    ```
+### Salidas y Riesgo
+* **Stop-Loss a Break-Even:** Mueve automáticamente el SL a la entrada al tocar el **TP2**.
+* **Time Stop (12h):** Cierra operaciones de Rango si no han evolucionado favorablemente después de 12 horas.
+* **Protección de Balance:** Pausa el trading si el PnL diario alcanza un límite negativo predefinido (15%).
 
 ---
 
-## 🤖 Comandos de Telegram
+## 🛠️ Instalación
 
-Puedes controlar el bot en tiempo real desde el chat de Telegram que configuraste:
+### 1. Requisitos
+* Python 3.10+
+* Servidor Linux (Ubuntu recomendado)
+* Cuenta de Binance Futures
 
-* `/status` - Muestra un informe completo: estado (activo/pausado), PnL del día, indicadores actuales y detalles de la posición abierta.
-* `/pivots` - Muestra los niveles de pivote Camarilla (H1-L6) y CPR del día.
-* `/pausar` - Pausa el bot. No buscará *nuevas* entradas. La gestión de posiciones activas continúa.
-* `/resumir` - Reanuda la búsqueda de nuevas entradas.
-* `/cerrar` - Cierra la posición actualmente abierta a precio de mercado. (¡Comando de emergencia!).
-* `/forzar_indicadores` - Fuerza un recálculo inmediato de EMA, ATR y Mediana de Volumen.
-* `/forzar_pivotes` - Fuerza un recálculo inmediato de los pivotes diarios.
-* `/limit` - Muestra el límite de pérdida diaria configurado (%).
-* `/restart` - Apaga y reinicia el bot de forma segura (systemd lo reiniciará).
+### 2. Instalación
+```bash
+# Clonar repositorio
+git clone [URL_DEL_REPO]
+cd cpr_bot
 
----
+# Crear entorno virtual
+python3 -m venv venv
+source venv/bin/activate
 
-## 📈 Backtesting
+# Instalar dependencias
+pip install --upgrade pip setuptools wheel
+pip install python-binance httpx tenacity "pandas<2.2"
 
-El repositorio incluye `download_data.py` y `backtester.py` para validar la estrategia.
 
-1.  **Instalar Dependencias:**
-    ```bash
-    source venv/bin/activate
-    # (Asegúrate de haber instalado python3.10-dev build-essential)
-    pip install "pandas<2.2"
-    ```
+3. Configuración del Servicio (Systemd)
+Edite el archivo cpr_bot.service:
 
-2.  **Descargar Datos Históricos:**
-    *Aviso: Este proceso usa las claves de Mainnet, tarda mucho (horas) y consume mucha RAM (requiere `swap` en servidores pequeños).*
-    ```bash
-    # (Modifica START_DATE en el script si quieres menos datos)
-    BINANCE_API_KEY="..." BINANCE_SECRET_KEY="..." python download_data.py
-    ```
+[Service]
+WorkingDirectory=/ruta/a/cpr_bot/cpr_bot_v81
+ExecStart=/ruta/a/cpr_bot/venv/bin/python /ruta/a/cpr_bot/cpr_bot_v81/main_v81.py
+Environment="BINANCE_API_KEY=TU_API_KEY"
+Environment="BINANCE_SECRET_KEY=TU_SECRET_KEY"
+Environment="TELEGRAM_BOT_TOKEN=TU_TOKEN"
+Environment="TELEGRAM_CHAT_ID=TU_CHAT_ID"
+Environment="TESTNET_MODE=false"
 
-3.  **Ejecutar el Backtest:**
-    ```bash
-    python backtester.py
-    ```
-    El script imprimirá un resumen de resultados (PnL Neto, Win Rate, etc.) y guardará un CSV (`backtest_results_v65.csv`) con cada trade.
+4. Seguridad en Binance
+Para habilitar futuros, debe añadir la IP Estática de su servidor a la lista blanca de la API de Binance.
 
-4.  **Optimizar:**
-    Abre `backtester.py` y edita los parámetros en el **"Bloque 1: Configuración"** (ej. `EMA_PERIOD`, `VOLUME_FACTOR`) para encontrar la configuración más rentable.
+Permisos requeridos: Enable Reading, Enable Futures.
+
+NO habilitar: Enable Withdrawals.
+
+🤖 Comandos de Telegram (Orquestador)
+El bot se controla 100% desde Telegram. No necesita acceder a la terminal.
+
+Gestión de Pares
+/start SIMBOLO - Inicia un nuevo bot para ese par (ej. /start SOLUSDT).
+
+/stop SIMBOLO - Detiene el bot y libera memoria (ej. /stop ETHUSDT).
+
+/list - Muestra todos los pares activos actualmente.
+
+Monitoreo
+/status - Muestra el estado (PnL, Posición, Indicadores) de todos los bots activos.
+
+/status SIMBOLO - Muestra detalles de un par específico.
+
+/pivots - Muestra los niveles Camarilla/CPR de todos los pares activos.
+
+Control Global
+/pausar - Pausa la búsqueda de nuevas entradas en todos los bots (mantiene gestión de posiciones abiertas).
+
+/resumir - Reanuda la búsqueda de entradas.
+
+/cerrar SIMBOLO - Cierre de Emergencia: Cierra la posición de ese par a mercado inmediatamente.
+
+/restart - Reinicia el proceso del Orquestador completo.
+
+📂 Estructura del Proyecto
+Plaintext
+
+cpr_bot_v81/
+├── main_v81.py           # Orquestador principal (Entrypoint)
+├── bot_core/             # Módulos de lógica pura
+│   ├── symbol_strategy.py # Clase que instancia cada bot individual
+│   ├── risk.py           # Lógica de entradas, salidas y filtros
+│   ├── orders.py         # Ejecución de órdenes en Binance
+│   ├── state.py          # Gestión de persistencia (JSON)
+│   ├── pivots.py         # Cálculos matemáticos de niveles
+│   ├── indicators.py     # Cálculos de EMA, ATR, Volumen
+│   └── streams.py        # Gestión de WebSockets (Klines y User Data)
+└── telegram/
+    └── handler.py        # Interfaz de chat y comandos
