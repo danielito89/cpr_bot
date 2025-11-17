@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # bot_core/symbol_strategy.py
-# Versión: v82 (Incluye setup automático de apalancamiento y margen)
+# Versión: v82.1 (Fix: Corregido error 'no attribute config' en timed_tasks_loop)
 
 import os
 import sys
@@ -96,24 +96,21 @@ class SymbolStrategy:
         if self.orders_manager:
             await self.orders_manager.close_position_manual(reason)
 
-    # --- Configuración Inicial de Binance (v82) ---
+    # --- Configuración Inicial de Binance ---
     async def _setup_exchange_settings(self):
         """Fuerza el apalancamiento y el tipo de margen en Binance."""
         logging.info(f"[{self.symbol}] Configurando Exchange: Margen Cruzado, Leverage {self.leverage}x...")
         
-        # 1. Configurar Apalancamiento
         try:
             await self.client.futures_change_leverage(symbol=self.symbol, leverage=self.leverage)
             logging.info(f"[{self.symbol}] Apalancamiento fijado a {self.leverage}x")
         except BinanceAPIException as e:
             logging.warning(f"[{self.symbol}] No se pudo cambiar apalancamiento: {e}")
 
-        # 2. Configurar Tipo de Margen (CROSSED o ISOLATED)
         try:
             await self.client.futures_change_margin_type(symbol=self.symbol, marginType='CROSSED')
             logging.info(f"[{self.symbol}] Margen fijado a CROSSED")
         except BinanceAPIException as e:
-            # El error -4046 significa "No se necesita cambio" (ya está así), lo ignoramos.
             if e.code != -4046:
                 logging.warning(f"[{self.symbol}] Aviso sobre margen: {e}")
 
@@ -236,7 +233,8 @@ class SymbolStrategy:
                 if now.time() >= dt_time(0, 2) and (self.state.last_pivots_date is None or now.date() > self.state.last_pivots_date):
                     await self.calculate_pivots()
 
-                if (now - last_indicator_update).total_seconds() >= self.config['indicator_update_interval_minutes'] * 60:
+                # --- FIX: Usar self.indicator_update_interval_minutes (no self.config) ---
+                if (now - last_indicator_update).total_seconds() >= self.indicator_update_interval_minutes * 60:
                     await self.update_indicators()
                     last_indicator_update = now
                 
@@ -272,10 +270,7 @@ class SymbolStrategy:
     async def run(self):
         try:
             await self._get_exchange_info()
-            
-            # --- NUEVO v82: Forzar configuración de cuenta ---
-            await self._setup_exchange_settings()
-            # ---------------------------------------------
+            await self._setup_exchange_settings() # Setup de leverage/margen
 
             self.orders_manager = OrdersManager(
                 client=self.client,
