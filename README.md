@@ -1,4 +1,4 @@
-# CPRBot (v65) - Bot de Trading para Binance Futures
+# CPRBot (v70) - Bot de Trading para Binance Futures
 
 Este es un bot de trading algorítmico, totalmente asíncrono, diseñado para operar en Binance Futures. Utiliza una estrategia híbrida que combina Pivotes Camarilla y CPR (Central Pivot Range) con filtros de tendencia (EMA) y volumen (Mediana de USDT).
 
