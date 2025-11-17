@@ -1,6 +1,8 @@
 import logging
 import time
 import csv
+import os # Importar os para la comprobación de archivos CSV
+from datetime import datetime # Importar datetime
 from binance.exceptions import BinanceAPIException
 
 # Importar nuestras constantes y formateadores
@@ -24,7 +26,7 @@ class RiskManager:
         self.config = bot_controller # El bot principal tiene la config
 
     async def seek_new_trade(self, kline):
-        """Lógica de búsqueda de nuevas operaciones."""
+        """Lógica de búsqueda de nuevas operaciones (v71 con filtro de vela)."""
         if self.state.trading_paused: return
         if time.time() < self.state.trade_cooldown_until: return
         if not self.state.daily_pivots: return
@@ -37,8 +39,14 @@ class RiskManager:
             if self.state.is_in_position: return
 
             try:
+                # --- v71: Añadimos 'open' para dirección de vela ---
+                open_price = float(kline["o"])
                 current_price = float(kline["c"])
                 current_volume = float(kline["q"]) # Volumen USDT
+
+                is_green_candle = current_price > open_price
+                is_red_candle = current_price < open_price
+                # --- Fin cambio v71 ---
 
                 median_vol = self.state.cached_median_vol
                 if not median_vol or median_vol == 0:
@@ -53,37 +61,45 @@ class RiskManager:
                 ema = self.state.cached_ema
                 side, entry_type, sl, tp_prices = None, None, None, []
 
+                # --- v71: Lógica de trading actualizada con dirección de vela ---
+
+                # breakout long
                 if current_price > p["H4"]:
-                    if volume_confirmed and current_price > ema:
+                    if volume_confirmed and current_price > ema and is_green_candle: # <-- v71
                         side, entry_type = SIDE_BUY, "Breakout Long"
                         sl = current_price - atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price + atr * self.config.breakout_tp_mult]
                     else:
-                        logging.info(f"[DEBUG H4] Rechazado. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f}), EMA: {current_price > ema}")
+                        logging.info(f"[DEBUG H4] Rechazado. Vol: {volume_confirmed}, EMA: {current_price > ema}, VelaVerde: {is_green_candle}")
 
+                # breakout short
                 elif current_price < p["L4"]:
-                    if volume_confirmed and current_price < ema:
+                    if volume_confirmed and current_price < ema and is_red_candle: # <-- v71
                         side, entry_type = SIDE_SELL, "Breakout Short"
                         sl = current_price + atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price - atr * self.config.breakout_tp_mult]
                     else:
-                        logging.info(f"[DEBUG L4] Rechazado. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f}), EMA: {current_price < ema}")
+                        logging.info(f"[DEBUG L4] Rechazado. Vol: {volume_confirmed}, EMA: {current_price < ema}, VelaRoja: {is_red_candle}")
 
+                # ranging long
                 elif current_price <= p["L3"]:
-                    if volume_confirmed:
+                    if volume_confirmed and is_green_candle: # <-- v71
                         side, entry_type = SIDE_BUY, "Ranging Long"
                         sl = p["L4"] - atr * self.config.ranging_atr_multiplier
                         tp_prices = [p["P"], p["H1"], p["H2"]]
                     else:
-                        logging.info(f"[DEBUG L3] Rechazado. Precio OK. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f})")
+                        logging.info(f"[DEBUG L3] Rechazado. Precio OK. Vol: {volume_confirmed}, VelaVerde: {is_green_candle}")
 
+                # ranging short
                 elif current_price >= p["H3"]:
-                    if volume_confirmed:
+                    if volume_confirmed and is_red_candle: # <-- v71
                         side, entry_type = SIDE_SELL, "Ranging Short"
                         sl = p["H4"] + atr * self.config.ranging_atr_multiplier
                         tp_prices = [p["P"], p["L1"], p["L2"]]
                     else:
-                        logging.info(f"[DEBUG H3] Rechazado. Precio OK. Vol: {volume_confirmed} (Actual: {current_volume:.0f} > Req: {required_volume:.0f})")
+                        logging.info(f"[DEBUG H3] Rechazado. Precio OK. Vol: {volume_confirmed}, VelaRoja: {is_red_candle}")
+
+                # --- FIN LÓGICA ---
 
                 if side:
                     balance = await self.bot._get_account_balance() # Llama al método del bot
