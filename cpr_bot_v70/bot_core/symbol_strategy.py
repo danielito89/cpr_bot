@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # bot_core/symbol_strategy.py
-# Versión: v82.1 (Fix: Corregido error 'no attribute config' en timed_tasks_loop)
+# Versión: v90.2 (Fix Final: run() es verdaderamente NO-BLOQUEANTE)
 
 import os
 import sys
@@ -17,10 +17,9 @@ from datetime import datetime, timedelta, time as dt_time
 from binance.exceptions import BinanceAPIException
 
 from .utils import (
-    setup_logging, tenacity_retry_decorator_async, 
-    format_price, format_qty, CSV_HEADER,
-    SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET, 
-    STOP_MARKET, TAKE_PROFIT_MARKET
+    tenacity_retry_decorator_async, 
+    format_price, format_qty,
+    SIDE_BUY, SIDE_SELL
 )
 from .pivots import calculate_pivots_from_data
 from .indicators import calculate_atr, calculate_ema, calculate_median_volume
@@ -34,12 +33,11 @@ class SymbolStrategy:
         symbol,
         config,
         client,
-        bsm,
         telegram_handler
     ):
         self.symbol = symbol
         
-        # --- Desempaquetar Configuración ---
+        # Desempaquetar Configuración
         self.investment_pct = config.get("investment_pct", 0.01)
         self.leverage = config.get("leverage", 3)
         self.cpr_width_threshold = config.get("cpr_width_threshold", 0.2)
@@ -55,17 +53,13 @@ class SymbolStrategy:
         self.indicator_update_interval_minutes = config.get("indicator_update_interval_minutes", 15)
         self.daily_loss_limit_pct = config.get("DAILY_LOSS_LIMIT_PCT", 5.0)
         
-        # --- Clientes y Handlers ---
         self.client = client
-        self.bsm = bsm
         self.telegram_handler = telegram_handler
         
-        # --- Archivos ---
         BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.STATE_FILE = os.path.join(BASE_DIR, "data", f"bot_state_{symbol}.json")
         self.CSV_FILE = os.path.join(BASE_DIR, "data", f"trades_log_{symbol}.csv")
 
-        # --- Inicialización ---
         self.state = StateManager(self.STATE_FILE)
         self.orders_manager = None
         self.risk_manager = None
@@ -75,13 +69,11 @@ class SymbolStrategy:
         self.running = True
         self.tasks = []
         
-        logging.info(f"[{self.symbol}] Estrategia inicializada.")
+        logging.info(f"[{self.symbol}] Estrategia v90 inicializada.")
 
-    # --- Lógica de Estado ---
     def save_state(self): self.state.save_state()
     def load_state(self): self.state.load_state()
 
-    # --- Comandos ---
     async def pause_trading(self):
         self.state.trading_paused = True
         self.save_state()
@@ -96,25 +88,19 @@ class SymbolStrategy:
         if self.orders_manager:
             await self.orders_manager.close_position_manual(reason)
 
-    # --- Configuración Inicial de Binance ---
     async def _setup_exchange_settings(self):
-        """Fuerza el apalancamiento y el tipo de margen en Binance."""
         logging.info(f"[{self.symbol}] Configurando Exchange: Margen Cruzado, Leverage {self.leverage}x...")
-        
         try:
             await self.client.futures_change_leverage(symbol=self.symbol, leverage=self.leverage)
-            logging.info(f"[{self.symbol}] Apalancamiento fijado a {self.leverage}x")
         except BinanceAPIException as e:
             logging.warning(f"[{self.symbol}] No se pudo cambiar apalancamiento: {e}")
 
         try:
             await self.client.futures_change_margin_type(symbol=self.symbol, marginType='CROSSED')
-            logging.info(f"[{self.symbol}] Margen fijado a CROSSED")
         except BinanceAPIException as e:
             if e.code != -4046:
                 logging.warning(f"[{self.symbol}] Aviso sobre margen: {e}")
 
-    # --- Conexiones de Binance ---
     @tenacity_retry_decorator_async()
     async def _get_klines(self, interval="1h", limit=50):
         return await self.client.futures_klines(symbol=self.symbol, interval=interval, limit=limit)
@@ -130,7 +116,6 @@ class SymbolStrategy:
         for a in info.get("assets", []):
             if a.get("asset") == "USDT":
                 return float(a.get("walletBalance", 0.0))
-        logging.warning("No USDT asset found in account")
         return None
         
     @tenacity_retry_decorator_async()
@@ -145,7 +130,6 @@ class SymbolStrategy:
                 return
         raise Exception(f"Símbolo {self.symbol} no encontrado en exchange info")
 
-    # --- Indicadores ---
     async def update_indicators(self):
         try:
             kl_1h = await self._get_klines(interval="1h", limit=50)
@@ -161,7 +145,6 @@ class SymbolStrategy:
         except Exception as e:
             logging.error(f"[{self.symbol}] Error actualizando indicadores: {e}")
 
-    # --- Pivotes ---
     async def calculate_pivots(self):
         try:
             kl_1d = await self._get_klines(interval="1d", limit=2)
@@ -186,38 +169,17 @@ class SymbolStrategy:
             await self.telegram_handler._send_message(f"🚨 <b>ERROR ({self.symbol})</b>\nFallo al calcular pivotes.")
 
     async def _send_pivots_alert(self):
-        """Genera y envía el mensaje de pivotes para este símbolo."""
         p = self.state.daily_pivots
         if not p: return
-
-        s = f"📊 <b>Pivotes Camarilla ({self.symbol})</b>\n\n"
-        s += f"H: <code>{p.get('Y_H', 0.0):.1f}</code>\n"
-        s += f"L: <code>{p.get('Y_L', 0.0):.1f}</code>\n"
-        s += f"C: <code>{p.get('Y_C', 0.0):.1f}</code>\n\n"
-        
-        s += f"🔥 <b>R6</b>: <code>{p.get('H6', 0.0):.2f}</code>\n"
-        s += f"🔴 <b>R5</b>: <code>{p.get('H5', 0.0):.2f}</code>\n"
-        s += f"🔴 R4: <code>{p.get('H4', 0.0):.2f}</code>\n"
-        s += f"🔴 R3: <code>{p.get('H3', 0.0):.2f}</code>\n"
-        s += f"🟡 R2: <code>{p.get('H2', 0.0):.2f}</code>\n"
-        s += f"🟡 R1: <code>{p.get('H1', 0.0):.2f}</code>\n\n"
-        
-        s += f"🟢 S1: <code>{p.get('L1', 0.0):.2f}</code>\n"
-        s += f"🟢 S2: <code>{p.get('L2', 0.0):.2f}</code>\n"
-        s += f"🟢 S3: <code>{p.get('L3', 0.0):.2f}</code>\n"
-        s += f"🔵 S4: <code>{p.get('L4', 0.0):.2f}</code>\n"
-        s += f"🔵 S5: <code>{p.get('L5', 0.0):.2f}</code>\n"
-        s += f"🔵 <b>S6</b>: <code>{p.get('L6', 0.0):.2f}</code>\n"
-        
+        s = f"📊 <b>Pivotes ({self.symbol})</b>\n"
+        s += f"R4: {p.get('H4')} | S4: {p.get('L4')}\n"
         cw = p.get("width", 0)
-        is_ranging = p.get("is_ranging_day", True)
-        day_type = "Rango" if is_ranging else "Breakout"
-        s += f"\n📅 Tipo: <b>{day_type}</b> (CPR: {cw:.2f}%)"
-
+        day_type = "Rango" if p.get("is_ranging_day", True) else "Breakout"
+        s += f"📅 Tipo: <b>{day_type}</b> (CPR: {cw:.2f}%)"
         await self.telegram_handler._send_message(s)
 
-    # --- Tareas de Fondo ---
     async def timed_tasks_loop(self):
+        """Solo maneja actualizaciones periódicas (indicadores/pivotes)."""
         logging.info(f"[{self.symbol}] Timed tasks loop started")
         if self.state.daily_start_balance is None:
              self.state.daily_start_balance = await self._get_account_balance()
@@ -229,11 +191,15 @@ class SymbolStrategy:
         while self.running:
             try:
                 now = datetime.utcnow()
-                
+                if now.time() >= dt_time(0, 1) and now.date() > self.state.start_of_day:
+                    self.state.daily_start_balance = await self._get_account_balance()
+                    self.state.daily_trade_stats = []
+                    self.state.start_of_day = now.date()
+                    self.save_state()
+
                 if now.time() >= dt_time(0, 2) and (self.state.last_pivots_date is None or now.date() > self.state.last_pivots_date):
                     await self.calculate_pivots()
 
-                # --- FIX: Usar self.indicator_update_interval_minutes (no self.config) ---
                 if (now - last_indicator_update).total_seconds() >= self.indicator_update_interval_minutes * 60:
                     await self.update_indicators()
                     last_indicator_update = now
@@ -243,75 +209,64 @@ class SymbolStrategy:
                 logging.error(f"[{self.symbol}] Timed tasks error: {e}")
                 await asyncio.sleep(10)
     
-    async def run_kline_loop(self):
-        logging.info(f"[{self.symbol}] Connecting WS (Klines) 1m...")
-        stream_ctx = self.bsm.kline_socket(symbol=self.symbol.lower(), interval="1m")
-        
-        while self.running:
-            try:
-                async with stream_ctx as ksocket:
-                    logging.info(f"[{self.symbol}] WS (Klines) conectado.")
-                    while self.running:
-                        msg = await ksocket.recv() 
-                        if msg: await self._handle_kline_evt(msg)
-            except Exception as e:
-                logging.error(f"[{self.symbol}] WS Error: {e}")
-                await self.telegram_handler._send_message(f"🚨 <b>WS KLINE ERROR ({self.symbol})</b>")
-                await asyncio.sleep(5)
-
-    async def _handle_kline_evt(self, msg):
-        if not msg or msg.get("e") == "error": return
-        k = msg.get("k", {})
+    async def process_kline(self, k):
         if not k.get("x", False): return
         if not self.state.is_in_position:
             await self.risk_manager.seek_new_trade(k)
 
+    async def process_user_data(self, event_type, data):
+        if event_type == 'ORDER_TRADE_UPDATE':
+            await self.risk_manager.check_position_state()
+
+    async def account_poller_loop(self):
+        logging.info(f"[{self.symbol}] Poller iniciado.")
+        while self.running:
+            await self.risk_manager.check_position_state()
+            await asyncio.sleep(5.0) 
+
     # --- Run ---
     async def run(self):
+        """Inicializa la estrategia y corre sus tareas internas (timers + poller)."""
         try:
             await self._get_exchange_info()
-            await self._setup_exchange_settings() # Setup de leverage/margen
+            await self._setup_exchange_settings()
 
-            self.orders_manager = OrdersManager(
-                client=self.client,
-                state=self.state,
-                telegram_handler=self.telegram_handler,
-                config=self 
-            )
+            self.orders_manager = OrdersManager(self.client, self.state, self.telegram_handler, self)
             self.risk_manager = RiskManager(bot_controller=self)
+            
             self.load_state()
             
-            # Reconciliación (Simplificada)
-            try:
-                pos = await self._get_current_position()
-                if pos and float(pos.get("positionAmt", 0)) != 0:
-                    logging.warning(f"[{self.symbol}] Reconciliación: posición activa.")
-                    self.state.is_in_position = True
-                    if not self.state.current_position_info:
-                        self.state.current_position_info = {
-                            "quantity": abs(float(pos["positionAmt"])),
-                            "entry_price": float(pos.get("entryPrice", 0.0)),
-                            "side": SIDE_BUY if float(pos.get("positionAmt", 0)) > 0 else SIDE_SELL,
-                            "tps_hit_count": 0, "entry_time": time.time(), "total_pnl": 0.0,
-                        }
-                    self.state.last_known_position_qty = abs(float(pos["positionAmt"]))
-                    self.state.save_state()
-            except Exception: pass
+            if self.state.daily_start_balance is None:
+                 self.state.daily_start_balance = await self._get_account_balance()
             
+            # --- FIX v90.2: Lanzar tareas SIN bloquear con await ---
             self.tasks = [
                 asyncio.create_task(self.timed_tasks_loop()),
-                asyncio.create_task(self.run_kline_loop()),
+                asyncio.create_task(self.account_poller_loop()),
             ]
-            await asyncio.gather(*self.tasks)
+            logging.info(f"[{self.symbol}] Tareas de fondo iniciadas.")
+            
+            # NO hacemos await gather(*self.tasks) aquí.
+            # Dejamos que corran en el loop principal del orquestador.
         
-        except asyncio.CancelledError:
-            logging.info(f"[{self.symbol}] Tareas canceladas.")
         except Exception as e:
-            logging.critical(f"[{self.symbol}] Error fatal: {e}", exc_info=True)
-        finally:
-            self.running = False
+            logging.critical(f"[{self.symbol}] Error fatal en 'run': {e}", exc_info=True)
+            # No re-lanzamos para no matar al orquestador
 
     async def stop(self):
+        """Detiene las tareas de este símbolo."""
         self.running = False
-        for task in getattr(self, 'tasks', []): task.cancel()
+        for task in getattr(self, 'tasks', []):
+            task.cancel()
         logging.info(f"[{self.symbol}] Tareas detenidas.")
+    
+    def _log_trade_to_csv(self, trade_data, csv_file_path):
+        file_exists = os.path.isfile(csv_file_path)
+        try:
+            import csv
+            with open(csv_file_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
+                if not file_exists: writer.writeheader()
+                writer.writerow(trade_data)
+        except Exception as e:
+            logging.error(f"Error al guardar CSV: {e}")
