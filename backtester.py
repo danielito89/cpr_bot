@@ -1,41 +1,33 @@
 #!/usr/bin/env python3
-# backtester.py (v2 - Sin pandas-ta)
-# Versión: v2 (Eliminada la dependencia 'pandas-ta'.
-#               EMA y ATR se calculan manualmente con pandas.
-#               Corregido NameError y TypeError.)
-
 import os
 import pandas as pd
 import numpy as np
 import time
-import statistics
-import logging # Añadido para logging
+import logging
 
-# Configurar un logger básico para el backtester
-log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-console = logging.StreamHandler()
-console.setFormatter(log_formatter)
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logger.addHandler(console)
-
+# Configurar logger
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # --- 1. CONFIGURACIÓN DEL BACKTESTER ---
-# ¡Ajusta estos parámetros para optimizar!
+
+# Símbolo a testear (debe coincidir con lo que descargaste)
+SYMBOL_TO_TEST = "BTCUSDT" 
+
+# Parámetros GANADORES (Optimizados)
 EMA_PERIOD = 20
 ATR_PERIOD = 14
 VOLUME_FACTOR = 1.3
 CPR_WIDTH_THRESHOLD = 0.2
-TIME_STOP_HOURS = 6
+TIME_STOP_HOURS = 12  # <-- El gran ganador
 
-# --- Parámetros de Simulación (Ajustar si es necesario) ---
-LEVERAGE = 3
-INVESTMENT_PCT = 0.01
+# Parámetros de Riesgo
+LEVERAGE = 30
+INVESTMENT_PCT = 0.05
 INITIAL_BALANCE = 10000 
 COMMISSION_PCT = 0.0004 
-DAILY_LOSS_LIMIT_PCT = 0.05 # 5% (Corregido NameError)
+DAILY_LOSS_LIMIT_PCT = 0.15 # 15% de margen diario
 
-# --- Parámetros de SL/TP (Simplificados para este backtest) ---
+# Multiplicadores de TP/SL
 RANGING_SL_MULT = 0.5 
 BREAKOUT_SL_MULT = 1.0 
 RANGING_TP_MULT = 2.0 
@@ -43,15 +35,14 @@ BREAKOUT_TP_MULT = 1.25
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
-# --- 2. LÓGICA DE LA ESTRATEGIA (Funciones) ---
+# --- 2. FUNCIONES ---
 
 def calculate_pivots_for_day(row):
-    """Calcula pivotes para un solo día (una fila de datos de 1D)."""
+    """Calcula pivotes diarios (Camarilla + CPR)."""
     h, l, c = row['High'], row['Low'], row['Close']
     if l == 0: return {}
     
     piv = (h + l + c) / 3.0
-    rng = h - l
     r4 = c + (h - l) * 1.1 / 2
     r3 = c + (h - l) * 1.1 / 4
     r1 = c + (h - l) * 1.1 / 12
@@ -63,27 +54,20 @@ def calculate_pivots_for_day(row):
     cw = abs(tc - bc) / piv * 100 if piv != 0 else 0
 
     return {
-        "P": piv, "BC": bc, "TC": tc, "width": cw, 
-        "is_ranging_day": cw > CPR_WIDTH_THRESHOLD,
-        "H1": r1, "H3": r3, "H4": r4,
-        "L1": s1, "L3": s3, "L4": s4,
+        "P": piv, "H1": r1, "H3": r3, "H4": r4,
+        "L1": s1, "L3": s3, "L4": s4, "width": cw
     }
 
-# --- CAMBIO: Función 'get_trade_signal' corregida para usar 'dot notation' ---
 def get_trade_signal(row, atr, ema):
-    """Refactor de la lógica 'seek_new_trade' (v71 - con dot notation)"""
-    
-    # Usar dot notation (ej. row.Close) porque 'row' es un tuple de itertuples()
+    """Lógica de entrada (Igual a v71/v81)."""
     current_price = row.Close
-    current_volume = row.Quote_Asset_Volume # Volumen USDT
+    current_volume = row.Quote_Asset_Volume # USDT
     median_vol = row.MedianVol_1m_USDT
     
-    # --- v71: Dirección de Vela ---
+    # Filtro de dirección de vela
     is_green_candle = current_price > row.Open
     is_red_candle = current_price < row.Open
     
-    # 'p' (pivotes) ahora es solo 'row' (ej. row.H4, row.L3)
-    # Comprobar que los indicadores no sean NaN (Not a Number)
     if not all([atr > 0, ema > 0, median_vol > 0]):
         return None, None, 0.0, 0.0
         
@@ -92,243 +76,182 @@ def get_trade_signal(row, atr, ema):
     
     side, entry_type, sl_price, tp_price = None, None, 0.0, 0.0
 
-    # breakout long (MANTIENE FILTRO EMA)
+    # 1. Breakout Long (H4)
     if current_price > row.H4 and volume_confirmed and current_price > ema and is_green_candle:
         side = "BUY"
         entry_type = "Breakout Long"
         sl_price = current_price - atr * BREAKOUT_SL_MULT
         tp_price = current_price + atr * BREAKOUT_TP_MULT
     
-    # breakout short (MANTIENE FILTRO EMA)
+    # 2. Breakout Short (L4)
     elif current_price < row.L4 and volume_confirmed and current_price < ema and is_red_candle:
         side = "SELL"
         entry_type = "Breakout Short"
         sl_price = current_price + atr * BREAKOUT_SL_MULT
         tp_price = current_price - atr * BREAKOUT_TP_MULT
     
-    # ranging long (FILTRO EMA ELIMINADO)
+    # 3. Ranging Long (L3)
     elif current_price <= row.L3 and volume_confirmed and is_green_candle:
         side = "BUY"
         entry_type = "Ranging Long"
         sl_price = row.L4 - atr * RANGING_SL_MULT
-        tp_price = row.P # TP es el pivote central
+        tp_price = row.P 
     
-    # ranging short (FILTRO EMA ELIMINADO)
+    # 4. Ranging Short (H3)
     elif current_price >= row.H3 and volume_confirmed and is_red_candle:
         side = "SELL"
         entry_type = "Ranging Short"
         sl_price = row.H4 + atr * RANGING_SL_MULT
-        tp_price = row.P # TP es el pivote central
+        tp_price = row.P
 
     if side:
         return side, entry_type, sl_price, tp_price
-    
     return None, None, 0.0, 0.0
 
-# --- 3. FUNCIÓN PRINCIPAL DEL BACKTESTER ---
+# --- 3. BACKTESTER ---
 
 def run_backtest():
-    logging.info("Iniciando backtest...")
+    logging.info(f"Iniciando backtest para {SYMBOL_TO_TEST}...")
     start_time = time.time()
 
-    # --- 3.1 Cargar Datos ---
-    logging.info("Cargando datos (puede tardar)...")
+    # --- Cargar Datos ---
     try:
-        df_1h = pd.read_csv(os.path.join(DATA_DIR, "mainnet_data_1h.csv"), index_col="Open_Time", parse_dates=True)
-        df_1d = pd.read_csv(os.path.join(DATA_DIR, "mainnet_data_1d.csv"), index_col="Open_Time", parse_dates=True)
-        df_1m = pd.read_csv(os.path.join(DATA_DIR, "mainnet_data_1m.csv"), index_col="Open_Time", parse_dates=True)
+        f_1h = os.path.join(DATA_DIR, f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv")
+        f_1d = os.path.join(DATA_DIR, f"mainnet_data_1d_{SYMBOL_TO_TEST}.csv")
+        f_1m = os.path.join(DATA_DIR, f"mainnet_data_1m_{SYMBOL_TO_TEST}.csv")
+        
+        df_1h = pd.read_csv(f_1h, index_col="Open_Time", parse_dates=True)
+        df_1d = pd.read_csv(f_1d, index_col="Open_Time", parse_dates=True)
+        df_1m = pd.read_csv(f_1m, index_col="Open_Time", parse_dates=True)
     except FileNotFoundError:
-        logging.error("Error: Archivos de datos no encontrados. Ejecuta 'download_data.py' primero.")
+        logging.error("Archivos no encontrados. Ejecuta download_data.py primero.")
         return
 
-    # --- 3.2 Calcular Indicadores (¡MANUALMENTE!) ---
-    logging.info("Calculando indicadores de 1h (EMA, ATR)...")
-    
-    # Calcular EMA
+    # --- Calcular Indicadores ---
+    logging.info("Calculando EMA y ATR (1h)...")
     df_1h['EMA_1h'] = df_1h['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
     
-    # Calcular ATR
     tr1 = df_1h['High'] - df_1h['Low']
     tr2 = abs(df_1h['High'] - df_1h['Close'].shift(1))
     tr3 = abs(df_1h['Low'] - df_1h['Close'].shift(1))
-    df_1h['TR'] = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    df_1h['TR'] = pd.DataFrame({'a': tr1, 'b': tr2, 'c': tr3}).max(axis=1)
     df_1h['ATR_1h'] = df_1h['TR'].ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
 
-    # --- 3.3 Calcular Mediana de Volumen (1m) ---
-    logging.info("Calculando mediana de volumen de 1m (esto tarda)...")
+    logging.info("Calculando Mediana de Volumen (1m)...")
+    # Mediana de los últimos 60 periodos (shift 1 para no ver el futuro)
     df_1m['MedianVol_1m_USDT'] = df_1m['Quote_Asset_Volume'].rolling(window=60).median().shift(1)
 
-    # --- 3.4 Calcular Pivotes (1d) ---
-    logging.info("Calculando pivotes diarios...")
+    logging.info("Calculando Pivotes (1d)...")
     shifted_1d = df_1d.shift(1).dropna()
     pivots_list = []
     for date, row in shifted_1d.iterrows():
-        pivots = calculate_pivots_for_day(row)
-        pivots['date'] = date
-        pivots_list.append(pivots)
-    
+        p = calculate_pivots_for_day(row)
+        p['date'] = date
+        pivots_list.append(p)
     df_pivots = pd.DataFrame(pivots_list).set_index('date')
     
-    # --- 3.5 Unir Datos (Merge) ---
+    # --- Unir todo ---
     logging.info("Combinando datos...")
-    df_merged = pd.merge_asof(
-        df_1m, 
-        df_1h[['EMA_1h', 'ATR_1h']], 
-        left_index=True, 
-        right_index=True, 
-        direction='backward'
-    )
-    
+    df_merged = pd.merge_asof(df_1m, df_1h[['EMA_1h', 'ATR_1h']], left_index=True, right_index=True, direction='backward')
     df_merged['date'] = df_merged.index.date
     df_pivots.index = df_pivots.index.date
-    df_merged = pd.merge(
-        df_merged,
-        df_pivots,
-        left_on='date',
-        right_index=True,
-        how='left'
-    )
+    df_merged = pd.merge(df_merged, df_pivots, left_on='date', right_index=True, how='left')
+    df_merged.dropna(inplace=True)
     
-    df_merged = df_merged.dropna()
-    
-    # --- 3.6 Bucle de Simulación ---
-    logging.info(f"Iniciando simulación sobre {len(df_merged)} velas de 1m...")
+    # --- Simulación ---
+    logging.info(f"Simulando {len(df_merged)} velas...")
     
     balance = INITIAL_BALANCE
     in_position = False
-    position_info = {}
+    pos = {}
     trades = []
     daily_pnl = 0.0
     current_day = None
 
     for row in df_merged.itertuples():
-        current_price = row.Close
-        current_time = row.Index
-        
-        if current_day != current_time.date():
-            current_day = current_time.date()
+        if current_day != row.Index.date():
+            current_day = row.Index.date()
             daily_pnl = 0.0
         
         if daily_pnl <= -(INITIAL_BALANCE * DAILY_LOSS_LIMIT_PCT):
             continue 
 
-        # --- Gestión de Posición ---
         if in_position:
             pnl = 0.0
-            close_reason = None
+            reason = None
             
-            # 1. Comprobar Stop-Loss
-            if (position_info['side'] == 'BUY' and row.Low <= position_info['sl']) or \
-               (position_info['side'] == 'SELL' and row.High >= position_info['sl']):
-                pnl = (position_info['sl'] - position_info['entry']) * position_info['pos_size']
-                if position_info['side'] == 'SELL': pnl = -pnl
-                close_reason = "Stop-Loss"
+            # SL
+            if (pos['side'] == 'BUY' and row.Low <= pos['sl']) or \
+               (pos['side'] == 'SELL' and row.High >= pos['sl']):
+                pnl = (pos['sl'] - pos['entry']) * pos['size']
+                if pos['side'] == 'SELL': pnl = -pnl
+                reason = "Stop-Loss"
             
-            # 2. Comprobar Take-Profit
-            elif (position_info['side'] == 'BUY' and row.High >= position_info['tp']) or \
-                 (position_info['side'] == 'SELL' and row.Low <= position_info['tp']):
-                pnl = (position_info['tp'] - position_info['entry']) * position_info['pos_size']
-                if position_info['side'] == 'SELL': pnl = -pnl
-                close_reason = "Take-Profit"
+            # TP
+            elif (pos['side'] == 'BUY' and row.High >= pos['tp']) or \
+                 (pos['side'] == 'SELL' and row.Low <= pos['tp']):
+                pnl = (pos['tp'] - pos['entry']) * pos['size']
+                if pos['side'] == 'SELL': pnl = -pnl
+                reason = "Take-Profit"
 
-            # 3. Comprobar Time Stop
-            hours_in_trade = (current_time - position_info['entry_time']).total_seconds() / 3600
-            if (position_info['type'].startswith("Ranging") and 
-                hours_in_trade > TIME_STOP_HOURS):
-                
-                pnl = (current_price - position_info['entry']) * position_info['pos_size']
-                if position_info['side'] == 'SELL': pnl = -pnl
-                close_reason = "Time-Stop"
+            # Time Stop
+            elif (pos['type'].startswith("Ranging") and 
+                  (row.Index - pos['time']).total_seconds()/3600 > TIME_STOP_HOURS):
+                pnl = (row.Close - pos['entry']) * pos['size']
+                if pos['side'] == 'SELL': pnl = -pnl
+                reason = f"Time-Stop ({TIME_STOP_HOURS}h)"
 
-            # Si se cerró la posición...
-            if close_reason:
-                balance += pnl
-                balance -= position_info['commission'] # Pagar comisión de cierre
+            if reason:
+                balance += pnl - pos['comm']
                 daily_pnl += pnl
                 trades.append({
-                    "entry_time": position_info['entry_time'],
-                    "close_time": current_time,
-                    "side": position_info['side'],
-                    "entry_price": position_info['entry'],
-                    "close_price": current_price,
-                    "sl": position_info['sl'],
-                    "tp": position_info['tp'],
-                    "pnl": pnl - position_info['commission'], # PnL Neto
-                    "reason": close_reason
+                    'entry_time': pos['time'], 'exit_time': row.Index,
+                    'side': pos['side'], 'pnl': pnl - pos['comm'], 'reason': reason
                 })
                 in_position = False
-                position_info = {}
-                continue 
+                continue
 
-        # --- Búsqueda de Nuevas Entradas (CORREGIDO) ---
         if not in_position:
-            # Extraer indicadores de la fila
-            atr = row.ATR_1h
-            ema = row.EMA_1h
-            
-            # Llamar a get_trade_signal (la fila 'row' ya contiene los pivotes)
-            side, entry_type, sl_price, tp_price = get_trade_signal(row, atr, ema)
+            atr, ema = row.ATR_1h, row.EMA_1h
+            side, type_, sl, tp = get_trade_signal(row, atr, ema)
             
             if side:
-                investment = balance * INVESTMENT_PCT
-                pos_size = (investment * LEVERAGE) / current_price
-                commission = (pos_size * current_price) * COMMISSION_PCT
+                size = (balance * INVESTMENT_PCT * LEVERAGE) / row.Close
+                if size == 0: continue
+                comm = (size * row.Close) * COMMISSION_PCT
                 
-                if pos_size == 0: continue
-
+                balance -= comm
                 in_position = True
-                balance -= commission # Pagar comisión de apertura
-                
-                position_info = {
-                    "entry": current_price,
-                    "side": side,
-                    "pos_size": pos_size,
-                    "tp": tp_price,
-                    "sl": sl_price,
-                    "type": entry_type,
-                    "entry_time": current_time,
-                    "commission": commission,
-                    "sl_moved_to_be": False,
+                pos = {
+                    'entry': row.Close, 'side': side, 'size': size,
+                    'tp': tp, 'sl': sl, 'type': type_, 'time': row.Index, 'comm': comm
                 }
-    
-    # --- 3.7 Análisis de Resultados ---
-    logging.info("\n--- ¡Backtest Completo! ---")
-    logging.info(f"Tiempo de ejecución: {time.time() - start_time:.2f} segundos")
+
+    # --- Resultados ---
+    logging.info(f"Backtest finalizado en {time.time()-start_time:.2f}s")
     
     if not trades:
-        logging.info("No se realizó ninguna operación.")
+        logging.info("Sin operaciones.")
         return
 
-    df_trades = pd.DataFrame(trades)
+    df_res = pd.DataFrame(trades)
+    total_pnl = df_res['pnl'].sum()
+    wins = len(df_res[df_res['pnl']>0])
+    win_rate = (wins/len(df_res))*100
     
-    total_trades = len(df_trades)
-    wins = len(df_trades[df_trades['pnl'] > 0])
-    win_rate = (wins / total_trades) * 100
-    
-    total_pnl = df_trades['pnl'].sum()
-    avg_win = df_trades[df_trades['pnl'] > 0]['pnl'].mean()
-    avg_loss = df_trades[df_trades['pnl'] < 0]['pnl'].mean()
-    profit_factor = 0
-    if df_trades[df_trades['pnl'] < 0]['pnl'].sum() != 0:
-        profit_factor = abs(df_trades[df_trades['pnl'] > 0]['pnl'].sum() / df_trades[df_trades['pnl'] < 0]['pnl'].sum())
+    gross_profit = df_res[df_res['pnl']>0]['pnl'].sum()
+    gross_loss = abs(df_res[df_res['pnl']<0]['pnl'].sum())
+    pf = gross_profit / gross_loss if gross_loss != 0 else 0
 
-    # --- Imprimir Resultados ---
-    print("\n--- 📊 Resultados (Estrategia v65/v71) ---")
-    print(f" Parámetros: EMA={EMA_PERIOD}, VolFactor={VOLUME_FACTOR}, TimeStop={TIME_STOP_HOURS}h")
-    print(f" Período: {df_merged.index.min()} a {df_merged.index.max()}")
-    print("-----------------------------------")
-    print(f" Balance Inicial: ${INITIAL_BALANCE:.2f}")
-    print(f" Balance Final:   ${balance:.2f}")
-    print(f" PnL Neto:        ${total_pnl:.2f}")
-    print("-----------------------------------")
-    print(f" Total Trades:    {total_trades}")
-    print(f" Win Rate:        {win_rate:.2f}%")
-    print(f" Profit Factor:   {profit_factor:.2f}")
-    print(f" Avg. Ganancia:   ${avg_win:.2f}")
-    print(f" Avg. Pérdida:    ${avg_loss:.2f}")
-
-    df_trades.to_csv(os.path.join(DATA_DIR, "backtest_results_v71.csv"))
-    logging.info("\nResultados detallados guardados en 'data/backtest_results_v71.csv'")
+    print("\n" + "="*40)
+    print(f" RESULTADOS: {SYMBOL_TO_TEST} ({len(df_merged)} velas)")
+    print("="*40)
+    print(f" PnL Neto:      ${total_pnl:.2f}")
+    print(f" Balance Final: ${balance:.2f}")
+    print(f" Profit Factor: {pf:.2f}")
+    print(f" Win Rate:      {win_rate:.2f}% ({wins}/{len(df_res)})")
+    print(f" Trades/Día:    {len(df_res)/((df_merged.index[-1]-df_merged.index[0]).days):.1f}")
+    print("="*40)
 
 if __name__ == "__main__":
     run_backtest()
