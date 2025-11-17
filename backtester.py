@@ -1,26 +1,41 @@
 #!/usr/bin/env python3
-# backtester.py (v2)
+# backtester.py (v2 - Sin pandas-ta)
 # Versión: v2 (Eliminada la dependencia 'pandas-ta'.
-#               EMA y ATR se calculan manualmente con pandas)
+#               EMA y ATR se calculan manualmente con pandas.
+#               Corregido NameError y TypeError.)
 
 import os
 import pandas as pd
 import numpy as np
 import time
 import statistics
+import logging # Añadido para logging
+
+# Configurar un logger básico para el backtester
+log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+console = logging.StreamHandler()
+console.setFormatter(log_formatter)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(console)
+
 
 # --- 1. CONFIGURACIÓN DEL BACKTESTER ---
+# ¡Ajusta estos parámetros para optimizar!
 EMA_PERIOD = 20
 ATR_PERIOD = 14
 VOLUME_FACTOR = 1.3
 CPR_WIDTH_THRESHOLD = 0.2
 TIME_STOP_HOURS = 6
 
-# --- Parámetros de Simulación ---
+# --- Parámetros de Simulación (Ajustar si es necesario) ---
 LEVERAGE = 3
 INVESTMENT_PCT = 0.01
 INITIAL_BALANCE = 10000 
 COMMISSION_PCT = 0.0004 
+DAILY_LOSS_LIMIT_PCT = 0.05 # 5% (Corregido NameError)
+
+# --- Parámetros de SL/TP (Simplificados para este backtest) ---
 RANGING_SL_MULT = 0.5 
 BREAKOUT_SL_MULT = 1.0 
 RANGING_TP_MULT = 2.0 
@@ -54,13 +69,22 @@ def calculate_pivots_for_day(row):
         "L1": s1, "L3": s3, "L4": s4,
     }
 
-def get_trade_signal(row, p, atr, ema):
-    """Refactor de la lógica 'seek_new_trade' de la v65."""
-    current_price = row['Close']
-    current_volume = row['Quote_Asset_Volume'] # Volumen USDT
-    median_vol = row['MedianVol_1m_USDT']
+# --- CAMBIO: Función 'get_trade_signal' corregida para usar 'dot notation' ---
+def get_trade_signal(row, atr, ema):
+    """Refactor de la lógica 'seek_new_trade' (v71 - con dot notation)"""
     
-    if not all([p, atr > 0, ema > 0, median_vol > 0]):
+    # Usar dot notation (ej. row.Close) porque 'row' es un tuple de itertuples()
+    current_price = row.Close
+    current_volume = row.Quote_Asset_Volume # Volumen USDT
+    median_vol = row.MedianVol_1m_USDT
+    
+    # --- v71: Dirección de Vela ---
+    is_green_candle = current_price > row.Open
+    is_red_candle = current_price < row.Open
+    
+    # 'p' (pivotes) ahora es solo 'row' (ej. row.H4, row.L3)
+    # Comprobar que los indicadores no sean NaN (Not a Number)
+    if not all([atr > 0, ema > 0, median_vol > 0]):
         return None, None, 0.0, 0.0
         
     required_volume = median_vol * VOLUME_FACTOR
@@ -69,32 +93,32 @@ def get_trade_signal(row, p, atr, ema):
     side, entry_type, sl_price, tp_price = None, None, 0.0, 0.0
 
     # breakout long (MANTIENE FILTRO EMA)
-    if current_price > p["H4"] and volume_confirmed and current_price > ema:
+    if current_price > row.H4 and volume_confirmed and current_price > ema and is_green_candle:
         side = "BUY"
         entry_type = "Breakout Long"
         sl_price = current_price - atr * BREAKOUT_SL_MULT
         tp_price = current_price + atr * BREAKOUT_TP_MULT
     
     # breakout short (MANTIENE FILTRO EMA)
-    elif current_price < p["L4"] and volume_confirmed and current_price < ema:
+    elif current_price < row.L4 and volume_confirmed and current_price < ema and is_red_candle:
         side = "SELL"
         entry_type = "Breakout Short"
         sl_price = current_price + atr * BREAKOUT_SL_MULT
         tp_price = current_price - atr * BREAKOUT_TP_MULT
     
     # ranging long (FILTRO EMA ELIMINADO)
-    elif current_price <= p["L3"] and volume_confirmed:
+    elif current_price <= row.L3 and volume_confirmed and is_green_candle:
         side = "BUY"
         entry_type = "Ranging Long"
-        sl_price = p["L4"] - atr * RANGING_SL_MULT
-        tp_price = p["P"] # TP es el pivote central
+        sl_price = row.L4 - atr * RANGING_SL_MULT
+        tp_price = row.P # TP es el pivote central
     
     # ranging short (FILTRO EMA ELIMINADO)
-    elif current_price >= p["H3"] and volume_confirmed:
+    elif current_price >= row.H3 and volume_confirmed and is_red_candle:
         side = "SELL"
         entry_type = "Ranging Short"
-        sl_price = p["H4"] + atr * RANGING_SL_MULT
-        tp_price = p["P"] # TP es el pivote central
+        sl_price = row.H4 + atr * RANGING_SL_MULT
+        tp_price = row.P # TP es el pivote central
 
     if side:
         return side, entry_type, sl_price, tp_price
@@ -104,21 +128,21 @@ def get_trade_signal(row, p, atr, ema):
 # --- 3. FUNCIÓN PRINCIPAL DEL BACKTESTER ---
 
 def run_backtest():
-    print("Iniciando backtest...")
+    logging.info("Iniciando backtest...")
     start_time = time.time()
 
     # --- 3.1 Cargar Datos ---
-    print("Cargando datos (puede tardar)...")
+    logging.info("Cargando datos (puede tardar)...")
     try:
         df_1h = pd.read_csv(os.path.join(DATA_DIR, "mainnet_data_1h.csv"), index_col="Open_Time", parse_dates=True)
         df_1d = pd.read_csv(os.path.join(DATA_DIR, "mainnet_data_1d.csv"), index_col="Open_Time", parse_dates=True)
         df_1m = pd.read_csv(os.path.join(DATA_DIR, "mainnet_data_1m.csv"), index_col="Open_Time", parse_dates=True)
     except FileNotFoundError:
-        print("Error: Archivos de datos no encontrados. Ejecuta 'download_data.py' primero.")
+        logging.error("Error: Archivos de datos no encontrados. Ejecuta 'download_data.py' primero.")
         return
 
     # --- 3.2 Calcular Indicadores (¡MANUALMENTE!) ---
-    print("Calculando indicadores de 1h (EMA, ATR)...")
+    logging.info("Calculando indicadores de 1h (EMA, ATR)...")
     
     # Calcular EMA
     df_1h['EMA_1h'] = df_1h['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
@@ -128,15 +152,14 @@ def run_backtest():
     tr2 = abs(df_1h['High'] - df_1h['Close'].shift(1))
     tr3 = abs(df_1h['Low'] - df_1h['Close'].shift(1))
     df_1h['TR'] = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-    # Usamos ewm (Exponential Weighted Moving) con alpha para simular el ATR (RMA)
     df_1h['ATR_1h'] = df_1h['TR'].ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
 
     # --- 3.3 Calcular Mediana de Volumen (1m) ---
-    print("Calculando mediana de volumen de 1m (esto tarda)...")
+    logging.info("Calculando mediana de volumen de 1m (esto tarda)...")
     df_1m['MedianVol_1m_USDT'] = df_1m['Quote_Asset_Volume'].rolling(window=60).median().shift(1)
 
     # --- 3.4 Calcular Pivotes (1d) ---
-    print("Calculando pivotes diarios...")
+    logging.info("Calculando pivotes diarios...")
     shifted_1d = df_1d.shift(1).dropna()
     pivots_list = []
     for date, row in shifted_1d.iterrows():
@@ -147,7 +170,7 @@ def run_backtest():
     df_pivots = pd.DataFrame(pivots_list).set_index('date')
     
     # --- 3.5 Unir Datos (Merge) ---
-    print("Combinando datos...")
+    logging.info("Combinando datos...")
     df_merged = pd.merge_asof(
         df_1m, 
         df_1h[['EMA_1h', 'ATR_1h']], 
@@ -169,7 +192,7 @@ def run_backtest():
     df_merged = df_merged.dropna()
     
     # --- 3.6 Bucle de Simulación ---
-    print(f"Iniciando simulación sobre {len(df_merged)} velas de 1m...")
+    logging.info(f"Iniciando simulación sobre {len(df_merged)} velas de 1m...")
     
     balance = INITIAL_BALANCE
     in_position = False
@@ -237,13 +260,14 @@ def run_backtest():
                 position_info = {}
                 continue 
 
-        # --- Búsqueda de Nuevas Entradas ---
+        # --- Búsqueda de Nuevas Entradas (CORREGIDO) ---
         if not in_position:
-            p = row._asdict() # Pivotes están en la fila
+            # Extraer indicadores de la fila
             atr = row.ATR_1h
             ema = row.EMA_1h
             
-            side, entry_type, sl_price, tp_price = get_trade_signal(row, p, atr, ema)
+            # Llamar a get_trade_signal (la fila 'row' ya contiene los pivotes)
+            side, entry_type, sl_price, tp_price = get_trade_signal(row, atr, ema)
             
             if side:
                 investment = balance * INVESTMENT_PCT
@@ -268,11 +292,11 @@ def run_backtest():
                 }
     
     # --- 3.7 Análisis de Resultados ---
-    print("\n--- ¡Backtest Completo! ---")
-    print(f"Tiempo de ejecución: {time.time() - start_time:.2f} segundos")
+    logging.info("\n--- ¡Backtest Completo! ---")
+    logging.info(f"Tiempo de ejecución: {time.time() - start_time:.2f} segundos")
     
     if not trades:
-        print("No se realizó ninguna operación.")
+        logging.info("No se realizó ninguna operación.")
         return
 
     df_trades = pd.DataFrame(trades)
@@ -288,7 +312,8 @@ def run_backtest():
     if df_trades[df_trades['pnl'] < 0]['pnl'].sum() != 0:
         profit_factor = abs(df_trades[df_trades['pnl'] > 0]['pnl'].sum() / df_trades[df_trades['pnl'] < 0]['pnl'].sum())
 
-    print("\n--- 📊 Resultados (Estrategia v65) ---")
+    # --- Imprimir Resultados ---
+    print("\n--- 📊 Resultados (Estrategia v65/v71) ---")
     print(f" Parámetros: EMA={EMA_PERIOD}, VolFactor={VOLUME_FACTOR}, TimeStop={TIME_STOP_HOURS}h")
     print(f" Período: {df_merged.index.min()} a {df_merged.index.max()}")
     print("-----------------------------------")
@@ -302,8 +327,8 @@ def run_backtest():
     print(f" Avg. Ganancia:   ${avg_win:.2f}")
     print(f" Avg. Pérdida:    ${avg_loss:.2f}")
 
-    df_trades.to_csv(os.path.join(DATA_DIR, "backtest_results_v65.csv"))
-    print("\nResultados detallados guardados en 'data/backtest_results_v65.csv'")
+    df_trades.to_csv(os.path.join(DATA_DIR, "backtest_results_v71.csv"))
+    logging.info("\nResultados detallados guardados en 'data/backtest_results_v71.csv'")
 
 if __name__ == "__main__":
     run_backtest()
