@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # bot_core/symbol_strategy.py
-# Versión: v90.2 (Fix Final: run() es verdaderamente NO-BLOQUEANTE)
+# Versión: v90.3 Final (Passive Strategy for Multiplex)
+# - Arquitectura Pasiva (sin websockets propios)
+# - Fix: 'no attribute config' resuelto en init y loops
+# - Fix: run() no bloqueante
+# - Feature: force_reset_state para comando /reset
+# - Feature: _send_pivots_alert con formato detallado de emojis
+# - Feature: _setup_exchange_settings para leverage/margen
 
 import os
 import sys
@@ -19,7 +25,7 @@ from binance.exceptions import BinanceAPIException
 from .utils import (
     tenacity_retry_decorator_async, 
     format_price, format_qty,
-    SIDE_BUY, SIDE_SELL
+    SIDE_BUY, SIDE_SELL, CSV_HEADER
 )
 from .pivots import calculate_pivots_from_data
 from .indicators import calculate_atr, calculate_ema, calculate_median_volume
@@ -37,7 +43,7 @@ class SymbolStrategy:
     ):
         self.symbol = symbol
         
-        # Desempaquetar Configuración
+        # --- Desempaquetar Configuración (Fix para evitar errores de atributo) ---
         self.investment_pct = config.get("investment_pct", 0.01)
         self.leverage = config.get("leverage", 3)
         self.cpr_width_threshold = config.get("cpr_width_threshold", 0.2)
@@ -53,13 +59,16 @@ class SymbolStrategy:
         self.indicator_update_interval_minutes = config.get("indicator_update_interval_minutes", 15)
         self.daily_loss_limit_pct = config.get("DAILY_LOSS_LIMIT_PCT", 5.0)
         
+        # Clientes y Handlers (Sin BSM, es pasivo)
         self.client = client
         self.telegram_handler = telegram_handler
         
+        # Archivos
         BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.STATE_FILE = os.path.join(BASE_DIR, "data", f"bot_state_{symbol}.json")
         self.CSV_FILE = os.path.join(BASE_DIR, "data", f"trades_log_{symbol}.csv")
 
+        # Inicialización
         self.state = StateManager(self.STATE_FILE)
         self.orders_manager = None
         self.risk_manager = None
@@ -69,11 +78,13 @@ class SymbolStrategy:
         self.running = True
         self.tasks = []
         
-        logging.info(f"[{self.symbol}] Estrategia v90 inicializada.")
+        logging.info(f"[{self.symbol}] Estrategia v90 (Pasiva) inicializada.")
 
+    # --- Lógica de Estado ---
     def save_state(self): self.state.save_state()
     def load_state(self): self.state.load_state()
 
+    # --- Comandos de Control ---
     async def pause_trading(self):
         self.state.trading_paused = True
         self.save_state()
@@ -88,6 +99,22 @@ class SymbolStrategy:
         if self.orders_manager:
             await self.orders_manager.close_position_manual(reason)
 
+    async def force_reset_state(self):
+        """Fuerza el estado del bot a 'Sin Posición' (para desincronizaciones)."""
+        logging.warning(f"[{self.symbol}] FORZANDO RESET DE ESTADO (Comando /reset).")
+        
+        # Resetear variables de posición
+        self.state.is_in_position = False
+        self.state.current_position_info = {}
+        self.state.last_known_position_qty = 0.0
+        self.state.sl_moved_to_be = False
+        self.state.trade_cooldown_until = 0 
+        
+        # Guardar inmediatamente
+        self.save_state()
+        logging.info(f"[{self.symbol}] Estado reseteado a 'Sin Posición'.")
+
+    # --- Configuración Inicial de Binance ---
     async def _setup_exchange_settings(self):
         logging.info(f"[{self.symbol}] Configurando Exchange: Margen Cruzado, Leverage {self.leverage}x...")
         try:
@@ -98,9 +125,10 @@ class SymbolStrategy:
         try:
             await self.client.futures_change_margin_type(symbol=self.symbol, marginType='CROSSED')
         except BinanceAPIException as e:
-            if e.code != -4046:
+            if e.code != -4046: # -4046 significa "No se necesita cambio"
                 logging.warning(f"[{self.symbol}] Aviso sobre margen: {e}")
 
+    # --- Conexiones de Binance (API REST) ---
     @tenacity_retry_decorator_async()
     async def _get_klines(self, interval="1h", limit=50):
         return await self.client.futures_klines(symbol=self.symbol, interval=interval, limit=limit)
@@ -130,6 +158,7 @@ class SymbolStrategy:
                 return
         raise Exception(f"Símbolo {self.symbol} no encontrado en exchange info")
 
+    # --- Indicadores y Pivotes ---
     async def update_indicators(self):
         try:
             kl_1h = await self._get_klines(interval="1h", limit=50)
@@ -169,18 +198,48 @@ class SymbolStrategy:
             await self.telegram_handler._send_message(f"🚨 <b>ERROR ({self.symbol})</b>\nFallo al calcular pivotes.")
 
     async def _send_pivots_alert(self):
+        """Genera y envía el mensaje de pivotes detallado para este símbolo."""
         p = self.state.daily_pivots
         if not p: return
-        s = f"📊 <b>Pivotes ({self.symbol})</b>\n"
-        s += f"R4: {p.get('H4')} | S4: {p.get('L4')}\n"
+
+        # Encabezado y Niveles OHLC de ayer
+        s = f"📊 <b>Pivotes Camarilla ({self.symbol})</b>\n\n"
+        s += f"H: <code>{p.get('Y_H', 0.0):.2f}</code>\n"
+        s += f"L: <code>{p.get('Y_L', 0.0):.2f}</code>\n"
+        s += f"C: <code>{p.get('Y_C', 0.0):.2f}</code>\n\n"
+        
+        # Resistencias (R)
+        s += f"🔥 <b>R6 (Target):</b> <code>{p.get('H6', 0.0):.2f}</code>\n"
+        s += f"🔴 <b>R5 (Target):</b> <code>{p.get('H5', 0.0):.2f}</code>\n"
+        s += f"🔴 R4 (Breakout): <code>{p.get('H4', 0.0):.2f}</code>\n"
+        s += f"🔴 R3 (Rango): <code>{p.get('H3', 0.0):.2f}</code>\n"
+        s += f"🟡 R2: <code>{p.get('H2', 0.0):.2f}</code>\n"
+        s += f"🟡 R1: <code>{p.get('H1', 0.0):.2f}</code>\n\n"
+        
+        # Pivote Central (CPR)
+        s += f"⚪ <b>P (Central):</b> <code>{p.get('P', 0.0):.2f}</code>\n\n"
+
+        # Soportes (S)
+        s += f"🟢 S1: <code>{p.get('L1', 0.0):.2f}</code>\n"
+        s += f"🟢 S2: <code>{p.get('L2', 0.0):.2f}</code>\n"
+        s += f"🟢 S3 (Rango): <code>{p.get('L3', 0.0):.2f}</code>\n"
+        s += f"🔵 S4 (Breakout): <code>{p.get('L4', 0.0):.2f}</code>\n"
+        s += f"🔵 <b>S5 (Target):</b> <code>{p.get('L5', 0.0):.2f}</code>\n"
+        s += f"🔵 <b>S6 (Target):</b> <code>{p.get('L6', 0.0):.2f}</code>\n"
+        
+        # Análisis de CPR
         cw = p.get("width", 0)
-        day_type = "Rango" if p.get("is_ranging_day", True) else "Breakout"
-        s += f"📅 Tipo: <b>{day_type}</b> (CPR: {cw:.2f}%)"
+        is_ranging = p.get("is_ranging_day", True)
+        day_type = "Rango (CPR Ancho)" if is_ranging else "Tendencia (CPR Estrecho)"
+        s += f"\n📅 <b>Análisis: {day_type}</b> ({cw:.2f}%)"
+
         await self.telegram_handler._send_message(s)
 
+    # --- Tareas de Fondo (Cron) ---
     async def timed_tasks_loop(self):
         """Solo maneja actualizaciones periódicas (indicadores/pivotes)."""
         logging.info(f"[{self.symbol}] Timed tasks loop started")
+        
         if self.state.daily_start_balance is None:
              self.state.daily_start_balance = await self._get_account_balance()
              self.state.start_of_day = datetime.utcnow().date()
@@ -191,15 +250,19 @@ class SymbolStrategy:
         while self.running:
             try:
                 now = datetime.utcnow()
+                # Reset diario
                 if now.time() >= dt_time(0, 1) and now.date() > self.state.start_of_day:
                     self.state.daily_start_balance = await self._get_account_balance()
                     self.state.daily_trade_stats = []
                     self.state.start_of_day = now.date()
                     self.save_state()
 
+                # Pivotes
                 if now.time() >= dt_time(0, 2) and (self.state.last_pivots_date is None or now.date() > self.state.last_pivots_date):
                     await self.calculate_pivots()
 
+                # Indicadores
+                # --- FIX v90.3: Usar self.indicator_update_interval_minutes directamente ---
                 if (now - last_indicator_update).total_seconds() >= self.indicator_update_interval_minutes * 60:
                     await self.update_indicators()
                     last_indicator_update = now
@@ -209,20 +272,27 @@ class SymbolStrategy:
                 logging.error(f"[{self.symbol}] Timed tasks error: {e}")
                 await asyncio.sleep(10)
     
+    # --- Métodos Públicos de Ingesta (Llamados por Orquestador v90) ---
+
     async def process_kline(self, k):
+        """Procesa una vela de 1m recibida del Multiplex Socket."""
         if not k.get("x", False): return
+        
         if not self.state.is_in_position:
             await self.risk_manager.seek_new_trade(k)
 
     async def process_user_data(self, event_type, data):
+        """Procesa un evento de cuenta (Order Update) recibido del User Socket central."""
         if event_type == 'ORDER_TRADE_UPDATE':
+            # Forzar chequeo de posición inmediato
             await self.risk_manager.check_position_state()
 
+    # --- Poller de Seguridad ---
     async def account_poller_loop(self):
-        logging.info(f"[{self.symbol}] Poller iniciado.")
+        """Respaldo por si el User Socket falla."""
         while self.running:
             await self.risk_manager.check_position_state()
-            await asyncio.sleep(5.0) 
+            await asyncio.sleep(5.0) # 5 segundos
 
     # --- Run ---
     async def run(self):
@@ -236,21 +306,19 @@ class SymbolStrategy:
             
             self.load_state()
             
+            # Reconciliación
             if self.state.daily_start_balance is None:
                  self.state.daily_start_balance = await self._get_account_balance()
             
-            # --- FIX v90.2: Lanzar tareas SIN bloquear con await ---
+            # Tareas internas (YA NO INCLUYEN WEBSOCKETS y NO BLOQUEAN)
             self.tasks = [
                 asyncio.create_task(self.timed_tasks_loop()),
                 asyncio.create_task(self.account_poller_loop()),
             ]
             logging.info(f"[{self.symbol}] Tareas de fondo iniciadas.")
-            
-            # NO hacemos await gather(*self.tasks) aquí.
-            # Dejamos que corran en el loop principal del orquestador.
         
         except Exception as e:
-            logging.critical(f"[{self.symbol}] Error fatal en 'run': {e}", exc_info=True)
+            logging.critical(f"[{self.symbol}] Error fatal iniciando: {e}", exc_info=True)
             # No re-lanzamos para no matar al orquestador
 
     async def stop(self):
@@ -261,6 +329,7 @@ class SymbolStrategy:
         logging.info(f"[{self.symbol}] Tareas detenidas.")
     
     def _log_trade_to_csv(self, trade_data, csv_file_path):
+        # Helper para RiskManager
         file_exists = os.path.isfile(csv_file_path)
         try:
             import csv
