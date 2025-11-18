@@ -5,7 +5,7 @@ import httpx
 class TelegramHandler:
     def __init__(self, orchestrator, token, chat_id):
         """
-        :param orchestrator: Referencia al BotOrchestrator (main_v81).
+        :param orchestrator: Referencia al BotOrchestrator (main_v90).
         """
         self.orchestrator = orchestrator
         self.token = token
@@ -59,7 +59,7 @@ class TelegramHandler:
             
             if self.chat_id and chat_id != str(self.chat_id): return
             
-            # Parsear comando y argumentos (ej: "/start BTCUSDT")
+            # Parsear comando y argumentos
             parts = text.split()
             cmd = parts[0].lower()
             arg = parts[1].upper() if len(parts) > 1 else None
@@ -67,22 +67,17 @@ class TelegramHandler:
             # --- COMANDOS ---
 
             if cmd == "/status":
-                # Si hay argumento (/status BTCUSDT), mostrar solo ese. Si no, todos.
                 report = self._generate_multibot_status(target_symbol=arg)
                 await self._send_message(report)
 
             elif cmd == "/pivots":
                 if arg:
-                    # Pivotes de un par específico
                     bot = self.orchestrator.strategies.get(arg)
                     if bot: await self._send_message(self._generate_pivots_text(bot))
                     else: await self._send_message(f"⚠️ No encuentro el bot {arg}")
                 else:
-                    # Pivotes de todos
                     for bot in self.orchestrator.strategies.values():
                         await self._send_message(self._generate_pivots_text(bot))
-
-            # --- GESTIÓN DINÁMICA ---
             
             elif cmd == "/start":
                 if not arg:
@@ -106,8 +101,6 @@ class TelegramHandler:
                 active = list(self.orchestrator.strategies.keys())
                 await self._send_message(f"📋 <b>Bots Activos ({len(active)}):</b>\n" + ", ".join(active))
 
-            # --- COMANDOS DE CONTROL (Afectan al par especificado o a todos) ---
-
             elif cmd == "/pausar":
                 target = arg if arg else "TODOS"
                 await self.orchestrator.pause_all(target_symbol=arg)
@@ -129,6 +122,19 @@ class TelegramHandler:
                     else:
                         await self._send_message(f"Bot {arg} no encontrado.")
 
+            # --- NUEVO COMANDO /reset ---
+            elif cmd == "/reset":
+                if not arg:
+                    await self._send_message("⚠️ Uso: <code>/reset BTCUSDT</code> (Solo usar si el bot se traba)")
+                else:
+                    bot = self.orchestrator.strategies.get(arg)
+                    if bot:
+                        await self._send_message(f"🔄 <b>Reseteando estado de {arg}...</b>")
+                        await bot.force_reset_state()
+                        await self._send_message(f"✅ <b>{arg}</b> reseteado. Listo para nuevas señales.")
+                    else:
+                        await self._send_message(f"Bot {arg} no encontrado.")
+
             elif cmd == "/limit":
                  await self._send_message(f"Límite de pérdida diaria: {self.orchestrator.DEFAULT_CONFIG['DAILY_LOSS_LIMIT_PCT']}%")
             
@@ -137,8 +143,20 @@ class TelegramHandler:
                  await self.orchestrator.shutdown()
 
             else:
-                await self._send_message("❓ Comandos: /start SYM, /stop SYM, /status, /list, /pivots, /pausar, /resumir, /cerrar SYM")
-
+                await self._send_message(
+                    "<b>Comando no reconocido.</b>\n"
+                    "Comandos disponibles:\n"
+                    "<code>/status</code> - Ver estado general\n"
+                    "<code>/pivots</code> - Ver pivotes del día\n"
+                    "<code>/pausar</code> - Pausar nuevas entradas\n"
+                    "<code>/resumir</code> - Reanudar nuevas entradas\n"
+                    "<code>/cerrar</code> - Cerrar posición actual\n"
+                    "<code>/forzar_indicadores</code> - Recalcular EMA/ATR/Vol\n"
+                    "<code>/forzar_pivotes</code> - Recalcular Pivotes\n"
+                    "<code>/limit</code> - Ver límite de pérdida\n"
+                    "<code>/restart</code> - Reiniciar el bot"
+                )
+            
         except Exception as e:
             logging.error(f"Error handle message: {e}", exc_info=True)
 
@@ -163,7 +181,6 @@ class TelegramHandler:
         return full_msg
 
     def _generate_single_status(self, bot):
-        # (Lógica v68 adaptada para leer de 'bot.state')
         s = f"<b>🤖 {bot.symbol}</b> "
         s += "⏸️ PAUSADO" if bot.state.trading_paused else "🟢 ACTIVO"
         s += "\n"
@@ -183,7 +200,6 @@ class TelegramHandler:
         else:
             s += "Checking signals...\n"
 
-        # Indicadores compactos
         atr = f"{bot.state.cached_atr:.2f}" if bot.state.cached_atr else "-"
         vol = f"{bot.state.cached_median_vol/1000:.1f}k" if bot.state.cached_median_vol else "-"
         s += f"📈 ATR: {atr} | VolMed: {vol}"
@@ -191,10 +207,34 @@ class TelegramHandler:
         return s
 
     def _generate_pivots_text(self, bot):
+        """Genera el mensaje detallado de pivotes para el usuario."""
         p = bot.state.daily_pivots
         if not p: return f"<b>{bot.symbol}</b>: Sin pivotes."
-        s = f"📊 <b>{bot.symbol} Pivotes</b>\n"
-        s += f"R4: {p.get('H4')} | R3: {p.get('H3')}\n"
-        s += f"--- P: {p.get('P')} ---\n"
-        s += f"S3: {p.get('L3')} | S4: {p.get('L4')}"
+        
+        s = f"📊 <b>Pivotes Camarilla ({bot.symbol})</b>\n\n"
+        s += f"H: <code>{p.get('Y_H', 0.0):.2f}</code>\n"
+        s += f"L: <code>{p.get('Y_L', 0.0):.2f}</code>\n"
+        s += f"C: <code>{p.get('Y_C', 0.0):.2f}</code>\n\n"
+        
+        s += f"🔥 <b>R6 (Target):</b> <code>{p.get('H6', 0.0):.2f}</code>\n"
+        s += f"🔴 <b>R5 (Target):</b> <code>{p.get('H5', 0.0):.2f}</code>\n"
+        s += f"🔴 R4 (Breakout): <code>{p.get('H4', 0.0):.2f}</code>\n"
+        s += f"🔴 R3 (Rango): <code>{p.get('H3', 0.0):.2f}</code>\n"
+        s += f"🟡 R2: <code>{p.get('H2', 0.0):.2f}</code>\n"
+        s += f"🟡 R1: <code>{p.get('H1', 0.0):.2f}</code>\n\n"
+        
+        s += f"⚪ <b>P (Central):</b> <code>{p.get('P', 0.0):.2f}</code>\n\n"
+
+        s += f"🟢 S1: <code>{p.get('L1', 0.0):.2f}</code>\n"
+        s += f"🟢 S2: <code>{p.get('L2', 0.0):.2f}</code>\n"
+        s += f"🟢 S3 (Rango): <code>{p.get('L3', 0.0):.2f}</code>\n"
+        s += f"🔵 S4 (Breakout): <code>{p.get('L4', 0.0):.2f}</code>\n"
+        s += f"🔵 <b>S5 (Target):</b> <code>{p.get('L5', 0.0):.2f}</code>\n"
+        s += f"🔵 <b>S6 (Target):</b> <code>{p.get('L6', 0.0):.2f}</code>\n"
+        
+        cw = p.get("width", 0)
+        is_ranging = p.get("is_ranging_day", True)
+        day_type = "Rango (CPR Ancho)" if is_ranging else "Tendencia (CPR Estrecho)"
+        s += f"\n📅 <b>Análisis: {day_type}</b> ({cw:.2f}%)"
+        
         return s
