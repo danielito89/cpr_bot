@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v3.py
-# Versión: v3.2 (Fix: Imports corregidos y estado inicializado)
+# Versión: v3.4 Final (Contabilidad corregida + Estrategia Ganadora)
 
 import os
 import sys
@@ -10,25 +10,40 @@ import asyncio
 import logging
 import time
 import gc
-from datetime import datetime, timedelta # <-- FIX: timedelta añadido
+from datetime import datetime, timedelta
 
 # Configurar logger simple para la consola
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger()
 
-# --- CONFIGURACIÓN ---
-SYMBOL_TO_TEST = "ETHUSDT"
+# --- 1. CONFIGURACIÓN DEL BACKTESTER ---
+SYMBOL_TO_TEST = "ETHUSDT"  # Cambia a BTCUSDT para probar el otro
 START_BALANCE = 10000
-LEVERAGE = 30
-INVESTMENT_PCT = 0.05
-COMMISSION_PCT = 0.0004
 
-# Ajusta esto según dónde tengas la carpeta 'data'. 
-# Si está en cpr_bot/data y este script en cpr_bot/cpr_bot_v90, esto es correcto:
+# Parámetros de Riesgo (Tu perfil agresivo)
+LEVERAGE = 30
+INVESTMENT_PCT = 0.05       # 5% del capital por trade
+COMMISSION_PCT = 0.0004     # 0.04% (Taker)
+DAILY_LOSS_LIMIT_PCT = 15.0 # 15% Límite diario
+
+# Parámetros de Estrategia (Los Ganadores)
+EMA_PERIOD = 20
+ATR_PERIOD = 14
+VOLUME_FACTOR = 1.3
+CPR_WIDTH_THRESHOLD = 0.2
+TIME_STOP_HOURS = 12        # El factor clave
+BREAKOUT_ATR_SL_MULT = 1.0
+BREAKOUT_TP_MULT = 1.25
+RANGING_ATR_MULTIPLIER = 0.5
+RANGE_TP_MULT = 2.0
+
+# Directorio de datos (Sube un nivel desde cpr_bot_v90 a cpr_bot/data)
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 # --- IMPORTAR LÓGICA REAL ---
 try:
+    # Añadir el directorio actual al path para poder importar bot_core
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from bot_core.risk import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
     from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
@@ -48,6 +63,7 @@ class MockOrdersManager:
         self.sim = simulator
 
     async def place_bracket_order(self, side, qty, price, sl, tps, type):
+        # Interceptamos la orden y se la pasamos al simulador
         self.sim.open_position(side, qty, price, sl, tps, type)
 
     async def move_sl_to_be(self, qty):
@@ -62,23 +78,23 @@ class MockBotController:
         self.symbol = symbol
         self.client = None 
         self.telegram_handler = MockTelegram()
-        
         self.orders_manager = MockOrdersManager(simulator)
         self.state = simulator.state 
         self.lock = asyncio.Lock()
         
-        # Configuración (Simulando atributos de la estrategia ganadora)
+        # Inyectar configuración como atributos del bot
         self.investment_pct = INVESTMENT_PCT
         self.leverage = LEVERAGE
-        self.cpr_width_threshold = 0.2
-        self.volume_factor = 1.3      # <-- GANADOR
+        self.cpr_width_threshold = CPR_WIDTH_THRESHOLD
+        self.volume_factor = VOLUME_FACTOR
         self.take_profit_levels = 3
-        self.breakout_atr_sl_multiplier = 1.0
-        self.breakout_tp_mult = 1.25
-        self.ranging_atr_multiplier = 0.5
-        self.range_tp_mult = 2.0 
-        self.daily_loss_limit_pct = 15.0
+        self.breakout_atr_sl_multiplier = BREAKOUT_ATR_SL_MULT
+        self.breakout_tp_mult = BREAKOUT_TP_MULT
+        self.ranging_atr_multiplier = RANGING_ATR_MULTIPLIER
+        self.range_tp_mult = RANGE_TP_MULT
+        self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
         
+        # Reglas de Exchange Simuladas
         self.tick_size = 0.01
         self.step_size = 0.001
 
@@ -105,7 +121,7 @@ class SimulatorState:
         self.trading_paused = False
         self.trade_cooldown_until = 0
         self.daily_pivots = {}
-        self.last_pivots_date = None # <-- FIX: Inicializado correctamente
+        self.last_pivots_date = None
         self.cached_atr = None
         self.cached_ema = None
         self.cached_median_vol = None
@@ -130,14 +146,15 @@ class BacktesterV3:
     def open_position(self, side, qty, price, sl, tps, type_):
         notional = qty * price
         comm = notional * COMMISSION_PCT
-        self.state.balance -= comm
+        self.state.balance -= comm # Restamos comisión de entrada
         
         self.state.is_in_position = True
         self.state.current_position_info = {
             "side": side, "quantity": qty, "entry_price": price,
             "entry_type": type_, "tps_hit_count": 0,
             "total_pnl": -comm, 
-            "sl": sl, "tps": tps, "entry_time": self.state.current_time
+            "sl": sl, "tps": tps, "entry_time": self.state.current_time,
+            "comm_entry": comm # Guardamos comisión para el reporte final
         }
         self.state.last_known_position_qty = qty
         self.state.sl_moved_to_be = False
@@ -153,20 +170,29 @@ class BacktesterV3:
         info = self.state.current_position_info
         exit_price = self.state.current_price
         
-        pnl = (exit_price - info['entry_price']) * info['quantity']
-        if info['side'] == SIDE_SELL: pnl = -pnl
+        # PnL Bruto del movimiento
+        pnl_gross = (exit_price - info['entry_price']) * info['quantity']
+        if info['side'] == SIDE_SELL: pnl_gross = -pnl_gross
         
-        comm = (exit_price * info['quantity']) * COMMISSION_PCT
-        net_pnl = pnl - comm
+        # Comisión de Salida
+        comm_exit = (exit_price * info['quantity']) * COMMISSION_PCT
         
-        self.state.balance += net_pnl
+        # Comisión de Entrada (Recuperada)
+        comm_entry = info.get('comm_entry', 0.0)
+        
+        # PnL Neto Real
+        net_pnl = pnl_gross - comm_exit - comm_entry
+        
+        # Actualizar Balance (Sumamos el resultado del trade - comisión salida)
+        # (La comisión de entrada ya se restó al abrir)
+        self.state.balance += (pnl_gross - comm_exit)
         
         self.state.trades_history.append({
             'entry_time': info['entry_time'],
             'exit_time': self.state.current_time,
             'side': info['side'],
             'type': info['entry_type'],
-            'pnl': net_pnl,
+            'pnl': net_pnl, # PnL Neto reportado
             'reason': reason
         })
         
@@ -185,61 +211,58 @@ class BacktesterV3:
                  (info['side'] == SIDE_SELL and high >= info['sl'])
         
         if sl_hit:
-            self.state.current_price = info['sl']
+            self.state.current_price = info['sl'] # Asumimos fill en SL
             self.close_position("Stop-Loss")
             return
 
-        # 2. Take Profits (Simplificado para V3)
+        # 2. Take Profits (Simplificado: Toca TP2->BE, Toca TP3->Cierre)
         tps = info['tps']
-        current_tp_idx = info['tps_hit_count']
         
-        if current_tp_idx < len(tps):
-            next_tp = tps[current_tp_idx]
-            tp_hit = (info['side'] == SIDE_BUY and high >= next_tp) or \
-                     (info['side'] == SIDE_SELL and low <= next_tp)
+        # Check TP2 para BE
+        if len(tps) >= 2:
+            tp2 = tps[1]
+            hit_tp2 = (info['side'] == SIDE_BUY and high >= tp2) or \
+                      (info['side'] == SIDE_SELL and low <= tp2)
+            if hit_tp2 and info['tps_hit_count'] < 2:
+                info['tps_hit_count'] = 2
+                self.move_sl_to_be()
+
+        # Check TP Final (Último TP)
+        if tps:
+            last_tp = tps[-1]
+            hit_tp = (info['side'] == SIDE_BUY and high >= last_tp) or \
+                     (info['side'] == SIDE_SELL and low <= last_tp)
             
-            if tp_hit:
-                info['tps_hit_count'] += 1
-                if info['tps_hit_count'] == 2:
-                    self.move_sl_to_be()
-                
-                if info['tps_hit_count'] == len(tps):
-                     self.state.current_price = next_tp
-                     self.close_position("Take-Profit Final")
-                     return
+            if hit_tp:
+                self.state.current_price = last_tp
+                self.close_position("Take-Profit Final")
 
     async def run(self):
-        print(f"Iniciando Backtest Realista (v3) para {SYMBOL_TO_TEST}...")
+        print(f"Iniciando Backtest Realista (v3.4) para {SYMBOL_TO_TEST}...")
         
         # 1. Cargar Datos
         file_1h = f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv"
         file_1d = f"mainnet_data_1d_{SYMBOL_TO_TEST}.csv"
         file_1m = f"mainnet_data_1m_{SYMBOL_TO_TEST}.csv"
         
-        print("Cargando datos 1H y 1D...")
+        print("Cargando datos...")
         df_1h = pd.read_csv(os.path.join(DATA_DIR, file_1h), index_col="Open_Time", parse_dates=True)
         df_1d = pd.read_csv(os.path.join(DATA_DIR, file_1d), index_col="Open_Time", parse_dates=True)
-        
+        df_1m = pd.read_csv(os.path.join(DATA_DIR, file_1m), index_col="Open_Time", parse_dates=True)
+
         # Indicadores 1H
-        df_1h['EMA'] = df_1h['Close'].ewm(span=20, adjust=False).mean()
+        df_1h['EMA'] = df_1h['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
         tr1 = df_1h['High'] - df_1h['Low']
         tr2 = abs(df_1h['High'] - df_1h['Close'].shift(1))
         tr3 = abs(df_1h['Low'] - df_1h['Close'].shift(1))
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        df_1h['ATR'] = tr.ewm(alpha=1/14, adjust=False).mean()
+        df_1h['ATR'] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
         
-        print("Cargando datos 1M (Esto tarda)...")
-        df_1m = pd.read_csv(
-            os.path.join(DATA_DIR, file_1m), 
-            index_col="Open_Time", 
-            parse_dates=True,
-            usecols=['Open_Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Quote_Asset_Volume']
-        )
-        
-        print("Calculando Mediana de Volumen...")
+        # Indicadores 1M
+        print("Calculando Mediana...")
         df_1m['MedianVol'] = df_1m['Quote_Asset_Volume'].rolling(window=60).median().shift(1)
         
-        print("Fusionando datos...")
+        print("Fusionando...")
         df_merged = pd.merge_asof(df_1m, df_1h[['EMA', 'ATR']], left_index=True, right_index=True, direction='backward')
         df_merged.dropna(inplace=True)
         
@@ -252,13 +275,13 @@ class BacktesterV3:
             self.state.current_time = row.Index
             self.state.current_price = row.Close
             
-            # Actualizar Pivotes
+            # 1. Actualizar Pivotes
             current_date = row.Index.date()
             if self.state.last_pivots_date != current_date:
-                yesterday = current_date - timedelta(days=1) # <-- Aquí se usa timedelta
-                if yesterday in df_1d.index:
-                    daily_row = df_1d.loc[yesterday]
-                    h, l, c = daily_row['High'], daily_row['Low'], daily_row['Close']
+                yesterday_ts = pd.Timestamp(current_date - timedelta(days=1))
+                if yesterday_ts in df_1d.index:
+                    d_row = df_1d.loc[yesterday_ts]
+                    h, l, c = float(d_row['High']), float(d_row['Low']), float(d_row['Close'])
                     self.state.daily_pivots = calculate_pivots_from_data(h, l, c, 0.01, 0.2)
                     self.state.last_pivots_date = current_date
             
@@ -266,17 +289,18 @@ class BacktesterV3:
             self.state.cached_ema = row.EMA
             self.state.cached_median_vol = row.MedianVol
             
-            # Lógica de Trading
+            # 2. Lógica de Trading
             if self.state.is_in_position:
-                # Simular Time Stop (12h)
+                # Time Stop check (usando lógica del RiskManager)
                 if self.state.current_position_info['entry_type'].startswith("Ranging"):
-                    hours = (row.Index - self.state.current_position_info['entry_time']).total_seconds() / 3600
-                    if hours > 12:
-                        self.close_position("Time-Stop")
+                     hours = (row.Index - self.state.current_position_info['entry_time']).total_seconds() / 3600
+                     if hours > TIME_STOP_HOURS:
+                         self.close_position(f"Time-Stop ({TIME_STOP_HOURS}h)")
                 
                 self.check_exits(row)
 
             if not self.state.is_in_position and self.state.daily_pivots:
+                # Crear kline dict para RiskManager
                 k = {
                     'o': row.Open, 'c': row.Close, 'h': row.High, 'l': row.Low,
                     'v': row.Volume, 'q': row.Quote_Asset_Volume, 'x': True
@@ -288,19 +312,24 @@ class BacktesterV3:
     def print_results(self):
         trades = self.state.trades_history
         if not trades:
-            print("No trades.")
+            print("\n--- NO SE REALIZARON TRADES ---")
             return
-            
+
         df = pd.DataFrame(trades)
         total_pnl = df['pnl'].sum()
         wins = len(df[df['pnl'] > 0])
         win_rate = (wins / len(df)) * 100
         
+        gross_profit = df[df['pnl'] > 0]['pnl'].sum()
+        gross_loss = abs(df[df['pnl'] < 0]['pnl'].sum())
+        pf = gross_profit / gross_loss if gross_loss != 0 else 0
+
         print("\n" + "="*40)
-        print(f" RESULTADOS REALISTAS (v3): {SYMBOL_TO_TEST}")
+        print(f" RESULTADOS REALISTAS (v3.4): {SYMBOL_TO_TEST}")
         print("="*40)
         print(f" PnL Neto:      ${total_pnl:.2f}")
         print(f" Balance Final: ${self.state.balance:.2f}")
+        print(f" Profit Factor: {pf:.2f}")
         print(f" Win Rate:      {win_rate:.2f}% ({wins}/{len(df)})")
         print(f" Total Trades:  {len(df)}")
         print("="*40)
