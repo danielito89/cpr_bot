@@ -28,22 +28,22 @@ jobs:
             # sudo systemctl restart mi-bot-service
 
 # ------------------------------------------
-      # DESPLIEGUE A ORANGE PI (Vía Tailscale)
+      # DESPLIEGUE A ORANGE PI (Vía Tailscale v3)
       # ------------------------------------------
       - name: Setup Tailscale
-        uses: tailscale/github-action@v2
+        uses: tailscale/github-action@v3
         with:
-          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
-          version: latest
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
 
       - name: Deploy to Orange Pi
         uses: appleboy/ssh-action@master
-        continue-on-error: true
+        continue-on-error: true 
         with:
-          host: ${{ secrets.ORANGEPI_HOST }} # Ahora esto es la IP 100.x.x.x
+          host: ${{ secrets.ORANGEPI_HOST }} # IP 100.x.x.x
           username: ${{ secrets.USER_ORANGEPI }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /home/orangepi/bot_cpr
             git pull origin main
-            # docker restart mi-bot
