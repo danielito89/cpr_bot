@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "ema_period": 20,
     "ema_timeframe": "1h",
     "indicator_update_interval_minutes": 15,
-    "DAILY_LOSS_LIMIT_PCT": 0.15,
+    "DAILY_LOSS_LIMIT_PCT": float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "15.0")),
     
     # --- NUEVOS PARÁMETROS (v90.4) ---
     "MIN_VOLATILITY_ATR_PCT": 0.5,     # Mínimo 0.5% de ATR para operar (evita rangos muertos)
