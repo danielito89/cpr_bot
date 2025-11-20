@@ -1,4 +1,4 @@
-# Testing VS - CPRBot (v90) - Bot de Trading Multi-Par para Binance Futures
+# Deploying dual test - CPRBot (v90) - Bot de Trading Multi-Par para Binance Futures
 
 CPRBot es un sistema de trading algorítmico avanzado, modular y totalmente asíncrono, diseñado para operar múltiples pares simultáneamente en Binance Futures.
 
