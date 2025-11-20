@@ -1,0 +1,28 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# --- Entorno y Secretos (¡CRUCIAL!) ---
+.env
+secrets.json
+keys.json
+config_private.py
+
+# --- Logs y Datos ---
+*.log
+logs/
+data/
+backtest_results/
+
+# --- VS Code ---
+.vscode/
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db

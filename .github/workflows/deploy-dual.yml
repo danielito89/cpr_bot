@@ -21,7 +21,7 @@ jobs:
           username: ${{ secrets.USER_LIGHTSAIL }} # O tu usuario específico de AWS
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /home/ubuntu/cpr_bot
+            cd /home/ubuntu
             git pull origin main
             # Aquí puedes agregar comandos de reinicio, ej:
             # pip install -r requirements.txt
@@ -44,6 +44,6 @@ jobs:
           username: ${{ secrets.USER_ORANGEPI }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /home/orangepi/cpr_lab
+            cd /home/orangepi
             git pull origin main
             # docker restart mi-bot

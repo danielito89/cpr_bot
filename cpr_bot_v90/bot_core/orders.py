@@ -3,6 +3,7 @@ import time
 from decimal import Decimal
 from binance.exceptions import BinanceAPIException
 
+# Importar nuestras constantes y formateadores
 from .utils import (
     format_price, format_qty,
     SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET, 
@@ -11,15 +12,21 @@ from .utils import (
 
 class OrdersManager:
     def __init__(self, client, state, telegram_handler, config):
+        """
+        Inicializa el gestor de órdenes.
+        """
         self.client = client
         self.state = state
         self.telegram_handler = telegram_handler
+        
+        # Transferir configuraciones necesarias
         self.symbol = config.symbol
         self.tick_size = config.tick_size
         self.step_size = config.step_size
         self.take_profit_levels = config.take_profit_levels
 
     async def place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
+        """Coloca la orden de entrada (MARKET) y el bracket (SL/TP)."""
         try:
             logging.info(f"[{self.symbol}] Enviando MARKET {side} {qty}")
             market = await self.client.futures_create_order(
@@ -35,11 +42,14 @@ class OrdersManager:
         filled, attempts, order_id = False, 0, market.get("orderId")
         avg_price, executed_qty = 0.0, 0.0
         
+        # Polling rápido para confirmar fill
         while attempts < 15:
             try:
                 status = await self.client.futures_get_order(symbol=self.symbol, orderId=order_id)
                 if status.get("status") == "FILLED":
-                    filled, avg_price, executed_qty = True, float(status.get("avgPrice", 0)), abs(float(status.get("executedQty", 0)))
+                    filled = True
+                    avg_price = float(status.get("avgPrice", 0))
+                    executed_qty = abs(float(status.get("executedQty", 0)))
                     break
             except Exception: pass
             attempts += 1
@@ -60,6 +70,7 @@ class OrdersManager:
             
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             
+            # Orden de Stop Loss
             batch.append({
                 "symbol": self.symbol, "side": sl_side, "type": STOP_MARKET,
                 "quantity": format_qty(self.step_size, executed_qty), 
@@ -67,16 +78,20 @@ class OrdersManager:
                 "reduceOnly": "true"
             })
             
+            # Órdenes de Take Profit
             remaining = Decimal(str(executed_qty))
             for i, tp in enumerate(tp_prices[:num_tps]):
                 qty_dec = tp_qty_per if i < num_tps - 1 else remaining
                 qty_str = format_qty(self.step_size, qty_dec)
-                if i == num_tps - 1 and remaining > 0 and remaining < Decimal(str(self.step_size)): continue
+                
+                if i == num_tps - 1 and remaining > 0 and remaining < Decimal(str(self.step_size)):
+                    continue
                 
                 remaining -= Decimal(qty_str)
                 mark_price = float((await self.client.futures_mark_price(symbol=self.symbol))["markPrice"])
                 tp_f = float(tp)
                 
+                # Si el precio ya cruzó el TP, ejecutar a mercado
                 if (side == SIDE_BUY and tp_f <= mark_price) or (side == SIDE_SELL and tp_f >= mark_price):
                     batch.append({"symbol": self.symbol, "side": sl_side, "type": ORDER_TYPE_MARKET, "quantity": qty_str, "reduceOnly": "true"})
                 else:
@@ -97,6 +112,7 @@ class OrdersManager:
             await self.close_position_manual(reason="Fallo al crear SL/TP batch")
             return 
 
+        # Actualizar el ESTADO
         self.state.is_in_position = True
         self.state.current_position_info = {
             "side": side, "quantity": executed_qty, "entry_price": avg_price,
@@ -111,30 +127,58 @@ class OrdersManager:
         self.state.trade_cooldown_until = time.time() + 300
         self.state.save_state()
 
-        atr_val = self.state.cached_atr
-        atr_text = f"{atr_val:.2f}" if atr_val is not None else "N/A"
-        notional = executed_qty * avg_price
-        side_icon = "🟢" if side == SIDE_BUY else "🔴"
-        type_icon = "🚀" if "Breakout" in entry_type else "〰️"
-        
-        tp_list_str = ", ".join([format_price(self.tick_size, tp) for tp in tp_prices])
-        msg = f"{type_icon} <b>NUEVA ORDEN: {self.symbol}</b>\n" \
-              f"──────────────────────\n" \
-              f"<b>Estrategia:</b> {entry_type} {side_icon}\n\n" \
-              f"📍 <b>Entrada:</b> <code>{format_price(self.tick_size, avg_price)}</code>\n" \
-              f"⚖️ <b>Cantidad:</b> <code>{format_qty(self.step_size, executed_qty)}</code>\n" \
-              f"💵 <b>Valor:</b> <code>~{notional:.2f} USDT</code>\n\n" \
-              f"🎯 <b>Objetivos:</b>\n{tp_list_str}\n\n" \
-              f"🛡️ <b>Stop Loss:</b> <code>{format_price(self.tick_size, sl_price)}</code>\n" \
-              f"──────────────────────"
-        await self.telegram_handler._send_message(msg)
+        # --- FORMATO DE MENSAJE MEJORADO ---
+        try:
+            # Calcular ATR texto con seguridad
+            atr_val = self.state.cached_atr
+            atr_text = f"{atr_val:.2f}" if atr_val is not None else "N/A"
+            
+            notional_usdt = executed_qty * avg_price
+            
+            side_icon = "🟢" if side == SIDE_BUY else "🔴"
+            type_icon = "🚀" if "Breakout" in entry_type else "〰️"
+            
+            tp_list_str = ""
+            for i, tp in enumerate(tp_prices):
+                 tp_list_str += f" {i+1}) <code>{format_price(self.tick_size, tp)}</code>\n"
+
+            msg = f"{type_icon} <b>NUEVA ORDEN: {self.symbol}</b>\n"
+            msg += "──────────────────────\n"
+            msg += f"<b>Estrategia:</b> {entry_type} {side_icon}\n\n"
+            
+            msg += f"📍 <b>Entrada:</b> <code>{format_price(self.tick_size, avg_price)}</code>\n"
+            msg += f"⚖️ <b>Cantidad:</b> <code>{format_qty(self.step_size, executed_qty)}</code>\n"
+            msg += f"💵 <b>Valor:</b> <code>~{notional_usdt:.2f} USDT</code>\n\n"
+            
+            msg += f"🎯 <b>Objetivos (TPs):</b>\n{tp_list_str}\n"
+            msg += f"🛡️ <b>Stop Loss:</b> <code>{format_price(self.tick_size, sl_price)}</code>\n"
+            msg += f"📉 <b>ATR:</b> <code>{atr_text}</code>\n"
+            msg += "──────────────────────"
+            
+            await self.telegram_handler._send_message(msg)
+        except Exception as e:
+            logging.error(f"[{self.symbol}] Error enviando mensaje de nueva orden: {e}")
+
 
     async def move_sl_to_be(self, remaining_qty_float):
-        entry_price = self.state.current_position_info.get("entry_price")
-        # Mover a BE es simplemente mover el SL al precio de entrada
-        await self.update_sl(entry_price, remaining_qty_float, "Break-Even")
-        self.state.sl_moved_to_be = True
-        self.state.save_state()
+        """Mueve el SL a Breakeven (después del TP2)."""
+        if self.state.sl_moved_to_be: return
+        
+        logging.info(f"[{self.symbol}] Moviendo SL a Break-Even (disparado por TP2)...")
+        try:
+            entry_price = self.state.current_position_info.get("entry_price")
+            if not entry_price:
+                logging.warning(f"[{self.symbol}] Falta info para mover SL a BE.")
+                return
+
+            # Reutilizamos update_sl
+            await self.update_sl(entry_price, remaining_qty_float, "Break-Even")
+            
+            self.state.sl_moved_to_be = True
+            self.state.save_state()
+
+        except Exception as e:
+            logging.error(f"[{self.symbol}] Error moviendo SL a BE: {e}")
 
     async def update_sl(self, new_price, qty, reason="Trailing"):
         """Actualiza el Stop Loss existente a un nuevo precio."""
@@ -163,16 +207,19 @@ class OrdersManager:
             self.state.current_position_info["sl_order_id"] = new_order.get("orderId")
             self.state.save_state()
             
-            # Notificar (Opcional, para no hacer spam con trailing)
+            # Notificar (Opcional)
             if reason == "Break-Even":
                 await self.telegram_handler._send_message(f"🛡️ <b>{self.symbol}</b> SL movido a {reason}: <code>{format_price(self.tick_size, new_price)}</code>")
-            # else:
-            #     logging.info(f"[{self.symbol}] SL actualizado a {new_price} ({reason})")
+            else:
+                # Para trailing, quizás no quieras spam en telegram, o sí.
+                # logging.info(f"[{self.symbol}] SL actualizado a {new_price} ({reason})")
+                pass
 
         except Exception as e:
             logging.error(f"[{self.symbol}] Error actualizando SL: {e}")
 
     async def close_position_manual(self, reason="Manual Close"):
+        """Cierra la posición actual a precio de mercado."""
         logging.warning(f"[{self.symbol}] Cerrando posición manualmente: {reason}")
         try:
             await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
@@ -181,6 +228,7 @@ class OrdersManager:
             qty = float(pos.get("positionAmt", 0))
             
             if qty == 0:
+                logging.info(f"[{self.symbol}] Intento de cierre manual, pero la posición ya es 0.")
                 if self.state.is_in_position:
                     self.state.is_in_position = False
                     self.state.save_state()
@@ -192,6 +240,7 @@ class OrdersManager:
                 quantity=format_qty(self.step_size, abs(qty)),
                 reduceOnly="true"
             )
+            logging.info(f"[{self.symbol}] Orden MARKET de cierre enviada. Razón: {reason}")
         except Exception as e:
-            logging.error(f"[{self.symbol}] Error en cierre manual: {e}")
-            await self.telegram_handler._send_message(f"🚨 <b>ERROR ({self.symbol})</b>\nFallo cierre manual.")
+            logging.error(f"[{self.symbol}] Error en _close_position_manual: {e}")
+            await self.telegram_handler._send_message(f"🚨 <b>ERROR ({self.symbol})</b>\nFallo al intentar cierre manual ({reason}).")

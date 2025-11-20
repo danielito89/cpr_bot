@@ -1,0 +1,16 @@
+# --- Conexión a Exchanges ---
+ccxt>=4.0.0         # El motor principal
+requests            # Para llamadas API extra si hacen falta
+
+# --- Análisis de Datos ---
+pandas>=2.0.0       # Manipulación de velas
+numpy               # Cálculos matemáticos rápidos
+pandas_ta           # (Opcional pero RECOMENDADA) Indicadores técnicos fáciles (RSI, EMA, ATR)
+
+# --- Utilidades ---
+python-dotenv       # Para leer tus claves desde el archivo .env
+schedule            # Para ejecutar tareas cada X segundos de forma simple
+pytz                # Para manejar zonas horarias correctamente (evita líos de hora servidor vs local)
+
+# --- Mensajería (Opcional si usas Telegram) ---
+python-telegram-bot # Si tu bot te avisa por Telegram
