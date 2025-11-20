@@ -20,19 +20,19 @@ class RiskManager:
         self.telegram_handler = bot_controller.telegram_handler
         self.config = bot_controller 
 
+        # Configuración de Riesgo
         self.max_trade_size_usdt = getattr(self.config, 'MAX_TRADE_SIZE_USDT', 50000)
         self.max_daily_trades = getattr(self.config, 'MAX_DAILY_TRADES', 50) 
         self.min_balance_buffer = 10 
 
     def _get_now(self):
-        """Abstracción de tiempo para compatibilidad con Backtest."""
+        """Devuelve el timestamp actual (Real o Simulado)."""
         if hasattr(self.bot, 'get_current_timestamp'):
             return self.bot.get_current_timestamp()
         return time.time()
 
     async def can_trade(self, side, current_price):
         """JUEZ DE RIESGO: Decide si se permite abrir nueva posición."""
-        
         # 1. Estado
         if self.state.trading_paused: return False, "Pausado"
         if self.state.is_in_position: return False, "Ya en posición"
@@ -44,18 +44,12 @@ class RiskManager:
             wait = int(self.state.trade_cooldown_until - now)
             return False, f"Cooldown ({wait}s)"
 
-        # --- 3. NUEVO: FILTRO HORARIO (Smart Schedule) ---
-        # Basado en tu análisis de Backtest v5
-        # Horas Tóxicas (Pérdidas): 04, 10, 13
-        # Horas Zombie (Bajo PnL): 00, 06
+        # 3. Filtro Horario (Smart Schedule)
+        # Bloqueamos horas tóxicas según tu análisis
         FORBIDDEN_HOURS = [0, 4, 6, 10, 13]
-        
         current_hour = datetime.utcfromtimestamp(now).hour
-        
         if current_hour in FORBIDDEN_HOURS:
-            # Retornamos False para bloquear la operación
             return False, f"Horario Blacklist ({current_hour}:00 UTC)"
-        # ------------------------------------------------
 
         # 4. Balance
         balance = await self.bot._get_account_balance()
@@ -81,19 +75,25 @@ class RiskManager:
     async def seek_new_trade(self, kline):
         current_price = float(kline["c"])
         
-        # Check inicial
+        # 1. CHECK DE RIESGO
         can_open, reason = await self.can_trade("CHECK", current_price)
         if not can_open: return
 
+        # 2. ESTRATEGIA
         if not self.state.daily_pivots: return
-        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]): return
+        
+        # Loguear si faltan indicadores (solo una vez por minuto para no spamear)
+        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]):
+            if time.time() % 60 < 2:
+                logging.info(f"[{self.config.symbol}] Esperando indicadores...")
+            return
         
         async with self.bot.lock:
             if self.state.is_in_position: return
             
             try:
                 open_price = float(kline["o"])
-                current_volume = float(kline["q"])
+                current_volume = float(kline["q"]) # USDT
                 
                 is_green = current_price > open_price
                 is_red = current_price < open_price
@@ -101,9 +101,14 @@ class RiskManager:
                 median_vol = self.state.cached_median_vol
                 if not median_vol: return
                 
+                # Filtro Volatilidad (Con Log)
                 atr = self.state.cached_atr
                 if hasattr(self.config, 'min_volatility_atr_pct'):
-                    if (atr / current_price * 100) < self.config.min_volatility_atr_pct: return
+                    atr_pct = (atr / current_price) * 100
+                    if atr_pct < self.config.min_volatility_atr_pct:
+                        if time.time() % 300 < 2: # Log cada 5 min
+                             logging.info(f"[{self.config.symbol}] Volatilidad Baja: {atr_pct:.2f}% < {self.config.min_volatility_atr_pct}%")
+                        return
 
                 vol_ok = current_volume > (median_vol * self.config.volume_factor)
                 
@@ -115,36 +120,52 @@ class RiskManager:
                 sl = None
                 tp_prices = []
                 
-                # Híbrido: Breakout > Rango
+                # --- ESTRATEGIA HÍBRIDA (Con Diagnóstico) ---
+                
+                # 1. Breakouts
                 if current_price > p["H4"]:
                     if vol_ok and current_price > ema and is_green:
                         side, entry_type = SIDE_BUY, "Breakout Long"
                         sl = current_price - atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price + atr * self.config.breakout_tp_mult]
+                    else:
+                        # DIAGNÓSTICO: Por qué NO entró en Breakout Long
+                        logging.info(f"[{self.config.symbol}] [DEBUG H4] Rechazado. Vol:{vol_ok} ({current_volume:.0f}/{median_vol*1.3:.0f}), EMA:{current_price>ema}, Verde:{is_green}")
                 
                 elif current_price < p["L4"]:
                     if vol_ok and current_price < ema and is_red:
                         side, entry_type = SIDE_SELL, "Breakout Short"
                         sl = current_price + atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price - atr * self.config.breakout_tp_mult]
+                    else:
+                        # DIAGNÓSTICO: Por qué NO entró en Breakout Short
+                        logging.info(f"[{self.config.symbol}] [DEBUG L4] Rechazado. Vol:{vol_ok} ({current_volume:.0f}/{median_vol*1.3:.0f}), EMA:{current_price<ema}, Roja:{is_red}")
                 
+                # 2. Rango (Solo si no es Breakout)
                 if not side:
                     if current_price <= p["L3"]:
                         if vol_ok and is_green:
                             side, entry_type = SIDE_BUY, "Ranging Long"
                             sl = p["L4"] - atr * self.config.ranging_atr_multiplier
                             tp_prices = [current_price + (atr*0.5), current_price + (atr*1.0), current_price + (atr*2.0)]
+                        else:
+                            # DIAGNÓSTICO: Por qué NO entró en Rango Long
+                            logging.info(f"[{self.config.symbol}] [DEBUG L3] Rechazado. Vol:{vol_ok} ({current_volume:.0f}/{median_vol*1.3:.0f}), Verde:{is_green}")
 
                     elif current_price >= p["H3"]:
                         if vol_ok and is_red:
                             side, entry_type = SIDE_SELL, "Ranging Short"
                             sl = p["H4"] + atr * self.config.ranging_atr_multiplier
                             tp_prices = [current_price - (atr*0.5), current_price - (atr*1.0), current_price - (atr*2.0)]
+                        else:
+                            # DIAGNÓSTICO: Por qué NO entró en Rango Short
+                            logging.info(f"[{self.config.symbol}] [DEBUG H3] Rechazado. Vol:{vol_ok} ({current_volume:.0f}/{median_vol*1.3:.0f}), Roja:{is_red}")
                 
+                # --- EJECUCIÓN ---
                 if side:
-                    # Doble check de balance y límite justo antes de enviar
                     balance = await self.bot._get_account_balance()
                     if not balance: return
+                    
                     if await self._daily_loss_exceeded(balance): return
                     
                     invest = balance * self.config.investment_pct
@@ -171,9 +192,8 @@ class RiskManager:
         if start_bal > 0:
             daily_pnl_pct = (realized_pnl / start_bal) * 100
             if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
-                # Solo notificar si es la primera vez que lo detectamos en este ciclo
                 if time.time() > self.state.trade_cooldown_until:
-                    await self.telegram_handler._send_message(f"❌ <b>{self.config.symbol}</b>: Límite diario alcanzado ({daily_pnl_pct:.2f}%).")
+                    await self.telegram_handler._send_message(f"❌ <b>{self.config.symbol}</b>: Límite diario alcanzado.")
                     self.state.trade_cooldown_until = self._get_now() + 86400
                 return True
         return False
@@ -185,7 +205,9 @@ class RiskManager:
                 if not pos: return
                 qty = abs(float(pos.get("positionAmt", 0)))
                 
+                # Reconciliación
                 if not self.state.is_in_position and qty > 0:
+                    logging.info(f"[{self.config.symbol}] Posición detectada; sincronizando.")
                     self.state.is_in_position = True
                     self.state.current_position_info = {
                         "quantity": qty, "entry_price": float(pos.get("entryPrice")),
@@ -200,17 +222,22 @@ class RiskManager:
                     self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
                     self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
                 
+                # Cierre Total
                 if qty == 0:
                     await self._handle_full_close()
                     return 
                 
+                # TP Parcial
                 if qty < self.state.last_known_position_qty:
                     await self._handle_partial_tp(qty)
                 
+                # Trailing Stop
                 await self._check_trailing_stop(float(pos.get("markPrice")), qty)
 
+                # Time Stop (12h)
                 if (not self.state.sl_moved_to_be and 
                     self.state.current_position_info.get("entry_type", "").startswith("Ranging")):
+                    
                     entry_time = self.state.current_position_info.get("entry_time", 0)
                     if entry_time > 0:
                         now = self._get_now()
@@ -219,7 +246,7 @@ class RiskManager:
                             await self.orders_manager.close_position_manual(reason="Time Stop 12h")
 
             except Exception as e:
-                if "1003" not in str(e): logging.error(f"[{self.config.symbol}] Check Error: {e}")
+                if "1003" not in str(e): logging.error(f"[{self.config.symbol}] Check Error: {e}", exc_info=True)
 
     async def _check_trailing_stop(self, current_price, qty):
         info = self.state.current_position_info
@@ -235,12 +262,14 @@ class RiskManager:
         if side == SIDE_BUY:
             if current_price > (entry + trigger):
                 pot_sl = current_price - dist
-                curr_sl = info.get("trailing_sl_price") or entry
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
                 if pot_sl > curr_sl: new_sl = pot_sl
         elif side == SIDE_SELL:
             if current_price < (entry - trigger):
                 pot_sl = current_price + dist
-                curr_sl = info.get("trailing_sl_price") or entry
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
                 if pot_sl < curr_sl: new_sl = pot_sl
         
         if new_sl:
