@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v5.py
-# Versión: v5.3 (Fix TypeError Timestamp/Float + Fix Lookahead Bias)
+# Versión: v5.7 (Final: Reporte Detallado + Todos los Fixes Técnicos)
 
 import os
 import sys
@@ -57,14 +57,19 @@ class MockTelegram:
     async def _send_message(self, text): pass 
 
 class MockOrdersManager:
-    def __init__(self, simulator): self.sim = simulator
+    def __init__(self, simulator):
+        self.sim = simulator
     async def place_bracket_order(self, side, qty, price, sl, tps, type):
         self.sim.open_position(side, qty, price, sl, tps, type)
-    async def move_sl_to_be(self, qty): self.sim.move_sl_to_be()
-    async def update_sl(self, new_price, qty, reason="Trailing"): self.sim.update_sl(new_price)
-    async def close_position_manual(self, reason): self.sim.close_position(reason)
+    async def move_sl_to_be(self, qty):
+        self.sim.move_sl_to_be()
+    async def update_sl(self, new_price, qty, reason="Trailing"): 
+        self.sim.update_sl(new_price)
+    async def close_position_manual(self, reason):
+        self.sim.close_position(reason)
 
 class MockBotController:
+    """Provee tiempo y estado al RiskManager."""
     def __init__(self, simulator, symbol):
         self.symbol = symbol
         self.client = None 
@@ -74,6 +79,7 @@ class MockBotController:
         self.simulator = simulator
         self.lock = asyncio.Lock()
         
+        # Inyectar Configuración
         self.investment_pct = INVESTMENT_PCT
         self.leverage = LEVERAGE
         self.cpr_width_threshold = CPR_WIDTH_THRESHOLD
@@ -84,21 +90,33 @@ class MockBotController:
         self.ranging_atr_multiplier = 0.5
         self.range_tp_mult = 2.0 
         self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
+        
         self.min_volatility_atr_pct = MIN_VOLATILITY_ATR_PCT
         self.trailing_stop_trigger_atr = TRAILING_STOP_TRIGGER_ATR
         self.trailing_stop_distance_atr = TRAILING_STOP_DISTANCE_ATR
+        
         self.MAX_TRADE_SIZE_USDT = MAX_TRADE_SIZE_USDT
         self.MAX_DAILY_TRADES = MAX_DAILY_TRADES
-        self.tick_size = 0.01; self.step_size = 0.001
+        
+        self.tick_size = 0.01
+        self.step_size = 0.001
 
     async def _get_account_balance(self): return self.state.balance
-    def get_current_timestamp(self): return self.simulator.current_timestamp
+    
+    def get_current_timestamp(self):
+        """Magia: Devuelve el tiempo simulado al RiskManager."""
+        return self.simulator.current_timestamp
+
     async def _get_current_position(self):
         if not self.state.is_in_position: return None
         info = self.state.current_position_info
         amt = info.get('quantity', 0) if info.get('side') == SIDE_BUY else -info.get('quantity', 0)
-        return { "positionAmt": amt, "entryPrice": info.get('entry_price'), "markPrice": self.state.current_price, "unRealizedProfit": 0.0 }
+        return {
+            "positionAmt": amt, "entryPrice": info.get('entry_price'),
+            "markPrice": self.state.current_price, "unRealizedProfit": 0.0 
+        }
 
+# --- SIMULADOR ---
 class SimulatorState:
     def __init__(self):
         self.trading_paused = False
@@ -118,6 +136,7 @@ class SimulatorState:
         self.current_price = 0.0
         self.current_time = None
         self.trades_history = []
+        self.rejected_trades_log = []
 
     def save_state(self): pass
 
@@ -130,6 +149,14 @@ class BacktesterV5:
 
     def open_position(self, side, qty, price, sl, tps, type_):
         notional = qty * price
+        
+        # --- Check Max Size (para reporte) ---
+        is_capped = False
+        if notional > MAX_TRADE_SIZE_USDT:
+            is_capped = True
+            qty = MAX_TRADE_SIZE_USDT / price
+            notional = MAX_TRADE_SIZE_USDT
+
         comm = notional * COMMISSION_PCT
         self.state.balance -= comm
         self.state.is_in_position = True
@@ -138,7 +165,8 @@ class BacktesterV5:
             "entry_type": type_, "tps_hit_count": 0,
             "total_pnl": -comm, "sl": sl, "tps": tps, 
             "entry_time": self.current_timestamp, # Guardamos como float
-            "comm_entry": comm, "trailing_sl_price": None
+            "comm_entry": comm, "trailing_sl_price": None,
+            "is_capped": is_capped
         }
         self.state.last_known_position_qty = qty
         self.state.sl_moved_to_be = False
@@ -176,7 +204,8 @@ class BacktesterV5:
         self.state.trades_history.append({
             'entry_time': info.get('entry_time'), 'exit_time': self.state.current_time,
             'side': info['side'], 'type': info['entry_type'],
-            'pnl': net_pnl, 'reason': reason
+            'pnl': net_pnl, 'reason': reason,
+            'is_capped': info.get('is_capped', False)
         })
         self.state.is_in_position = False
         self.state.current_position_info = {}
@@ -214,7 +243,7 @@ class BacktesterV5:
                 self.close_position("Take-Profit Final")
 
     async def run(self):
-        print(f"Iniciando Backtest V5.3 (Realista) para {SYMBOL_TO_TEST}...")
+        print(f"Iniciando Backtest V5.7 (Reporte Completo) para {SYMBOL_TO_TEST}...")
         
         file_1h = f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv"
         file_1d = f"mainnet_data_1d_{SYMBOL_TO_TEST}.csv"
@@ -238,7 +267,7 @@ class BacktesterV5:
         tr = pd.concat([df_1h['High']-df_1h['Low'], abs(df_1h['High']-df_1h['Close'].shift(1)), abs(df_1h['Low']-df_1h['Close'].shift(1))], axis=1).max(axis=1)
         df_1h['ATR_1h'] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
 
-        # --- FIX: SHIFT ---
+        # Shift Lookahead
         df_1h = df_1h.shift(1) 
 
         print("Fusionando...")
@@ -272,14 +301,13 @@ class BacktesterV5:
             self.state.cached_median_vol = row.MedianVol
             
             if self.state.is_in_position:
-                # Trailing
                 await self.risk_manager._check_trailing_stop(row.Close, self.state.current_position_info.get('quantity', 0))
                 
-                # Time Stop 12h (FIXED: Usando cálculo matemático puro con floats)
+                # Time Stop con FIX de tipo
                 if self.state.current_position_info['entry_type'].startswith("Ranging"):
-                     # self.current_timestamp es float, entry_time es float
-                     elapsed_hours = (self.current_timestamp - self.state.current_position_info['entry_time']) / 3600
-                     if elapsed_hours > TIME_STOP_HOURS: 
+                     # Resta de floats (segundos)
+                     elapsed = self.current_timestamp - self.state.current_position_info['entry_time']
+                     if (elapsed / 3600) > TIME_STOP_HOURS: 
                          self.close_position(f"Time-Stop ({TIME_STOP_HOURS}h)")
                 
                 self.check_exits(row)
@@ -305,18 +333,28 @@ class BacktesterV5:
         gross_loss = abs(df[df['pnl'] < 0]['pnl'].sum())
         pf = gross_profit / gross_loss if gross_loss != 0 else 0
 
-        print("\n" + "="*40)
-        print(f" RESULTADOS V5.3 FINAL: {SYMBOL_TO_TEST}")
-        print("="*40)
-        print(f" PnL Neto:      ${total_pnl:.2f}")
-        print(f" Balance Final: ${self.state.balance:.2f}")
-        print(f" Profit Factor: {pf:.2f}")
-        print(f" Win Rate:      {win_rate:.2f}% ({wins}/{len(df)})")
-        print(f" Total Trades:  {len(df)}")
-        
-        capped = len(df[df['max_size_limit'] == True]) if 'max_size_limit' in df.columns else 0
-        print(f" Trades con Techo: {capped}")
-        print("="*40)
+        capped_count = df['is_capped'].sum() if 'is_capped' in df.columns else 0
+
+        print("\n" + "="*50)
+        print(f" RESULTADOS V5.7 FINAL: {SYMBOL_TO_TEST}")
+        print("="*50)
+        print(f" --- Configuración ---")
+        print(f" Saldo Inicial:   ${START_BALANCE}")
+        print(f" Vol Factor:      {VOLUME_FACTOR}")
+        print(f" Time Stop:       {TIME_STOP_HOURS}h")
+        print(f" Riesgo:          {INVESTMENT_PCT*100}% Capital x {LEVERAGE} Leverage")
+        print(f" Max Trade:       ${MAX_TRADE_SIZE_USDT}")
+        print("-" * 50)
+        print(f" --- Rendimiento ---")
+        print(f" PnL Neto:        ${total_pnl:.2f}")
+        print(f" Balance Final:   ${self.state.balance:.2f}")
+        print(f" Profit Factor:   {pf:.2f}")
+        print(f" Win Rate:        {win_rate:.2f}% ({wins}/{len(df)})")
+        print("-" * 50)
+        print(f" --- Actividad ---")
+        print(f" Total Trades:    {len(df)}")
+        print(f" Trades con Techo: {capped_count}")
+        print("="*50)
         df.to_csv(os.path.join(DATA_DIR, f"backtest_v5_{SYMBOL_TO_TEST}.csv"))
 
 if __name__ == "__main__":

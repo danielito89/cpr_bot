@@ -46,6 +46,20 @@ class RiskManager:
         if now < self.state.trade_cooldown_until:
             wait = int(self.state.trade_cooldown_until - now)
             return False, f"Cooldown ({wait}s)"
+        
+        # --- NUEVO: FILTRO HORARIO (Smart Schedule) ---
+        # Convertimos el timestamp (real o simulado) a hora UTC
+        current_hour = datetime.utcfromtimestamp(now).hour
+
+        # Lista Negra basada en tu análisis de datos:
+        # 13:00 (-$10k), 10:00 (-$5k), 04:00 (-$4k) -> PÉRDIDAS
+        # 00:00, 06:00 -> BAJO RENDIMIENTO (Opcional, quítalos si quieres más acción)
+        FORBIDDEN_HOURS = [4, 10, 13, 0, 6] 
+
+        if current_hour in FORBIDDEN_HOURS:
+            # return False, f"Horario Prohibido ({current_hour}:00 UTC)"
+            # Consejo: Devuelve False silencioso o con log debug para no llenar la consola
+            return False, f"Horario Blacklist ({current_hour}h)"
 
         # 2. Chequeo de Balance
         balance = await self.bot._get_account_balance()
