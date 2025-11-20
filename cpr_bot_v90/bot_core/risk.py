@@ -106,8 +106,10 @@ class RiskManager:
                 if hasattr(self.config, 'min_volatility_atr_pct'):
                     atr_pct = (atr / current_price) * 100
                     if atr_pct < self.config.min_volatility_atr_pct:
-                        if time.time() % 60 < 2:
-                             logging.info(f"[{self.config.symbol}] Mercado Lento (ATR {atr_pct:.2f}% < {self.config.min_volatility_atr_pct}%)")
+                        # --- DESCOMENTADO PARA DIAGNÓSTICO ---
+                        if time.time() % 60 < 2: # Solo imprime 1 vez por minuto
+                             logging.info(f"[{self.config.symbol}] Rechazado por Volatilidad Baja: {atr_pct:.3f}% < {self.config.min_volatility_atr_pct}%")
+                        # -------------------------------------
                         return
 
                 vol_ok = current_volume > (median_vol * self.config.volume_factor)
