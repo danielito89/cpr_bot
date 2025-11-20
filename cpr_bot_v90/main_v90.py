@@ -79,7 +79,7 @@ class BotOrchestrator:
             self.bsm.STREAM_URL = 'wss://stream.binancefuture.com/ws/'
             logging.warning("BSM: TESTNET Futures")
         else:
-            self.bsm.STREAM_URL = 'wss://fstream.binance.com/ws/'
+            self.bsm.STREAM_URL = 'wss://fstream-auth.binance.com/ws/'
             logging.info("BSM: MAINNET Futures")
 
         self.telegram_handler = TelegramHandler(
