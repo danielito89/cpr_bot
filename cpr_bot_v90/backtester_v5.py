@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # --- 1. CONFIGURACIÓN ---
 SYMBOL_TO_TEST = "ETHUSDT"
-START_BALANCE = 10000
+START_BALANCE = 1000
 
 # Riesgo
 LEVERAGE = 30
