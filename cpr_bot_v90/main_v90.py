@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "ema_period": 20,
     "ema_timeframe": "1h",
     "indicator_update_interval_minutes": 15,
-    "DAILY_LOSS_LIMIT_PCT": float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "15.0")),
+    "DAILY_LOSS_LIMIT_PCT": 15.0,
     
     # --- NUEVOS PARÁMETROS (v90.4) ---
     "MIN_VOLATILITY_ATR_PCT": 0.5,     # Mínimo 0.5% de ATR para operar (evita rangos muertos)
@@ -165,6 +165,10 @@ class BotOrchestrator:
                             if stream_name and data:
                                 symbol = stream_name.split('@')[0].upper()
                                 k = data.get('k')
+                                # --- DIAGNÓSTICO: VERIFICAR PULSO ---
+                                if k.get('x', False):
+                                     logging.info(f"[{symbol}] 💓 Vela Cerrada: {k['c']} (Vol: {float(k['q']):.0f})")
+                                # ------------------------------------
                                 if symbol in self.strategies:
                                     await self.strategies[symbol].process_kline(k)
 
