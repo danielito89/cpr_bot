@@ -1,3 +1,32 @@
+name: Deploy to Lightsail & Orange Pi
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # ------------------------------------------
+      # DESPLIEGUE A AWS LIGHTSAIL
+      # ------------------------------------------
+      - name: Deploy to AWS Lightsail
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.USER_LIGHTSAIL }} # O tu usuario específico de AWS
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/ubuntu/cpr_bot
+            git pull origin main
+            # Aquí puedes agregar comandos de reinicio, ej:
+            # pip install -r requirements.txt
+            # sudo systemctl restart mi-bot-service
+
 # ------------------------------------------
       # DESPLIEGUE A ORANGE PI (Vía Tailscale)
       # ------------------------------------------
@@ -12,7 +41,7 @@
         continue-on-error: true
         with:
           host: ${{ secrets.ORANGEPI_HOST }} # Ahora esto es la IP 100.x.x.x
-          username: ${{ secrets.SERVER_USER }}
+          username: ${{ secrets.USER_ORANGEPI }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /home/orangepi/cpr_lab
