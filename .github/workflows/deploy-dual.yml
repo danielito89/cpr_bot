@@ -1,0 +1,20 @@
+# ------------------------------------------
+      # DESPLIEGUE A ORANGE PI (Vía Tailscale)
+      # ------------------------------------------
+      - name: Setup Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          version: latest
+
+      - name: Deploy to Orange Pi
+        uses: appleboy/ssh-action@master
+        continue-on-error: true
+        with:
+          host: ${{ secrets.ORANGEPI_HOST }} # Ahora esto es la IP 100.x.x.x
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/orangepi/cpr_lab
+            git pull origin main
+            # docker restart mi-bot
