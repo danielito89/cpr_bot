@@ -45,4 +45,5 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /home/orangepi/bot_cpr
-            git pull origin main
+            git fetch --all
+            git reset --hard origin/main
