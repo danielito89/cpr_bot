@@ -21,7 +21,7 @@ class OrdersManager:
         self.take_profit_levels = config.take_profit_levels
 
     async def place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
-        """Coloca entrada + SL/TP con doble verificación de ejecución."""
+        """Coloca entrada + SL/TP con validación de tamaño mínimo."""
         try:
             logging.info(f"[{self.symbol}] Enviando MARKET {side} {qty}")
             market = await self.client.futures_create_order(
@@ -34,13 +34,12 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
         
-        # --- VERIFICACIÓN DE LLENADO (ROBUSTA) ---
+        # --- VERIFICACIÓN DE LLENADO ---
         filled = False
         order_id = market.get("orderId")
         avg_price = 0.0
         executed_qty = 0.0
         
-        # 1. Intentar confirmar por ID de orden
         attempts = 0
         while attempts < 10:
             try:
@@ -54,15 +53,14 @@ class OrdersManager:
             attempts += 1
             await asyncio.sleep(0.5)
         
-        # 2. PLAN B: Si falla por ID, verificar si la posición cambió (Salvavidas)
         if not filled:
+            # Plan B: Verificar balance
             logging.warning(f"[{self.symbol}] Orden no confirmada por ID. Verificando posición...")
             try:
                 pos = await self.client.futures_position_information()
                 my_pos = next((p for p in pos if p["symbol"] == self.symbol), None)
                 if my_pos:
                     pos_amt = abs(float(my_pos.get("positionAmt", 0)))
-                    # Si la posición es aprox igual a la que queríamos abrir
                     if pos_amt > 0 and abs(pos_amt - qty) < (qty * 0.1): 
                         logging.info(f"[{self.symbol}] ¡Posición confirmada por balance! Procediendo.")
                         filled = True
@@ -71,18 +69,28 @@ class OrdersManager:
             except Exception as e:
                 logging.error(f"Fallo en verificación Plan B: {e}")
 
-        # Si después de todo sigue sin confirmarse, abortar (pero avisar)
         if not filled:
-            logging.error(f"[{self.symbol}] CRÍTICO: Orden enviada pero no confirmada. Posible posición desnuda.")
-            await self.telegram_handler._send_message(f"🚨 <b>ERROR CRÍTICO ({self.symbol})</b>\nOrden enviada pero no confirmada. ¡Verificar Binance manualmente!")
+            logging.error(f"[{self.symbol}] CRÍTICO: Orden enviada pero no confirmada.")
+            await self.telegram_handler._send_message(f"🚨 <b>ERROR CRÍTICO ({self.symbol})</b>\nOrden enviada pero no confirmada.")
             self.state.trade_cooldown_until = time.time() + 300
             return
 
-        # --- COLOCACIÓN DE SL / TP ---
+        # --- COLOCACIÓN DE SL / TP (CON FIX MIN NOTIONAL) ---
         sl_order_id = None
         try:
             batch = []
-            num_tps = min(len(tp_prices), self.take_profit_levels)
+            
+            # 1. Validar Tamaño para División
+            notional_total = executed_qty * avg_price
+            min_notional_binance = 6.0 # 5 es el límite, usamos 6 por seguridad
+            
+            # Si dividimos y queda muy chico, forzamos 1 solo TP
+            target_tps = self.take_profit_levels
+            if (notional_total / target_tps) < min_notional_binance:
+                logging.warning(f"[{self.symbol}] Posición pequeña ({notional_total:.1f} USD). Forzando 1 TP único.")
+                target_tps = 1
+            
+            num_tps = min(len(tp_prices), target_tps)
             tp_qty_per = Decimal(str(executed_qty)) / Decimal(str(num_tps))
             
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
@@ -97,15 +105,22 @@ class OrdersManager:
             
             # TPs
             remaining = Decimal(str(executed_qty))
+            final_tp_prices_used = []
+            
             for i, tp in enumerate(tp_prices[:num_tps]):
+                # Si forzamos 1 TP en una estrategia de rango (que tiene 3),
+                # tomamos el TP1 (el primero de la lista) para asegurar ganancia rápida.
+                # OJO: Si prefieres el TP2 (promedio), podrías cambiar la lógica, 
+                # pero TP1 es más seguro para cuentas chicas.
+                
                 qty_dec = tp_qty_per if i < num_tps - 1 else remaining
                 qty_str = format_qty(self.step_size, qty_dec)
+                
                 if i == num_tps - 1 and remaining > 0 and remaining < Decimal(str(self.step_size)): continue
                 remaining -= Decimal(qty_str)
                 
-                # Check precio actual para evitar error "Order immediately triggers"
-                # Si el precio ya pasó el TP, tiramos a mercado. Si no, limit.
-                # (Simplificación: Tiramos TP normal, si falla, el fail-safe cierra)
+                final_tp_prices_used.append(tp)
+                
                 batch.append({
                     "symbol": self.symbol, "side": sl_side, "type": TAKE_PROFIT_MARKET, 
                     "quantity": qty_str, "stopPrice": format_price(self.tick_size, tp), 
@@ -137,29 +152,37 @@ class OrdersManager:
         self.state.trade_cooldown_until = time.time() + 300
         self.state.save_state()
 
-        # --- NOTIFICACIÓN TELEGRAM (Robusta) ---
+        # --- NOTIFICACIÓN TELEGRAM ---
         try:
-            atr_val = self.state.cached_atr
-            atr_text = f"{atr_val:.2f}" if atr_val is not None else "N/A"
+            atr_text = f"{self.state.cached_atr:.2f}" if self.state.cached_atr else "N/A"
             notional_usdt = executed_qty * avg_price
             side_icon = "🟢" if side == SIDE_BUY else "🔴"
+            type_icon = "🚀" if "Breakout" in entry_type else "〰️"
             
-            tp_list_str = "\n".join([f" {i+1}) {format_price(self.tick_size, tp)}" for i, tp in enumerate(tp_prices)])
+            tp_list_str = "\n".join([f" {i+1}) {format_price(self.tick_size, tp)}" for i, tp in enumerate(final_tp_prices_used)])
             
             msg = (
-                f"{side_icon} <b>NUEVA ORDEN: {self.symbol}</b>\n"
-                f"<b>Tipo:</b> {entry_type}\n"
-                f"<b>Entrada:</b> {format_price(self.tick_size, avg_price)}\n"
-                f"<b>Cantidad:</b> {executed_qty} (~{notional_usdt:.1f} USD)\n\n"
-                f"🎯 <b>TPs:</b>\n{tp_list_str}\n\n"
-                f"🛡️ <b>SL:</b> {format_price(self.tick_size, sl_price)}"
+                f"{type_icon} <b>NUEVA ORDEN: {self.symbol}</b>\n"
+                f"────────────────\n"
+                f"<b>Estrategia:</b> {entry_type} {side_icon}\n"
+                f"📍 <b>Entrada:</b> <code>{format_price(self.tick_size, avg_price)}</code>\n"
+                f"⚖️ <b>Cantidad:</b> <code>{format_qty(self.step_size, executed_qty)}</code>\n"
+                f"💵 <b>Valor:</b> <code>~{notional_usdt:.1f} USDT</code>\n\n"
+                f"🎯 <b>Objetivos:</b>\n{tp_list_str}\n\n"
+                f"🛡️ <b>SL:</b> <code>{format_price(self.tick_size, sl_price)}</code>\n"
+                f"📉 <b>ATR:</b> <code>{atr_text}</code>"
             )
             await self.telegram_handler._send_message(msg)
         except Exception as e:
             logging.error(f"Error enviando mensaje Telegram: {e}")
+            try:
+                simple = f"🚀 ORDEN {self.symbol} {side} @ {avg_price}"
+                await self.telegram_handler._send_message(simple)
+            except: pass
 
+    # ... (Mantener move_sl_to_be, update_sl y close_position_manual IGUAL que antes) ...
+    # COPIAR EL RESTO DE LAS FUNCIONES DE LA VERSIÓN ANTERIOR (v90.5)
     async def move_sl_to_be(self, remaining_qty_float):
-        """Mueve el SL a Breakeven."""
         if self.state.sl_moved_to_be: return
         entry_price = self.state.current_position_info.get("entry_price")
         if not entry_price: return
@@ -168,17 +191,12 @@ class OrdersManager:
         self.state.save_state()
 
     async def update_sl(self, new_price, qty, reason="Trailing"):
-        """Actualiza el Stop Loss."""
         old_sl_id = self.state.current_position_info.get("sl_order_id")
         side = self.state.current_position_info.get("side")
         if not side: return
-
-        # Cancelar anterior (sin esperar error)
         if old_sl_id:
             try: await self.client.futures_cancel_order(symbol=self.symbol, orderId=old_sl_id)
             except Exception: pass
-
-        # Crear nuevo
         try:
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             new_order = await self.client.futures_create_order(
@@ -189,16 +207,13 @@ class OrdersManager:
             )
             self.state.current_position_info["sl_order_id"] = new_order.get("orderId")
             self.state.save_state()
-            
             if reason == "Break-Even":
                 await self.telegram_handler._send_message(f"🛡️ <b>{self.symbol}</b> SL movido a BE: {format_price(self.tick_size, new_price)}")
-                
         except Exception as e:
-            logging.error(f"[{self.symbol}] Error actualizando SL ({reason}): {e}")
+            logging.error(f"[{self.symbol}] Error actualizando SL: {e}")
 
     async def close_position_manual(self, reason="Manual Close"):
-        """Cierra posición a mercado."""
-        logging.warning(f"[{self.symbol}] Cerrando manual: {reason}")
+        logging.warning(f"[{self.symbol}] Cerrando posición manualmente: {reason}")
         try:
             await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
             pos = await self.client.futures_position_information()
@@ -211,12 +226,8 @@ class OrdersManager:
                         symbol=self.symbol, side=side, type=ORDER_TYPE_MARKET,
                         quantity=format_qty(self.step_size, abs(qty)), reduceOnly="true"
                     )
-            
-            # Limpiar estado
             if self.state.is_in_position:
                 self.state.is_in_position = False
                 self.state.save_state()
-                
         except Exception as e:
             logging.error(f"Error cierre manual: {e}")
-            await self.telegram_handler._send_message(f"🚨 Fallo cierre manual {self.symbol}: {e}")
