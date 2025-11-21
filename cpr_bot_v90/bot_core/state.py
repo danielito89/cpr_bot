@@ -52,6 +52,17 @@ class StateManager:
             with open(self.STATE_FILE, "r") as f:
                 state = json.load(f)
 
+            # --- NUEVO: Validar si el estado es de hoy ---
+            saved_date_str = state.get("start_of_day")
+            today_str = str(datetime.utcnow().date())
+            
+            # Si el archivo es de otro día, lo ignoramos para limpiar límites viejos
+            if saved_date_str and saved_date_str != today_str:
+                logging.warning(f"Estado obsoleto detectado ({saved_date_str}). Iniciando día limpio.")
+                # No cargamos nada, el __init__ ya puso los valores por defecto vacíos
+                return 
+            # ---------------------------------------------
+
             # Cargar estado (con valores por defecto si faltan)
             self.is_in_position = state.get("is_in_position", False)
             self.current_position_info = state.get("current_position_info", {})
@@ -68,7 +79,7 @@ class StateManager:
 
             self.cached_atr = state.get("cached_atr")
             self.cached_ema = state.get("cached_ema")
-            self.cached_median_vol = state.get("cached_median_vol") # v70
+            self.cached_median_vol = state.get("cached_median_vol") 
             self.trading_paused = state.get("trading_paused", False)
             self.daily_start_balance = state.get("daily_start_balance", None)
 
