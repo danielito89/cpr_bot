@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     "investment_pct": 0.05,
     "leverage": 30,
     "cpr_width_threshold": 0.2,
-    "volume_factor": 1.3,
+    "volume_factor": 1.2,
     "take_profit_levels": 3,
     "atr_period": 14,
     "ranging_atr_multiplier": 0.5,
