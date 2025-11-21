@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # main_v90.py
-# Versión: v90.4 (Incluye parámetros para Filtro de Volatilidad y Trailing Stop)
+# Versión: v90.6 (Fix Crítico: URLs separadas para Multiplex y UserData)
 
 import os
 import sys
@@ -27,10 +27,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TESTNET_MODE = os.environ.get("TESTNET_MODE", "false").lower() in ("1", "true", "yes")
 
-# PARES INICIALES
 INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
-# Configuración Ganadora + Nuevos Filtros
 DEFAULT_CONFIG = {
     "investment_pct": 0.05,
     "leverage": 30,
@@ -45,12 +43,10 @@ DEFAULT_CONFIG = {
     "ema_period": 20,
     "ema_timeframe": "1h",
     "indicator_update_interval_minutes": 15,
-    "DAILY_LOSS_LIMIT_PCT": 15.0,
-    
-    # --- NUEVOS PARÁMETROS (v90.4) ---
-    "MIN_VOLATILITY_ATR_PCT": 0.5,     # Mínimo 0.5% de ATR para operar (evita rangos muertos)
-    "TRAILING_STOP_TRIGGER_ATR": 1.5,  # Activar Trailing cuando ganemos 1.5 ATRs
-    "TRAILING_STOP_DISTANCE_ATR": 1.0  # Mantener el SL a 1.0 ATR de distancia
+    "DAILY_LOSS_LIMIT_PCT": float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "15.0")),
+    "MIN_VOLATILITY_ATR_PCT": 0.5,     
+    "TRAILING_STOP_TRIGGER_ATR": 1.5,  
+    "TRAILING_STOP_DISTANCE_ATR": 1.0  
 }
 
 if not API_KEY or not API_SECRET:
@@ -60,7 +56,8 @@ if not API_KEY or not API_SECRET:
 class BotOrchestrator:
     def __init__(self):
         self.client = None
-        self.bsm = None
+        self.bsm_user = None      # Para User Data Stream (necesita /ws/)
+        self.bsm_multiplex = None # Para Kline Multiplex (necesita root /)
         self.telegram_handler = None
         self.strategies = {} 
         self.tasks = []
@@ -70,17 +67,26 @@ class BotOrchestrator:
         self.DEFAULT_CONFIG = DEFAULT_CONFIG
 
     async def start(self):
-        logging.info(f"Iniciando Orquestador v90.4...")
+        logging.info(f"Iniciando Orquestador v90.6 (Dual Socket Fix)...")
         
         self.client = await AsyncClient.create(API_KEY, API_SECRET, testnet=TESTNET_MODE)
-        self.bsm = BinanceSocketManager(self.client)
+        
+        # --- FIX DE CONEXIÓN ---
+        # Instancia 1: User Data (Usa /ws/)
+        self.bsm_user = BinanceSocketManager(self.client)
+        
+        # Instancia 2: Multiplex (Usa Root)
+        self.bsm_multiplex = BinanceSocketManager(self.client)
         
         if TESTNET_MODE:
-            self.bsm.STREAM_URL = 'wss://stream.binancefuture.com/ws/'
+            self.bsm_user.STREAM_URL = 'wss://stream.binancefuture.com/ws/'
+            self.bsm_multiplex.STREAM_URL = 'wss://stream.binancefuture.com/' # Sin ws
             logging.warning("BSM: TESTNET Futures")
         else:
-            self.bsm.STREAM_URL = 'wss://fstream-auth.binance.com/ws/'
-            logging.info("BSM: MAINNET Futures")
+            self.bsm_user.STREAM_URL = 'wss://fstream.binance.com/ws/'
+            self.bsm_multiplex.STREAM_URL = 'wss://fstream.binance.com/'      # Sin ws
+            logging.info("BSM: MAINNET Futures (Dual Config)")
+        # -----------------------
 
         self.telegram_handler = TelegramHandler(
             orchestrator=self,
@@ -94,7 +100,7 @@ class BotOrchestrator:
 
         await self.restart_streams()
 
-        await self.telegram_handler._send_message(f"🚀 <b>Orquestador v90.4 Iniciado</b>\nEscuchando: {', '.join(self.strategies.keys())}")
+        await self.telegram_handler._send_message(f"🚀 <b>Orquestador v90.6</b>\nOnline: {', '.join(self.strategies.keys())}")
 
         try:
             while self.running:
@@ -106,23 +112,14 @@ class BotOrchestrator:
 
     async def add_pair(self, symbol, restart_streams=True):
         symbol = symbol.upper()
-        if symbol in self.strategies:
-            return False
-        
+        if symbol in self.strategies: return False
         try:
-            logging.info(f"Registrando estrategia para {symbol}...")
-            strategy = SymbolStrategy(
-                symbol=symbol,
-                config=DEFAULT_CONFIG,
-                client=self.client,
-                telegram_handler=self.telegram_handler
-            )
+            logging.info(f"Registrando {symbol}...")
+            # Pasamos None como bsm porque la estrategia es pasiva
+            strategy = SymbolStrategy(symbol, DEFAULT_CONFIG, self.client, self.telegram_handler)
             await strategy.run()
             self.strategies[symbol] = strategy
-            
-            if restart_streams:
-                logging.info(f"Reiniciando streams para incluir {symbol}...")
-                await self.restart_streams()
+            if restart_streams: await self.restart_streams()
             return True
         except Exception as e:
             logging.error(f"Error iniciando {symbol}: {e}")
@@ -130,12 +127,9 @@ class BotOrchestrator:
 
     async def remove_pair(self, symbol):
         symbol = symbol.upper()
-        if symbol not in self.strategies:
-            return False
-        
-        logging.info(f"Eliminando estrategia {symbol}...")
-        strategy = self.strategies[symbol]
-        await strategy.stop()
+        if symbol not in self.strategies: return False
+        logging.info(f"Deteniendo {symbol}...")
+        await self.strategies[symbol].stop()
         del self.strategies[symbol]
         await self.restart_streams()
         return True
@@ -149,13 +143,14 @@ class BotOrchestrator:
         
         if self.strategies:
             streams = [f"{sym.lower()}@kline_1m" for sym in self.strategies.keys()]
-            logging.info(f"Conectando Multiplex a: {streams}")
+            logging.info(f"Conectando Multiplex: {streams}")
             self.multiplex_task = asyncio.create_task(self.run_central_multiplex(streams))
 
     async def run_central_multiplex(self, streams):
         while self.running:
             try:
-                async with self.bsm.multiplex_socket(streams) as ms:
+                # Usamos bsm_multiplex (URL limpia)
+                async with self.bsm_multiplex.multiplex_socket(streams) as ms:
                     logging.info("Multiplex Socket CONECTADO.")
                     while self.running:
                         res = await ms.recv()
@@ -165,67 +160,54 @@ class BotOrchestrator:
                             if stream_name and data:
                                 symbol = stream_name.split('@')[0].upper()
                                 k = data.get('k')
-                                # --- DIAGNÓSTICO: VERIFICAR PULSO ---
+                                
+                                # --- LATIDO DE VIDA (Diagnóstico) ---
                                 if k.get('x', False):
                                      logging.info(f"[{symbol}] 💓 Vela Cerrada: {k['c']} (Vol: {float(k['q']):.0f})")
-                                # ------------------------------------
+                                
                                 if symbol in self.strategies:
                                     await self.strategies[symbol].process_kline(k)
-
-            except asyncio.CancelledError:
-                logging.info("Multiplex cancelado.")
-                break
             except Exception as e:
-                logging.error(f"Error en Multiplex: {e}. Reconectando en 5s...")
+                logging.error(f"Multiplex Error: {e} (Reconectando en 5s...)")
                 await asyncio.sleep(5)
 
     async def run_central_user_stream(self):
         while self.running:
             try:
-                async with self.bsm.futures_user_socket() as us:
-                    logging.info("User Data Stream Central CONECTADO.")
+                # Usamos bsm_user (URL con /ws/)
+                async with self.bsm_user.futures_user_socket() as us:
+                    logging.info("User Stream CONECTADO.")
                     while self.running:
                         msg = await us.recv()
                         if not msg: continue
                         if msg.get('e') == 'ORDER_TRADE_UPDATE':
-                            order_data = msg.get('o', {})
-                            symbol = order_data.get('s')
-                            if symbol and symbol in self.strategies:
-                                await self.strategies[symbol].process_user_data('ORDER_TRADE_UPDATE', order_data)
-                                
-            except asyncio.CancelledError:
-                logging.info("User Stream cancelado.")
-                break
+                            symbol = msg.get('o', {}).get('s')
+                            if symbol in self.strategies:
+                                await self.strategies[symbol].process_user_data('ORDER_TRADE_UPDATE', msg.get('o'))
             except Exception as e:
-                logging.error(f"Error en User Stream: {e}. Reconectando en 5s...")
+                logging.error(f"User Stream Error: {e}")
                 await asyncio.sleep(5)
 
     async def pause_all(self, target_symbol=None):
-        if target_symbol:
-            if target_symbol in self.strategies:
-                await self.strategies[target_symbol].pause_trading()
+        if target_symbol and target_symbol in self.strategies:
+            await self.strategies[target_symbol].pause_trading()
         else:
-            for bot in self.strategies.values():
-                await bot.pause_trading()
+            for bot in self.strategies.values(): await bot.pause_trading()
 
     async def resume_all(self, target_symbol=None):
-        if target_symbol:
-            if target_symbol in self.strategies:
-                await self.strategies[target_symbol].resume_trading()
+        if target_symbol and target_symbol in self.strategies:
+            await self.strategies[target_symbol].resume_trading()
         else:
-            for bot in self.strategies.values():
-                await bot.resume_trading()
+            for bot in self.strategies.values(): await bot.resume_trading()
 
     async def shutdown(self):
-        logging.warning("Apagando Orquestador v90...")
+        logging.warning("Apagando...")
         self.running = False
         if self.multiplex_task: self.multiplex_task.cancel()
         if self.user_stream_task: self.user_stream_task.cancel()
-        for strategy in self.strategies.values():
-            await strategy.stop()
+        for s in self.strategies.values(): await s.stop()
         if self.telegram_handler: await self.telegram_handler.stop()
         if self.client: await self.client.close_connection()
-        logging.info("Apagado completo.")
 
 async def main():
     orchestrator = BotOrchestrator()
@@ -239,7 +221,6 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    except KeyboardInterrupt: pass
     except Exception as e:
-        logging.critical(f"Error fatal en main: {e}", exc_info=True)
+        logging.critical(f"Error fatal: {e}", exc_info=True)
