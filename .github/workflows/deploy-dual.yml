@@ -1,4 +1,4 @@
-name: Deploy to Lightsail & Orange Pi
+name: Deploy to Lightsail (Tokyo) & Orange Pi (Lab)
 
 on:
   push:
@@ -11,25 +11,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # ------------------------------------------
-      # DESPLIEGUE A AWS LIGHTSAIL
-      # ------------------------------------------
+      # ---------------------------------------------------
+      # 1. DESPLIEGUE A PRODUCCIÓN (Lightsail Tokyo)
+      # ---------------------------------------------------
       - name: Deploy to AWS Lightsail
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ secrets.LIGHTSAIL_HOST }}
-          username: ${{ secrets.USER_LIGHTSAIL }} # O tu usuario específico de AWS
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.LIGHTSAIL_HOST }}     # IP Nueva de Tokyo
+          username: ${{ secrets.USER_LIGHTSAIL }} # 'ubuntu'
+          key: ${{ secrets.SSH_PRIVATE_KEY }}     # Tu llave .pem
           script: |
+            # Entrar a la carpeta
             cd /home/ubuntu/bot_cpr
+            
+            # Bajar cambios
             git pull origin main
-            # Aquí puedes agregar comandos de reinicio, ej:
-            # pip install -r requirements.txt
-            # sudo systemctl restart mi-bot-service
+            
+            # Actualizar librerías (por si agregamos algo nuevo)
+            source venv/bin/activate
+            pip install -r requirements.txt
+            
+            # Reiniciar el bot para aplicar cambios
+            sudo systemctl restart cpr_bot.service
+            echo "✅ Producción actualizada y reiniciada."
 
-# ------------------------------------------
-      # DESPLIEGUE A ORANGE PI (Vía Tailscale v3)
-      # ------------------------------------------
+      # ---------------------------------------------------
+      # 2. DESPLIEGUE A LABORATORIO (Orange Pi vía Tailscale)
+      # ---------------------------------------------------
       - name: Setup Tailscale
         uses: tailscale/github-action@v3
         with:
@@ -38,12 +46,14 @@ jobs:
 
       - name: Deploy to Orange Pi
         uses: appleboy/ssh-action@master
-        continue-on-error: true 
+        continue-on-error: true  # Si la Orange Pi está apagada, no fallar el deploy
         with:
-          host: ${{ secrets.ORANGEPI_HOST }} # IP 100.x.x.x
-          username: ${{ secrets.USER_ORANGEPI }}
+          host: ${{ secrets.ORANGEPI_HOST }} # IP 100.x.x.x de Tailscale
+          username: ${{ secrets.USER_ORANGEPI }} # Tu usuario (ej. 'orangepi')
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            # Solo actualizamos código para backtesting (no reiniciamos servicios)
             cd /home/orangepi/bot_cpr
             git fetch --all
             git reset --hard origin/main
+            echo "✅ Laboratorio actualizado."
