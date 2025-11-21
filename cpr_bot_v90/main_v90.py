@@ -162,8 +162,8 @@ class BotOrchestrator:
                                 k = data.get('k')
                                 
                                 # --- LATIDO DE VIDA (Diagnóstico) ---
-                                if k.get('x', False):
-                                     logging.info(f"[{symbol}] 💓 Vela Cerrada: {k['c']} (Vol: {float(k['q']):.0f})")
+                                #if k.get('x', False):
+                                #    logging.info(f"[{symbol}] 💓 Vela Cerrada: {k['c']} (Vol: {float(k['q']):.0f})")
                                 
                                 if symbol in self.strategies:
                                     await self.strategies[symbol].process_kline(k)
