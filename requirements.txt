@@ -5,7 +5,7 @@ requests            # Para llamadas API extra si hacen falta
 # --- Análisis de Datos ---
 pandas>=2.0.0       # Manipulación de velas
 numpy               # Cálculos matemáticos rápidos
-pandas_ta           # (Opcional pero RECOMENDADA) Indicadores técnicos fáciles (RSI, EMA, ATR)
+#pandas_ta          # (Opcional pero RECOMENDADA) Indicadores técnicos fáciles (RSI, EMA, ATR)
 
 # --- Utilidades ---
 python-dotenv       # Para leer tus claves desde el archivo .env
