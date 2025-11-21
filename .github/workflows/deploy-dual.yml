@@ -50,7 +50,7 @@ jobs:
         with:
           host: ${{ secrets.ORANGEPI_HOST }} # IP 100.x.x.x de Tailscale
           username: ${{ secrets.USER_ORANGEPI }} # Tu usuario (ej. 'orangepi')
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ secrets.ORANGEPI_SSH_KEY }}
           script: |
             # Solo actualizamos código para backtesting (no reiniciamos servicios)
             cd /home/orangepi/bot_cpr
