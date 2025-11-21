@@ -11,7 +11,7 @@ from binance import AsyncClient, BinanceSocketManager
 
 from bot_core.utils import setup_logging
 from bot_core.symbol_strategy import SymbolStrategy
-from telegram.handler import TelegramHandler
+from tg_services.handler import TelegramHandler
 
 # Configuración Global
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
