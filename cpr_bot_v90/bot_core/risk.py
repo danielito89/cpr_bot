@@ -25,38 +25,55 @@ class RiskManager:
         self.min_balance_buffer = 10 
 
     def _get_now(self):
-        if hasattr(self.bot, 'get_current_timestamp'): return self.bot.get_current_timestamp()
+        """Devuelve el timestamp actual (Real o Simulado)."""
+        if hasattr(self.bot, 'get_current_timestamp'):
+            return self.bot.get_current_timestamp()
         return time.time()
 
     async def can_trade(self, side, current_price):
+        """JUEZ DE RIESGO: Decide si se permite abrir nueva posición."""
         # 1. Estado
         if self.state.trading_paused: return False, "Pausado"
         if self.state.is_in_position: return False, "Ya en posición"
         
         now = self._get_now()
-        if now < self.state.trade_cooldown_until:
-            return False, f"Cooldown ({int(self.state.trade_cooldown_until - now)}s)"
-
-        FORBIDDEN_HOURS = [0, 4, 6, 10, 13]
-        if datetime.utcfromtimestamp(now).hour in FORBIDDEN_HOURS:
-            return False, f"Horario Blacklist"
-        current_weekday = datetime.utcfromtimestamp(now).weekday()
+        dt_now = datetime.utcfromtimestamp(now)
         
-        if current_weekday == 5: # 5 = Sábado
-             return False, "Día Bloqueado (Sábado)"
+        # 2. Cooldown
+        if now < self.state.trade_cooldown_until:
+            wait = int(self.state.trade_cooldown_until - now)
+            return False, f"Cooldown ({wait}s)"
 
+        # --- 3. FILTROS DE CALENDARIO (Smart Schedule) ---
+        
+        # A. Filtro de Días (No operar Sábados)
+        # 0=Lunes ... 5=Sábado, 6=Domingo
+        if dt_now.weekday() == 5: 
+            return False, "Día Bloqueado (Sábado)"
+
+        # B. Filtro Horario (UTC)
+        # Horas Tóxicas: 04, 10, 13 | Horas Zombie: 00, 06
+        FORBIDDEN_HOURS = [0, 4, 6, 10, 13]
+        if dt_now.hour in FORBIDDEN_HOURS:
+            return False, f"Horario Blacklist ({dt_now.hour}:00 UTC)"
+        # ------------------------------------------------
+
+        # 4. Balance
         balance = await self.bot._get_account_balance()
         if balance is None: return False, "Error Balance"
         if balance < self.min_balance_buffer: return False, "Saldo Insuficiente"
 
+        # 5. Límite Diario
         start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
         realized_pnl = sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
         
         if start_bal > 0:
             daily_pnl_pct = (realized_pnl / start_bal) * 100
-            if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
+            limit_pct = -abs(self.config.daily_loss_limit_pct)
+            if daily_pnl_pct <= limit_pct:
                 return False, f"Límite Diario ({daily_pnl_pct:.2f}%)"
 
+        # 6. Frecuencia
         if len(self.state.daily_trade_stats) >= self.max_daily_trades:
             return False, "Max Trades Diarios"
 
@@ -65,11 +82,19 @@ class RiskManager:
     async def seek_new_trade(self, kline):
         current_price = float(kline["c"])
         
+        # 1. CHECK DE RIESGO
         can_open, reason = await self.can_trade("CHECK", current_price)
-        if not can_open: return
+        if not can_open:
+            if "Posición" not in reason and time.time() % 60 < 2:
+                logging.info(f"[{self.config.symbol}] ⛔ Bloqueado por: {reason}")
+            return
 
+        # 2. ESTRATEGIA
         if not self.state.daily_pivots: return
-        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]): return
+        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]):
+            if time.time() % 60 < 2:
+                logging.info(f"[{self.config.symbol}] Esperando indicadores...")
+            return
         
         async with self.bot.lock:
             if self.state.is_in_position: return
@@ -77,20 +102,34 @@ class RiskManager:
             try:
                 open_price = float(kline["o"])
                 current_volume = float(kline["q"])
+                is_green = current_price > open_price
+                is_red = current_price < open_price
+                
                 median_vol = self.state.cached_median_vol
                 if not median_vol: return
                 
+                # Filtro Volatilidad
                 atr = self.state.cached_atr
                 if hasattr(self.config, 'min_volatility_atr_pct'):
                     atr_pct = (atr / current_price) * 100
-                    if atr_pct < self.config.min_volatility_atr_pct: return
+                    if atr_pct < self.config.min_volatility_atr_pct:
+                        if time.time() % 300 < 2:
+                            logging.info(f"[{self.config.symbol}] 💤 Mercado Lento: ATR {atr_pct:.2f}%")
+                        return
 
                 vol_ok = current_volume > (median_vol * self.config.volume_factor)
+                
                 p = self.state.daily_pivots
                 ema = self.state.cached_ema
                 
-                is_green = current_price > open_price
-                is_red = current_price < open_price
+                # Diagnóstico
+                dist_l4 = abs(current_price - p["L4"]) / current_price * 100
+                dist_h4 = abs(current_price - p["H4"]) / current_price * 100
+                dist_l3 = abs(current_price - p["L3"]) / current_price * 100
+                dist_h3 = abs(current_price - p["H3"]) / current_price * 100
+                
+                if (dist_l4 < 0.3 or dist_h4 < 0.3 or dist_l3 < 0.3 or dist_h3 < 0.3) and time.time() % 10 < 2:
+                     logging.info(f"[{self.config.symbol}] 🔍 Cerca Nivel. Px:{current_price} Vol:{'✅' if vol_ok else '❌'} Vela:{'🟢' if is_green else '🔴'}")
 
                 side = None
                 entry_type = None
@@ -125,6 +164,7 @@ class RiskManager:
                 if side:
                     balance = await self.bot._get_account_balance()
                     if not balance: return
+                    if await self._daily_loss_exceeded(balance): return
                     
                     invest = balance * self.config.investment_pct
                     notional = invest * self.config.leverage
@@ -142,6 +182,19 @@ class RiskManager:
             except Exception as e:
                 logging.error(f"[{self.config.symbol}] Seek Error: {e}", exc_info=True)
 
+    async def _daily_loss_exceeded(self, balance):
+        if balance <= 0: return False
+        start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
+        realized_pnl = sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
+        if start_bal > 0:
+            daily_pnl_pct = (realized_pnl / start_bal) * 100
+            if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
+                if time.time() > self.state.trade_cooldown_until:
+                    await self.telegram_handler._send_message(f"❌ <b>{self.config.symbol}</b>: Límite diario alcanzado.")
+                    self.state.trade_cooldown_until = self._get_now() + 86400
+                return True
+        return False
+
     async def check_position_state(self):
         async with self.bot.lock:
             try:
@@ -149,7 +202,6 @@ class RiskManager:
                 if not pos: return
                 qty = abs(float(pos.get("positionAmt", 0)))
                 
-                # Reconciliación
                 if not self.state.is_in_position and qty > 0:
                     self.state.is_in_position = True
                     self.state.current_position_info = {
@@ -165,22 +217,17 @@ class RiskManager:
                     self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
                     self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
                 
-                # 2. Cierre Total (qty = 0)
-                # Usamos un umbral de "polvo" para evitar que 0.00001 impida el cierre
+                # Zombie Killer & Cierre Total
                 if qty < 0.0001:
                     if self.state.is_in_position:
-                        logging.info(f"[{self.config.symbol}] Cierre detectado (Qty ~0). Iniciando limpieza...")
                         await self._handle_full_close()
                     return 
                 
-                # TP Parcial
                 if qty < self.state.last_known_position_qty:
                     await self._handle_partial_tp(qty)
                 
-                # Trailing
                 await self._check_trailing_stop(float(pos.get("markPrice")), qty)
 
-                # Time Stop
                 if self.state.current_position_info.get("entry_type", "").startswith("Ranging"):
                     entry_time = self.state.current_position_info.get("entry_time", 0)
                     if entry_time > 0:
@@ -222,15 +269,13 @@ class RiskManager:
             self.state.save_state()
 
     async def _handle_full_close(self):
-        # --- LIMPIEZA DE ÓRDENES PENDIENTES (NUEVO) ---
-        try:
-            logging.info(f"[{self.config.symbol}] Cancelando órdenes pendientes...")
-            await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
-        except Exception as e:
-            logging.warning(f"[{self.config.symbol}] Error cancelando órdenes: {e}")
-        # ----------------------------------------------
+        logging.info(f"[{self.config.symbol}] Cierre detectado. Limpiando...")
+        
+        # Cancelar órdenes pendientes (Limpieza de basura)
+        try: await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
+        except Exception: pass
 
-        # State First: Liberar bot antes de reportar
+        # State First
         old_info = self.state.current_position_info.copy()
         self.state.is_in_position = False
         self.state.current_position_info = {}
@@ -255,9 +300,13 @@ class RiskManager:
         self.state.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
         
         cooldown = 300
-        if total_pnl > 0: cooldown = 0
-        elif total_pnl < 0: cooldown = 900
-        
+        if total_pnl > 0:
+            cooldown = 0
+            logging.info(f"[{self.config.symbol}] WIN (+{total_pnl:.2f}). Sin cooldown.")
+        elif total_pnl < 0:
+            cooldown = 900
+            logging.info(f"[{self.config.symbol}] LOSS ({total_pnl:.2f}). Cooldown 15m.")
+            
         self.state.trade_cooldown_until = self._get_now() + cooldown
         self.state.save_state()
 
