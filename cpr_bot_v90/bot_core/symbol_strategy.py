@@ -236,6 +236,22 @@ class SymbolStrategy:
             self.orders_manager = OrdersManager(self.client, self.state, self.telegram_handler, self)
             self.risk_manager = RiskManager(bot_controller=self)
             self.load_state()
+
+            # --- AUTO-HEALING AL INICIO ---
+            # Verificar si la memoria coincide con la realidad
+            try:
+                real_pos = await self._get_current_position()
+                real_qty = abs(float(real_pos.get("positionAmt", 0))) if real_pos else 0.0
+                
+                if self.state.is_in_position and real_qty == 0:
+                    logging.warning(f"[{self.symbol}] Inconsistencia al inicio (Memoria=On, Binance=Off). Limpiando...")
+                    self.state.is_in_position = False
+                    self.state.current_position_info = {}
+                    self.state.save_state()
+                    await self.telegram_handler._send_message(f"🧹 <b>{self.symbol}</b>: Estado zombie limpiado al inicio.")
+            except Exception as e:
+                logging.error(f"Error en Auto-Healing: {e}")
+            # ------------------------------
             
             if self.state.daily_start_balance is None:
                  self.state.daily_start_balance = await self._get_account_balance()

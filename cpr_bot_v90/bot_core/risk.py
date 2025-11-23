@@ -29,6 +29,7 @@ class RiskManager:
         return time.time()
 
     async def can_trade(self, side, current_price):
+        # 1. Estado
         if self.state.trading_paused: return False, "Pausado"
         if self.state.is_in_position: return False, "Ya en posición"
         
@@ -156,17 +157,15 @@ class RiskManager:
                     self.state.save_state()
                     return 
 
-                # Actualizar datos
                 if qty > 0:
                     self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
                     self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
                 
-                # --- ZOMBIE KILLER MEJORADO (Tolerancia al polvo) ---
-                # Si qty es prácticamente 0 (ej. 0.00001), considerar cerrado
+                # 2. Cierre Total (qty = 0)
+                # Usamos un umbral de "polvo" para evitar que 0.00001 impida el cierre
                 if qty < 0.0001:
-                    # Si el bot cree que está en posición, CIERRA
                     if self.state.is_in_position:
-                        logging.warning(f"[{self.config.symbol}] 💀 Cierre detectado (Qty: {qty}). Limpiando...")
+                        logging.info(f"[{self.config.symbol}] Cierre detectado (Qty ~0). Iniciando limpieza...")
                         await self._handle_full_close()
                     return 
                 
@@ -202,12 +201,14 @@ class RiskManager:
         if side == SIDE_BUY:
             if current_price > (entry + trigger):
                 pot_sl = current_price - dist
-                curr_sl = info.get("trailing_sl_price") or entry
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
                 if pot_sl > curr_sl: new_sl = pot_sl
         elif side == SIDE_SELL:
             if current_price < (entry - trigger):
                 pot_sl = current_price + dist
-                curr_sl = info.get("trailing_sl_price") or entry
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
                 if pot_sl < curr_sl: new_sl = pot_sl
         
         if new_sl:
@@ -217,26 +218,23 @@ class RiskManager:
             self.state.save_state()
 
     async def _handle_full_close(self):
-        logging.info(f"[{self.config.symbol}] Ejecutando limpieza de cierre...")
-        
-        # 1. Cancelar cualquier orden pendiente (Limpieza de basura)
+        # --- LIMPIEZA DE ÓRDENES PENDIENTES (NUEVO) ---
         try:
+            logging.info(f"[{self.config.symbol}] Cancelando órdenes pendientes...")
             await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
-            logging.info(f"[{self.config.symbol}] Órdenes pendientes canceladas.")
         except Exception as e:
-            logging.warning(f"No se pudieron cancelar órdenes: {e}")
+            logging.warning(f"[{self.config.symbol}] Error cancelando órdenes: {e}")
+        # ----------------------------------------------
 
-        # 2. Guardar datos para reporte
+        # State First: Liberar bot antes de reportar
         old_info = self.state.current_position_info.copy()
-        
-        # 3. Liberar Estado (Prioridad)
         self.state.is_in_position = False
         self.state.current_position_info = {}
         self.state.last_known_position_qty = 0.0
         self.state.sl_moved_to_be = False
         self.state.save_state()
 
-        # 4. Reportar PnL
+        # Reporte
         pnl = 0.0
         roi = 0.0
         try:
@@ -252,19 +250,21 @@ class RiskManager:
         total_pnl = old_info.get("total_pnl", 0) + pnl
         self.state.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
         
-        # Cooldown
         cooldown = 300
         if total_pnl > 0: cooldown = 0
         elif total_pnl < 0: cooldown = 900
+        
         self.state.trade_cooldown_until = self._get_now() + cooldown
         self.state.save_state()
 
-        # Notificar
         icon = "✅" if total_pnl >= 0 else "❌"
-        msg = f"{icon} <b>{self.config.symbol} CERRADA</b>\nPnL: {total_pnl:.2f} USDT ({roi:.2f}%)"
+        wait_msg = f"⏳ Espera: {int(cooldown/60)}m" if cooldown > 0 else "🚀 Listo"
+        msg = f"{icon} <b>{self.config.symbol} CERRADA</b> {icon}\n" \
+              f"<b>PnL Total</b>: <code>{total_pnl:+.2f} USDT</code>\n" \
+              f"<b>ROI</b>: <code>{roi:+.2f}%</code>\n" \
+              f"<i>{wait_msg}</i>"
         await self.telegram_handler._send_message(msg)
         
-        # Log CSV
         td = {
             "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "entry_type": old_info.get("entry_type", "Unknown"),
