@@ -40,6 +40,10 @@ class RiskManager:
         FORBIDDEN_HOURS = [0, 4, 6, 10, 13]
         if datetime.utcfromtimestamp(now).hour in FORBIDDEN_HOURS:
             return False, f"Horario Blacklist"
+        current_weekday = datetime.utcfromtimestamp(now).weekday()
+        
+        if current_weekday == 5: # 5 = Sábado
+             return False, "Día Bloqueado (Sábado)"
 
         balance = await self.bot._get_account_balance()
         if balance is None: return False, "Error Balance"
