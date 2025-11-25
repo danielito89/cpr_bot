@@ -67,11 +67,19 @@ class RiskManager:
     async def seek_new_trade(self, kline):
         current_price = float(kline["c"])
         
+        # 1. CHECK DE RIESGO
         can_open, reason = await self.can_trade("CHECK", current_price)
-        if not can_open: return
+        if not can_open:
+            if "Posición" not in reason and time.time() % 60 < 2:
+                logging.info(f"[{self.config.symbol}] ⛔ Bloqueado por: {reason}")
+            return
 
+        # 2. ESTRATEGIA
         if not self.state.daily_pivots: return
-        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]): return
+        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]):
+            if time.time() % 60 < 2:
+                logging.info(f"[{self.config.symbol}] Esperando indicadores...")
+            return
         
         async with self.bot.lock:
             if self.state.is_in_position: return
@@ -85,40 +93,51 @@ class RiskManager:
                 atr = self.state.cached_atr
                 if hasattr(self.config, 'min_volatility_atr_pct'):
                     atr_pct = (atr / current_price) * 100
-                    if atr_pct < self.config.min_volatility_atr_pct: return
+                    if atr_pct < self.config.min_volatility_atr_pct:
+                        if time.time() % 300 < 2:
+                            logging.info(f"[{self.config.symbol}] 💤 Mercado Lento: ATR {atr_pct:.2f}%")
+                        return
 
                 vol_ok = current_volume > (median_vol * self.config.volume_factor)
+                
                 p = self.state.daily_pivots
                 ema = self.state.cached_ema
                 
-                is_green = current_price > open_price
-                is_red = current_price < open_price
+                # Diagnóstico (Verbose)
+                dist_l4 = abs(current_price - p["L4"]) / current_price * 100
+                dist_h4 = abs(current_price - p["H4"]) / current_price * 100
+                dist_l3 = abs(current_price - p["L3"]) / current_price * 100
+                dist_h3 = abs(current_price - p["H3"]) / current_price * 100
+                
+                if (dist_l4 < 0.3 or dist_h4 < 0.3 or dist_l3 < 0.3 or dist_h3 < 0.3) and time.time() % 10 < 2:
+                     logging.info(f"[{self.config.symbol}] 🔍 Cerca Nivel. Px:{current_price} Vol:{'✅' if vol_ok else '❌'} Vela:{'🟢' if current_price > open_price else '🔴'}")
 
                 side = None
                 entry_type = None
                 sl = None
                 tp_prices = []
                 
-                # Estrategia Híbrida
+                # Híbrido
                 if current_price > p["H4"]:
-                    if vol_ok and current_price > ema and is_green:
+                    if vol_ok and current_price > ema and current_price > open_price:
                         side, entry_type = SIDE_BUY, "Breakout Long"
                         sl = current_price - atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price + atr * self.config.breakout_tp_mult]
+                
                 elif current_price < p["L4"]:
-                    if vol_ok and current_price < ema and is_red:
+                    if vol_ok and current_price < ema and current_price < open_price:
                         side, entry_type = SIDE_SELL, "Breakout Short"
                         sl = current_price + atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price - atr * self.config.breakout_tp_mult]
                 
                 if not side:
                     if current_price <= p["L3"]:
-                        if vol_ok and is_green:
+                        if vol_ok and current_price > open_price:
                             side, entry_type = SIDE_BUY, "Ranging Long"
                             sl = p["L4"] - atr * self.config.ranging_atr_multiplier
                             tp_prices = [current_price + (atr*0.5), current_price + (atr*1.0), current_price + (atr*2.0)]
                     elif current_price >= p["H3"]:
-                        if vol_ok and is_red:
+                        if vol_ok and current_price < open_price:
                             side, entry_type = SIDE_SELL, "Ranging Short"
                             sl = p["H4"] + atr * self.config.ranging_atr_multiplier
                             tp_prices = [current_price - (atr*0.5), current_price - (atr*1.0), current_price - (atr*2.0)]
@@ -148,11 +167,29 @@ class RiskManager:
         async with self.bot.lock:
             try:
                 pos = await self.bot._get_current_position()
-                if not pos: return
-                qty = abs(float(pos.get("positionAmt", 0)))
                 
-                # 1. Reconciliación
+                # --- DIAGNÓSTICO DE ZOMBIE ---
+                # Esto imprimirá qué ve el bot para que sepas si falla
+                qty_real = float(pos.get("positionAmt", 0)) if pos else 0.0
+                mem_state = self.state.is_in_position
+                if time.time() % 60 < 5: 
+                     logging.info(f"[{self.config.symbol}] CHECK: Binance={qty_real} | Memoria={mem_state}")
+                # ----------------------------
+
+                if not pos: return
+                qty = abs(qty_real)
+                
+                # 1. CIERRE TOTAL / ZOMBIE KILLER (Prioridad 1)
+                # Si Binance dice ~0, y la memoria dice que estamos dentro -> Limpiar
+                if qty < 0.0001:
+                    if self.state.is_in_position:
+                        logging.warning(f"[{self.config.symbol}] 💀 Cierre detectado (Qty={qty}). Ejecutando limpieza...")
+                        await self._handle_full_close()
+                    return 
+                
+                # 2. Reconciliación (Si Binance tiene qty y nosotros no)
                 if not self.state.is_in_position and qty > 0:
+                    logging.info(f"[{self.config.symbol}] Posición detectada; sincronizando.")
                     self.state.is_in_position = True
                     self.state.current_position_info = {
                         "quantity": qty, "entry_price": float(pos.get("entryPrice")),
@@ -163,27 +200,18 @@ class RiskManager:
                     self.state.save_state()
                     return 
 
-                # Actualizar datos
-                if qty > 0:
-                    self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
-                    self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
+                # 3. Actualizar datos en vivo
+                self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
+                self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
                 
-                # 2. CIERRE TOTAL / ZOMBIE KILLER
-                # Si la cantidad es casi cero, consideramos cerrado
-                if qty < 0.0001:
-                    if self.state.is_in_position:
-                        logging.info(f"[{self.config.symbol}] Posición cerrada en Binance. Iniciando limpieza...")
-                        await self._handle_full_close()
-                    return 
-                
-                # 3. TP Parcial
+                # 4. TP Parcial
                 if qty < self.state.last_known_position_qty:
                     await self._handle_partial_tp(qty)
                 
-                # 4. Trailing
+                # 5. Trailing Stop
                 await self._check_trailing_stop(float(pos.get("markPrice")), qty)
 
-                # 5. Time Stop
+                # 6. Time Stop
                 if self.state.current_position_info.get("entry_type", "").startswith("Ranging"):
                     entry_time = self.state.current_position_info.get("entry_time", 0)
                     if entry_time > 0:
@@ -194,26 +222,24 @@ class RiskManager:
             except Exception as e:
                 if "1003" not in str(e): logging.error(f"[{self.config.symbol}] Check Error: {e}", exc_info=True)
 
-    # --- FIX v96: STATE FIRST + CLEAN ORDERS ---
     async def _handle_full_close(self):
-        # 1. LIBERAR ESTADO (PRIORIDAD MÁXIMA)
+        # --- STATE FIRST: Liberar bot primero ---
+        logging.info(f"[{self.config.symbol}] Liberando estado...")
         old_info = self.state.current_position_info.copy()
         self.state.is_in_position = False
         self.state.current_position_info = {}
         self.state.last_known_position_qty = 0.0
         self.state.sl_moved_to_be = False
         self.state.save_state()
-        logging.info(f"[{self.config.symbol}] Estado liberado (Bot listo para nueva operación).")
 
-        # 2. CANCELAR ÓRDENES PENDIENTES (Limpieza de basura)
-        # Lo hacemos DESPUÉS de liberar el estado para que si falla la red, el bot no quede zombie
+        # --- LIMPIEZA DE ÓRDENES (CRÍTICO PARA TPS) ---
         try:
+            logging.info(f"[{self.config.symbol}] Cancelando todas las órdenes pendientes...")
             await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
-            logging.info(f"[{self.config.symbol}] Órdenes pendientes canceladas.")
         except Exception as e:
-            logging.warning(f"[{self.config.symbol}] Fallo al cancelar órdenes (no crítico): {e}")
+            logging.warning(f"[{self.config.symbol}] Error cancelando órdenes (no crítico): {e}")
 
-        # 3. REPORTAR RESULTADOS
+        # --- REPORTE ---
         pnl = 0.0
         roi = 0.0
         try:
@@ -226,19 +252,20 @@ class RiskManager:
                  roi = (pnl / margin) * 100
         except Exception: pass
 
-        # Actualizar PnL diario
         total_pnl = old_info.get("total_pnl", 0) + pnl
         self.state.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
         
-        # Cooldown
         cooldown = 300
-        if total_pnl > 0: cooldown = 0
-        elif total_pnl < 0: cooldown = 900
-        
+        if total_pnl > 0:
+            cooldown = 0
+            logging.info(f"[{self.config.symbol}] WIN (+{total_pnl:.2f}). Sin cooldown.")
+        elif total_pnl < 0:
+            cooldown = 900
+            logging.info(f"[{self.config.symbol}] LOSS ({total_pnl:.2f}). Cooldown 15m.")
+            
         self.state.trade_cooldown_until = self._get_now() + cooldown
         self.state.save_state()
 
-        # Telegram
         icon = "✅" if total_pnl >= 0 else "❌"
         wait_msg = f"⏳ Espera: {int(cooldown/60)}m" if cooldown > 0 else "🚀 Listo"
         msg = f"{icon} <b>{self.config.symbol} CERRADA</b> {icon}\n" \
@@ -246,11 +273,9 @@ class RiskManager:
               f"<b>ROI</b>: <code>{roi:+.2f}%</code>\n" \
               f"<i>{wait_msg}</i>"
         
-        # Enviar sin bloquear si falla
         try: await self.telegram_handler._send_message(msg)
         except: pass
         
-        # CSV
         try:
             td = {
                 "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -261,20 +286,33 @@ class RiskManager:
             self.bot._log_trade_to_csv(td, self.bot.CSV_FILE)
         except: pass
 
-    # ... (resto de métodos igual) ...
-    async def _daily_loss_exceeded(self, balance):
-        # ... (código existente)
-        if balance <= 0: return False
-        start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
-        realized_pnl = sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
-        if start_bal > 0:
-            daily_pnl_pct = (realized_pnl / start_bal) * 100
-            if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
-                if time.time() > self.state.trade_cooldown_until:
-                    await self.telegram_handler._send_message(f"❌ <b>{self.config.symbol}</b>: Límite diario alcanzado.")
-                    self.state.trade_cooldown_until = self._get_now() + 86400
-                return True
-        return False
+    # ... (Mantener _check_trailing_stop, _handle_partial_tp y _daily_loss_exceeded igual que antes) ...
+    async def _check_trailing_stop(self, current_price, qty):
+        info = self.state.current_position_info
+        entry = info.get('entry_price')
+        side = info.get('side')
+        atr = self.state.cached_atr
+        if not atr: return
+        trigger = atr * self.config.trailing_stop_trigger_atr
+        dist = atr * self.config.trailing_stop_distance_atr
+        new_sl = None
+        if side == SIDE_BUY:
+            if current_price > (entry + trigger):
+                pot_sl = current_price - dist
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
+                if pot_sl > curr_sl: new_sl = pot_sl
+        elif side == SIDE_SELL:
+            if current_price < (entry - trigger):
+                pot_sl = current_price + dist
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
+                if pot_sl < curr_sl: new_sl = pot_sl
+        if new_sl:
+            logging.info(f"[{self.config.symbol}] Trailing SL -> {new_sl:.2f}")
+            await self.orders_manager.update_sl(new_sl, qty)
+            self.state.current_position_info["trailing_sl_price"] = new_sl
+            self.state.save_state()
 
     async def _handle_partial_tp(self, qty):
         count = self.state.current_position_info.get("tps_hit_count", 0) + 1
@@ -294,32 +332,15 @@ class RiskManager:
         if count == 2 and not self.state.sl_moved_to_be:
             await self.orders_manager.move_sl_to_be(qty)
 
-    async def _check_trailing_stop(self, current_price, qty):
-        info = self.state.current_position_info
-        entry = info.get('entry_price')
-        side = info.get('side')
-        atr = self.state.cached_atr
-        if not atr: return
-
-        trigger = atr * self.config.trailing_stop_trigger_atr
-        dist = atr * self.config.trailing_stop_distance_atr
-        new_sl = None
-
-        if side == SIDE_BUY:
-            if current_price > (entry + trigger):
-                pot_sl = current_price - dist
-                curr_sl = info.get("trailing_sl_price")
-                if curr_sl is None: curr_sl = entry
-                if pot_sl > curr_sl: new_sl = pot_sl
-        elif side == SIDE_SELL:
-            if current_price < (entry - trigger):
-                pot_sl = current_price + dist
-                curr_sl = info.get("trailing_sl_price")
-                if curr_sl is None: curr_sl = entry
-                if pot_sl < curr_sl: new_sl = pot_sl
-        
-        if new_sl:
-            logging.info(f"[{self.config.symbol}] Trailing SL -> {new_sl:.2f}")
-            await self.orders_manager.update_sl(new_sl, qty)
-            self.state.current_position_info["trailing_sl_price"] = new_sl
-            self.state.save_state()
+    async def _daily_loss_exceeded(self, balance):
+        if balance <= 0: return False
+        start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
+        realized_pnl = sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
+        if start_bal > 0:
+            daily_pnl_pct = (realized_pnl / start_bal) * 100
+            if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
+                if time.time() > self.state.trade_cooldown_until:
+                    await self.telegram_handler._send_message(f"❌ <b>{self.config.symbol}</b>: Límite diario alcanzado.")
+                    self.state.trade_cooldown_until = self._get_now() + 86400
+                return True
+        return False
