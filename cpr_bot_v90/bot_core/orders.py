@@ -21,7 +21,7 @@ class OrdersManager:
         self.take_profit_levels = config.take_profit_levels
 
     async def place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
-        # ... (El código de entrada se mantiene igual, lo incluyo completo abajo) ...
+        """Coloca entrada y luego SL (Close Position) + TPs."""
         try:
             logging.info(f"[{self.symbol}] Enviando MARKET {side} {qty}")
             market = await self.client.futures_create_order(
@@ -34,9 +34,13 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
         
-        filled, attempts, order_id = False, 0, market.get("orderId")
-        avg_price, executed_qty = 0.0, 0.0
+        # --- VERIFICACIÓN DE LLENADO ---
+        filled = False
+        order_id = market.get("orderId")
+        avg_price = 0.0
+        executed_qty = 0.0
         
+        attempts = 0
         while attempts < 10:
             try:
                 status = await self.client.futures_get_order(symbol=self.symbol, orderId=order_id)
@@ -51,54 +55,53 @@ class OrdersManager:
         
         if not filled:
             # Plan B
-            logging.warning(f"[{self.symbol}] Orden no confirmada por ID. Verificando posición...")
             try:
                 pos = await self.client.futures_position_information()
                 my_pos = next((p for p in pos if p["symbol"] == self.symbol), None)
                 if my_pos:
                     pos_amt = abs(float(my_pos.get("positionAmt", 0)))
                     if pos_amt > 0 and abs(pos_amt - qty) < (qty * 0.1): 
-                        logging.info(f"[{self.symbol}] ¡Posición confirmada por balance! Procediendo.")
                         filled = True
                         avg_price = float(my_pos.get("entryPrice", entry_price_signal))
                         executed_qty = pos_amt
-            except Exception as e:
-                logging.error(f"Fallo en verificación Plan B: {e}")
+            except Exception: pass
 
         if not filled:
             logging.error(f"[{self.symbol}] CRÍTICO: Orden no confirmada.")
-            await self.telegram_handler._send_message(f"🚨 <b>ERROR CRÍTICO ({self.symbol})</b>\nOrden enviada pero no confirmada.")
+            await self.telegram_handler._send_message(f"🚨 <b>ERROR ({self.symbol})</b>\nOrden enviada pero no confirmada.")
             self.state.trade_cooldown_until = time.time() + 300
             return
 
-        # SL / TP con Fix Min Notional
+        # --- SL / TP ---
         sl_order_id = None
         try:
             batch = []
-            notional_total = executed_qty * avg_price
-            min_notional = 6.0
+            sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             
+            # 1. STOP LOSS "NUCLEAR" (Cierra todo)
+            # Nota: closePosition=True NO lleva cantidad
+            batch.append({
+                "symbol": self.symbol, 
+                "side": sl_side, 
+                "type": STOP_MARKET,
+                "stopPrice": format_price(self.tick_size, sl_price),
+                "closePosition": "true"  # <--- LA CLAVE
+            })
+            
+            # 2. TAKE PROFITS (Normales, reduceOnly)
+            notional_total = executed_qty * avg_price
             target_tps = self.take_profit_levels
-            if (notional_total / target_tps) < min_notional:
-                logging.warning(f"[{self.symbol}] Posición chica ({notional_total:.1f}). 1 TP único.")
-                target_tps = 1
+            if (notional_total / target_tps) < 6.0: target_tps = 1
             
             num_tps = min(len(tp_prices), target_tps)
             tp_qty_per = Decimal(str(executed_qty)) / Decimal(str(num_tps))
-            sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            
-            batch.append({
-                "symbol": self.symbol, "side": sl_side, "type": STOP_MARKET,
-                "quantity": format_qty(self.step_size, executed_qty), 
-                "stopPrice": format_price(self.tick_size, sl_price),
-                "reduceOnly": "true"
-            })
-            
             remaining = Decimal(str(executed_qty))
             final_tps = []
+
             for i, tp in enumerate(tp_prices[:num_tps]):
                 qty_dec = tp_qty_per if i < num_tps - 1 else remaining
                 qty_str = format_qty(self.step_size, qty_dec)
+                
                 if i == num_tps - 1 and remaining > 0 and remaining < Decimal(str(self.step_size)): continue
                 remaining -= Decimal(qty_str)
                 final_tps.append(tp)
@@ -115,10 +118,10 @@ class OrdersManager:
 
         except Exception as e:
             logging.error(f"[{self.symbol}] Fallo SL/TP: {e}")
-            await self.telegram_handler._send_message(f"⚠️ <b>FAIL-SAFE ({self.symbol})</b>\nFallo SL/TP. Cerrando.")
             await self.close_position_manual(reason="Fallo SL/TP")
             return 
 
+        # Actualizar Estado
         self.state.is_in_position = True
         self.state.current_position_info = {
             "side": side, "quantity": executed_qty, "entry_price": avg_price,
@@ -132,19 +135,19 @@ class OrdersManager:
         self.state.trade_cooldown_until = time.time() + 300
         self.state.save_state()
 
+        # Notificar
         try:
-            atr_text = f"{self.state.cached_atr:.2f}" if self.state.cached_atr else "N/A"
-            notional = executed_qty * avg_price
-            icon = "🟢" if side == SIDE_BUY else "🔴"
+            notional_usdt = executed_qty * avg_price
+            side_icon = "🟢" if side == SIDE_BUY else "🔴"
             tp_str = "\n".join([f" {i+1}) {format_price(self.tick_size, t)}" for i, t in enumerate(final_tps)])
-            
-            msg = (f"{icon} <b>NUEVA ORDEN: {self.symbol}</b>\n"
-                   f"<b>Tipo:</b> {entry_type}\n"
-                   f"<b>Entrada:</b> {format_price(self.tick_size, avg_price)}\n"
-                   f"<b>Valor:</b> ~{notional:.1f} USDT\n\n"
-                   f"🎯 <b>TPs:</b>\n{tp_str}\n\n"
-                   f"🛡️ <b>SL:</b> {format_price(self.tick_size, sl_price)}\n"
-                   f"📉 <b>ATR:</b> {atr_text}")
+            msg = (
+                f"{side_icon} <b>NUEVA ORDEN: {self.symbol}</b>\n"
+                f"<b>Tipo:</b> {entry_type}\n"
+                f"<b>Entrada:</b> {format_price(self.tick_size, avg_price)}\n"
+                f"<b>Valor:</b> ~{notional_usdt:.1f} USDT\n\n"
+                f"🎯 <b>TPs:</b>\n{tp_str}\n\n"
+                f"🛡️ <b>SL:</b> {format_price(self.tick_size, sl_price)}"
+            )
             await self.telegram_handler._send_message(msg)
         except Exception: pass
 
@@ -167,74 +170,37 @@ class OrdersManager:
 
         try:
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            res = await self.client.futures_create_order(
+            # STOP LOSS NUCLEAR (Sin cantidad)
+            new_order = await self.client.futures_create_order(
                 symbol=self.symbol, side=sl_side, type=STOP_MARKET,
-                quantity=format_qty(self.step_size, qty),
                 stopPrice=format_price(self.tick_size, new_price),
-                reduceOnly="true"
+                closePosition="true"
             )
-            self.state.current_position_info["sl_order_id"] = res.get("orderId")
+            self.state.current_position_info["sl_order_id"] = new_order.get("orderId")
             self.state.save_state()
             
             if reason == "Break-Even":
                 await self.telegram_handler._send_message(f"🛡️ <b>{self.symbol}</b> SL a BE: {format_price(self.tick_size, new_price)}")
         except Exception as e:
-            logging.error(f"Error update SL: {e}")
+            logging.error(f"[{self.symbol}] Error actualizando SL: {e}")
 
-    # --- FIX ROBUSTO: CIERRE MANUAL BLINDADO ---
     async def close_position_manual(self, reason="Manual Close"):
-        logging.warning(f"[{self.symbol}] Intentando cierre manual: {reason}")
-        
-        # PASO 1: Cancelar Órdenes (Si falla, seguimos igual)
+        logging.warning(f"[{self.symbol}] Cerrando manual: {reason}")
         try:
             await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
-            logging.info(f"[{self.symbol}] Órdenes pendientes canceladas.")
-        except Exception as e:
-            logging.error(f"[{self.symbol}] Error cancelando órdenes: {e}")
-
-        # PASO 2: Cerrar Posición (Si hay)
-        try:
             pos = await self.client.futures_position_information()
-            p = next((x for x in pos if x["symbol"] == self.symbol), None)
+            p = next((p for p in pos if p["symbol"] == self.symbol), None)
             if p:
                 qty = float(p.get("positionAmt", 0))
                 if qty != 0:
-                    logging.info(f"[{self.symbol}] Cerrando qty {qty} a mercado...")
                     side = SIDE_SELL if qty > 0 else SIDE_BUY
                     await self.client.futures_create_order(
                         symbol=self.symbol, side=side, type=ORDER_TYPE_MARKET,
                         quantity=format_qty(self.step_size, abs(qty)), reduceOnly="true"
                     )
-                else:
-                    logging.info(f"[{self.symbol}] Posición ya es 0 en Binance.")
-        except Exception as e:
-            logging.error(f"[{self.symbol}] Error enviando orden de cierre: {e}")
-            # Si falla el cierre, NO reseteamos estado (para que el zombie killer lo intente de nuevo)
-            # return 
-            # OJO: Si la orden falla, quizás ya no tengamos posición.
-            pass
-
-        # PASO 3: Verificar Final y Resetear Estado
-        # Hacemos una última verificación. Si qty es 0 (o muy cerca), limpiamos estado.
-        try:
-            # Esperar un momento para que se procese
-            await asyncio.sleep(1)
-            pos_final = await self.client.futures_position_information()
-            p_final = next((x for x in pos_final if x["symbol"] == self.symbol), None)
             
-            qty_final = abs(float(p_final.get("positionAmt", 0))) if p_final else 0.0
-            
-            # Si ya está cerrado (o es polvo), liberamos al bot
-            if qty_final < 0.0001:
-                if self.state.is_in_position:
-                    logging.info(f"[{self.symbol}] Confirmado cerrado. Reseteando estado local.")
-                    self.state.is_in_position = False
-                    self.state.current_position_info = {}
-                    self.state.sl_moved_to_be = False
-                    self.state.save_state()
-            else:
-                logging.warning(f"[{self.symbol}] ALERTA: La posición sigue abierta ({qty_final}) tras intento de cierre.")
-                await self.telegram_handler._send_message(f"🚨 <b>{self.symbol}</b>: Falló el cierre automático. Cerrar manual.")
+            self.state.is_in_position = False
+            self.state.save_state()
                 
         except Exception as e:
-            logging.error(f"Error verificando cierre: {e}")
+            logging.error(f"Error cierre manual: {e}")
