@@ -125,7 +125,8 @@ class OrdersManager:
             "entry_type": entry_type, "mark_price_entry": avg_price,
             "atr_at_entry": self.state.cached_atr, "tps_hit_count": 0,
             "entry_time": time.time(), "sl_order_id": sl_order_id,
-            "total_pnl": 0.0
+            "total_pnl": 0.0,
+            "unrealized_pnl": 0.0
         }
         self.state.last_known_position_qty = executed_qty
         self.state.sl_moved_to_be = False
