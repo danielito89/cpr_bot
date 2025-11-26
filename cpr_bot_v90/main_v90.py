@@ -29,24 +29,41 @@ TESTNET_MODE = os.environ.get("TESTNET_MODE", "false").lower() in ("1", "true", 
 
 INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
+# --- CONFIGURACIÓN BASE (Default para nuevos pares) ---
 DEFAULT_CONFIG = {
     "investment_pct": 0.05,
     "leverage": 30,
     "cpr_width_threshold": 0.2,
-    "volume_factor": 1.1,
+    "volume_factor": 1.1,            # El ganador general
     "take_profit_levels": 3,
     "atr_period": 14,
     "ranging_atr_multiplier": 0.5,
     "breakout_atr_sl_multiplier": 1.0,
-    "breakout_tp_mult": 10,
+    "breakout_tp_mult": 1.25,        # Valor base (Sniper)
     "range_tp_mult": 2.0,
     "ema_period": 20,
     "ema_timeframe": "1h",
     "indicator_update_interval_minutes": 15,
     "DAILY_LOSS_LIMIT_PCT": float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "15.0")),
     "MIN_VOLATILITY_ATR_PCT": 0.5,     
-    "TRAILING_STOP_TRIGGER_ATR": 1.25,  
+    "TRAILING_STOP_TRIGGER_ATR": 5.0, # Desactivado por defecto (Sniper)
     "TRAILING_STOP_DISTANCE_ATR": 1.0  
+}
+
+# --- CONFIGURACIÓN ESPECÍFICA POR PAR (Overrides) ---
+SYMBOL_CONFIGS = {
+    "ETHUSDT": {
+        # ETH es "Runner": Trailing Activo
+        "breakout_tp_mult": 10.0,          # Sin techo
+        "trailing_stop_trigger_atr": 1.25, # Activar trailing
+        "trailing_stop_distance_atr": 1.0
+    },
+    "BTCUSDT": {
+        # BTC es "Sniper": TP Fijo (Hereda default, pero lo explicito)
+        "breakout_tp_mult": 1.25,          # TP Fijo
+        "trailing_stop_trigger_atr": 5.0,  # Trailing apagado (inalcanzable)
+        "trailing_stop_distance_atr": 1.0
+    }
 }
 
 if not API_KEY or not API_SECRET:
@@ -115,6 +132,14 @@ class BotOrchestrator:
         if symbol in self.strategies: return False
         try:
             logging.info(f"Registrando {symbol}...")
+            # --- FUSIONAR CONFIGURACIÓN ---
+            # 1. Copiar default
+            pair_config = self.DEFAULT_CONFIG.copy()
+            # 2. Sobrescribir con específica si existe
+            if symbol in SYMBOL_CONFIGS:
+                pair_config.update(SYMBOL_CONFIGS[symbol])
+                logging.info(f"[{symbol}] Configuración específica aplicada.")
+            # ------------------------------
             # Pasamos None como bsm porque la estrategia es pasiva
             strategy = SymbolStrategy(symbol, DEFAULT_CONFIG, self.client, self.telegram_handler)
             await strategy.run()
