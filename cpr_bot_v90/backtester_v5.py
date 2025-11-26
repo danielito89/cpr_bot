@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v5.py
-# Versión: v5.7 (Final: Reporte Detallado + Todos los Fixes Técnicos)
+# Versión: v5.8 (Reporte con Periodo Evaluado + Filtro de Fechas)
 
 import os
 import sys
@@ -18,9 +18,13 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 # --- 1. CONFIGURACIÓN ---
 SYMBOL_TO_TEST = "ETHUSDT"
 START_BALANCE = 1000
-# --- PERIODO A EVALUAR ---
-TEST_START_DATE = "2024-01-01"  # <--- Cambia esto para iniciar aquí
-TEST_END_DATE = "2024-03-01"    # <--- Cambia esto para terminar aquí
+
+# --- FILTRO DE FECHAS (Opcional) ---
+# Formato: "YYYY-MM-DD" o None para usar todo el historial
+TEST_START_DATE = None  # Ej: "2024-01-01"
+TEST_END_DATE = None    # Ej: "2024-06-30"
+# -----------------------------------
+
 # Riesgo
 LEVERAGE = 30
 INVESTMENT_PCT = 0.05
@@ -41,7 +45,12 @@ MIN_VOLATILITY_ATR_PCT = 0.5
 TRAILING_STOP_TRIGGER_ATR = 1.25
 TRAILING_STOP_DISTANCE_ATR = 1.0
 
-# Directorios
+# Multiplicadores
+RANGING_SL_MULT = 0.5 
+BREAKOUT_SL_MULT = 1.0 
+RANGING_TP_MULT = 0.8  
+BREAKOUT_TP_MULT = 1.25 
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 # --- IMPORTAR LÓGICA REAL ---
@@ -148,6 +157,8 @@ class BacktesterV5:
         self.current_timestamp = 0.0
         self.controller = MockBotController(self, SYMBOL_TO_TEST)
         self.risk_manager = RiskManager(self.controller)
+        self.start_date_actual = None
+        self.end_date_actual = None
 
     def open_position(self, side, qty, price, sl, tps, type_):
         notional = qty * price
@@ -245,7 +256,7 @@ class BacktesterV5:
                 self.close_position("Take-Profit Final")
 
     async def run(self):
-        print(f"Iniciando Backtest V5.7 (Reporte Completo) para {SYMBOL_TO_TEST}...")
+        print(f"Iniciando Backtest V5.8 (Reporte Completo) para {SYMBOL_TO_TEST}...")
         
         file_1h = f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv"
         file_1d = f"mainnet_data_1d_{SYMBOL_TO_TEST}.csv"
@@ -275,22 +286,25 @@ class BacktesterV5:
         print("Fusionando...")
         df_merged = pd.merge_asof(df_1m, df_1h[['EMA_1h', 'ATR_1h']], left_index=True, right_index=True, direction='backward')
         df_merged.dropna(inplace=True)
-        # --- APLICAR FILTRO DE FECHAS ---
+        
+        # --- FILTRO DE FECHAS ---
         if TEST_START_DATE:
             df_merged = df_merged.loc[TEST_START_DATE:]
         if TEST_END_DATE:
             df_merged = df_merged.loc[:TEST_END_DATE]
             
-        print(f"--- PERIODO SELECCIONADO ---")
-        print(f"Desde: {TEST_START_DATE if TEST_START_DATE else 'Inicio'}")
-        print(f"Hasta: {TEST_END_DATE if TEST_END_DATE else 'Fin'}")
-        print(f"Velas a simular: {len(df_merged)}")
-        print("-" * 30)
-        # ------------------------------
+        if df_merged.empty:
+            print("No hay datos en el rango seleccionado.")
+            return
+            
+        # Guardar fechas reales para el reporte
+        self.start_date_actual = df_merged.index[0]
+        self.end_date_actual = df_merged.index[-1]
+        
         del df_1h, df_1m
         gc.collect()
 
-        print(f"Simulando {len(df_merged)} velas...")
+        print(f"Simulando {len(df_merged)} velas ({self.start_date_actual} - {self.end_date_actual})...")
         current_date_obj = None
 
         for row in df_merged.itertuples():
@@ -319,7 +333,6 @@ class BacktesterV5:
                 
                 # Time Stop con FIX de tipo
                 if self.state.current_position_info['entry_type'].startswith("Ranging"):
-                     # Resta de floats (segundos)
                      elapsed = self.current_timestamp - self.state.current_position_info['entry_time']
                      if (elapsed / 3600) > TIME_STOP_HOURS: 
                          self.close_position(f"Time-Stop ({TIME_STOP_HOURS}h)")
@@ -348,14 +361,19 @@ class BacktesterV5:
         pf = gross_profit / gross_loss if gross_loss != 0 else 0
 
         capped_count = df['is_capped'].sum() if 'is_capped' in df.columns else 0
+        days_tested = (self.end_date_actual - self.start_date_actual).days
 
         print("\n" + "="*50)
-        print(f" RESULTADOS V5.7 FINAL: {SYMBOL_TO_TEST}")
+        print(f" RESULTADOS V5.8 FINAL: {SYMBOL_TO_TEST}")
         print("="*50)
+        print(f" --- Periodo ---")
+        print(f" Inicio:          {self.start_date_actual}")
+        print(f" Fin:             {self.end_date_actual}")
+        print(f" Duración:        {days_tested} días")
+        print("-" * 50)
         print(f" --- Configuración ---")
         print(f" Saldo Inicial:   ${START_BALANCE}")
         print(f" Vol Factor:      {VOLUME_FACTOR}")
-        print(f" Time Stop:       {TIME_STOP_HOURS}h")
         print(f" Riesgo:          {INVESTMENT_PCT*100}% Capital x {LEVERAGE} Leverage")
         print(f" Max Trade:       ${MAX_TRADE_SIZE_USDT}")
         print("-" * 50)
@@ -367,6 +385,7 @@ class BacktesterV5:
         print("-" * 50)
         print(f" --- Actividad ---")
         print(f" Total Trades:    {len(df)}")
+        print(f" Promedio Diario: {len(df)/days_tested:.1f} trades/día")
         print(f" Trades con Techo: {capped_count}")
         print("="*50)
         df.to_csv(os.path.join(DATA_DIR, f"backtest_v5_{SYMBOL_TO_TEST}.csv"))
