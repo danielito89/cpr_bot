@@ -21,6 +21,7 @@ class OrdersManager:
         self.take_profit_levels = config.take_profit_levels
 
     async def place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
+        """Coloca entrada y luego SL (Close Position) + TPs."""
         try:
             logging.info(f"[{self.symbol}] Enviando MARKET {side} {qty}")
             market = await self.client.futures_create_order(
@@ -33,7 +34,7 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
         
-        # Verificar Llenado
+        # Verificación de llenado
         filled = False
         order_id = market.get("orderId")
         avg_price = 0.0
@@ -71,22 +72,20 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
 
-        # --- SL / TP con STOP NUCLEAR ---
+        # SL / TP
         sl_order_id = None
         try:
             batch = []
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             
-            # 1. STOP LOSS (CIERRA TODO)
+            # STOP LOSS NUCLEAR
             batch.append({
-                "symbol": self.symbol, 
-                "side": sl_side, 
-                "type": STOP_MARKET,
+                "symbol": self.symbol, "side": sl_side, "type": STOP_MARKET,
                 "stopPrice": format_price(self.tick_size, sl_price),
-                "closePosition": "true" # <--- ¡LA CLAVE!
+                "closePosition": "true" 
             })
             
-            # 2. TPs (Validación Min Notional)
+            # TPs
             notional_total = executed_qty * avg_price
             target_tps = self.take_profit_levels
             if (notional_total / target_tps) < 6.0: target_tps = 1
@@ -118,22 +117,29 @@ class OrdersManager:
             await self.close_position_manual(reason="Fallo SL/TP")
             return 
 
-        # Estado
+        # --- CORRECCIÓN: INICIALIZACIÓN PNL ---
         self.state.is_in_position = True
         self.state.current_position_info = {
-            "side": side, "quantity": executed_qty, "entry_price": avg_price,
-            "entry_type": entry_type, "mark_price_entry": avg_price,
-            "atr_at_entry": self.state.cached_atr, "tps_hit_count": 0,
-            "entry_time": time.time(), "sl_order_id": sl_order_id,
+            "side": side, 
+            "quantity": executed_qty, 
+            "entry_price": avg_price,
+            "entry_type": entry_type, 
+            "mark_price_entry": avg_price,
+            "atr_at_entry": self.state.cached_atr, 
+            "tps_hit_count": 0,
+            "entry_time": time.time(), 
+            "sl_order_id": sl_order_id,
             "total_pnl": 0.0,
-            "unrealized_pnl": 0.0
+            "unrealized_pnl": 0.0  # <--- ¡AQUÍ ESTÁ LA LÍNEA FALTANTE!
         }
+        # --------------------------------------
+        
         self.state.last_known_position_qty = executed_qty
         self.state.sl_moved_to_be = False
         self.state.trade_cooldown_until = time.time() + 300
         self.state.save_state()
 
-        # Telegram
+        # Notificar
         try:
             atr_text = f"{self.state.cached_atr:.2f}" if self.state.cached_atr else "N/A"
             notional_usdt = executed_qty * avg_price
@@ -146,7 +152,8 @@ class OrdersManager:
                 f"<b>Entrada:</b> {format_price(self.tick_size, avg_price)}\n"
                 f"<b>Valor:</b> ~{notional_usdt:.1f} USDT\n\n"
                 f"🎯 <b>TPs:</b>\n{tp_str}\n\n"
-                f"🛡️ <b>SL:</b> {format_price(self.tick_size, sl_price)}"
+                f"🛡️ <b>SL:</b> {format_price(self.tick_size, sl_price)}\n"
+                f"📉 <b>ATR:</b> {atr_text}"
             )
             await self.telegram_handler._send_message(msg)
         except Exception: pass
@@ -170,7 +177,6 @@ class OrdersManager:
 
         try:
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            # Update también usa Nuclear
             new_order = await self.client.futures_create_order(
                 symbol=self.symbol, side=sl_side, type=STOP_MARKET,
                 stopPrice=format_price(self.tick_size, new_price),
