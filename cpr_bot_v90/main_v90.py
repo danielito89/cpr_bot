@@ -38,14 +38,14 @@ DEFAULT_CONFIG = {
     "atr_period": 14,
     "ranging_atr_multiplier": 0.5,
     "breakout_atr_sl_multiplier": 1.0,
-    "breakout_tp_mult": 1.25,
+    "breakout_tp_mult": 10,
     "range_tp_mult": 2.0,
     "ema_period": 20,
     "ema_timeframe": "1h",
     "indicator_update_interval_minutes": 15,
     "DAILY_LOSS_LIMIT_PCT": float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "15.0")),
     "MIN_VOLATILITY_ATR_PCT": 0.5,     
-    "TRAILING_STOP_TRIGGER_ATR": 1.5,  
+    "TRAILING_STOP_TRIGGER_ATR": 1.25,  
     "TRAILING_STOP_DISTANCE_ATR": 1.0  
 }
 
