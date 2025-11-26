@@ -21,7 +21,6 @@ class OrdersManager:
         self.take_profit_levels = config.take_profit_levels
 
     async def place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
-        """Coloca entrada y luego SL (Close Position) + TPs."""
         try:
             logging.info(f"[{self.symbol}] Enviando MARKET {side} {qty}")
             market = await self.client.futures_create_order(
@@ -34,7 +33,7 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
         
-        # --- VERIFICACIÓN DE LLENADO ---
+        # Verificar Llenado
         filled = False
         order_id = market.get("orderId")
         avg_price = 0.0
@@ -54,7 +53,7 @@ class OrdersManager:
             await asyncio.sleep(0.5)
         
         if not filled:
-            # Plan B: Verificar posición si la orden no confirma
+            # Plan B
             try:
                 pos = await self.client.futures_position_information()
                 my_pos = next((p for p in pos if p["symbol"] == self.symbol), None)
@@ -72,23 +71,22 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
 
-        # --- SL / TP ---
+        # --- SL / TP con STOP NUCLEAR ---
         sl_order_id = None
         try:
             batch = []
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             
-            # 1. STOP LOSS "NUCLEAR" (Cierra todo, sin cantidad)
+            # 1. STOP LOSS (CIERRA TODO)
             batch.append({
                 "symbol": self.symbol, 
                 "side": sl_side, 
                 "type": STOP_MARKET,
                 "stopPrice": format_price(self.tick_size, sl_price),
-                "closePosition": "true"  # <--- IMPORTANTE: Cierra el 100%
+                "closePosition": "true" # <--- ¡LA CLAVE!
             })
             
-            # 2. TAKE PROFITS (Normales, reduceOnly)
-            # Validación de tamaño mínimo (6 USDT)
+            # 2. TPs (Validación Min Notional)
             notional_total = executed_qty * avg_price
             target_tps = self.take_profit_levels
             if (notional_total / target_tps) < 6.0: target_tps = 1
@@ -101,7 +99,6 @@ class OrdersManager:
             for i, tp in enumerate(tp_prices[:num_tps]):
                 qty_dec = tp_qty_per if i < num_tps - 1 else remaining
                 qty_str = format_qty(self.step_size, qty_dec)
-                
                 if i == num_tps - 1 and remaining > 0 and remaining < Decimal(str(self.step_size)): continue
                 remaining -= Decimal(qty_str)
                 final_tps.append(tp)
@@ -118,11 +115,10 @@ class OrdersManager:
 
         except Exception as e:
             logging.error(f"[{self.symbol}] Fallo SL/TP: {e}")
-            # Si fallan los frenos, cerramos inmediatamente
             await self.close_position_manual(reason="Fallo SL/TP")
             return 
 
-        # Actualizar Estado
+        # Estado
         self.state.is_in_position = True
         self.state.current_position_info = {
             "side": side, "quantity": executed_qty, "entry_price": avg_price,
@@ -136,11 +132,13 @@ class OrdersManager:
         self.state.trade_cooldown_until = time.time() + 300
         self.state.save_state()
 
-        # Notificar
+        # Telegram
         try:
+            atr_text = f"{self.state.cached_atr:.2f}" if self.state.cached_atr else "N/A"
             notional_usdt = executed_qty * avg_price
             side_icon = "🟢" if side == SIDE_BUY else "🔴"
             tp_str = "\n".join([f" {i+1}) {format_price(self.tick_size, t)}" for i, t in enumerate(final_tps)])
+            
             msg = (
                 f"{side_icon} <b>NUEVA ORDEN: {self.symbol}</b>\n"
                 f"<b>Tipo:</b> {entry_type}\n"
@@ -161,7 +159,6 @@ class OrdersManager:
             self.state.save_state()
 
     async def update_sl(self, new_price, qty, reason="Trailing"):
-        """Actualiza el SL usando closePosition=True."""
         old_id = self.state.current_position_info.get("sl_order_id")
         side = self.state.current_position_info.get("side")
         if not side: return
@@ -172,12 +169,11 @@ class OrdersManager:
 
         try:
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            
-            # STOP LOSS NUCLEAR (Sin cantidad)
+            # Update también usa Nuclear
             new_order = await self.client.futures_create_order(
                 symbol=self.symbol, side=sl_side, type=STOP_MARKET,
                 stopPrice=format_price(self.tick_size, new_price),
-                closePosition="true"  # <--- CLAVE
+                closePosition="true"
             )
             self.state.current_position_info["sl_order_id"] = new_order.get("orderId")
             self.state.save_state()
@@ -190,10 +186,7 @@ class OrdersManager:
     async def close_position_manual(self, reason="Manual Close"):
         logging.warning(f"[{self.symbol}] Cerrando manual: {reason}")
         try:
-            # Intentar cancelar todo primero
             await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
-            
-            # Cerrar remanente
             pos = await self.client.futures_position_information()
             p = next((p for p in pos if p["symbol"] == self.symbol), None)
             if p:
@@ -205,10 +198,8 @@ class OrdersManager:
                         quantity=format_qty(self.step_size, abs(qty)), reduceOnly="true"
                     )
             
-            # Limpiar estado
             self.state.is_in_position = False
             self.state.current_position_info = {}
             self.state.save_state()
-                
         except Exception as e:
             logging.error(f"Error cierre manual: {e}")
