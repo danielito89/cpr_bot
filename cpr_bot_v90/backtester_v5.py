@@ -18,7 +18,9 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 # --- 1. CONFIGURACIÓN ---
 SYMBOL_TO_TEST = "ETHUSDT"
 START_BALANCE = 1000
-
+# --- PERIODO A EVALUAR ---
+TEST_START_DATE = "2024-01-01"  # <--- Cambia esto para iniciar aquí
+TEST_END_DATE = "2024-03-01"    # <--- Cambia esto para terminar aquí
 # Riesgo
 LEVERAGE = 30
 INVESTMENT_PCT = 0.05
@@ -30,13 +32,13 @@ MAX_DAILY_TRADES = 50
 # Estrategia
 EMA_PERIOD = 20
 ATR_PERIOD = 14
-VOLUME_FACTOR = 1.3
+VOLUME_FACTOR = 1.1
 CPR_WIDTH_THRESHOLD = 0.2
 TIME_STOP_HOURS = 12
 
 # Filtros
 MIN_VOLATILITY_ATR_PCT = 0.5
-TRAILING_STOP_TRIGGER_ATR = 1.5
+TRAILING_STOP_TRIGGER_ATR = 1.25
 TRAILING_STOP_DISTANCE_ATR = 1.0
 
 # Directorios
@@ -273,6 +275,18 @@ class BacktesterV5:
         print("Fusionando...")
         df_merged = pd.merge_asof(df_1m, df_1h[['EMA_1h', 'ATR_1h']], left_index=True, right_index=True, direction='backward')
         df_merged.dropna(inplace=True)
+        # --- APLICAR FILTRO DE FECHAS ---
+        if TEST_START_DATE:
+            df_merged = df_merged.loc[TEST_START_DATE:]
+        if TEST_END_DATE:
+            df_merged = df_merged.loc[:TEST_END_DATE]
+            
+        print(f"--- PERIODO SELECCIONADO ---")
+        print(f"Desde: {TEST_START_DATE if TEST_START_DATE else 'Inicio'}")
+        print(f"Hasta: {TEST_END_DATE if TEST_END_DATE else 'Fin'}")
+        print(f"Velas a simular: {len(df_merged)}")
+        print("-" * 30)
+        # ------------------------------
         del df_1h, df_1m
         gc.collect()
 
