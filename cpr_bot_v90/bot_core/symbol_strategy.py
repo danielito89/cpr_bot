@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # bot_core/symbol_strategy.py
-# Versión: v90.4
+# Versión: v98 (Incluye "Order Sweeper" para eliminar órdenes zombie)
 
 import os
 import sys
@@ -37,7 +37,7 @@ class SymbolStrategy:
     ):
         self.symbol = symbol
         
-        # --- Configuración (Actualizada v90.4) ---
+        # --- Configuración ---
         self.investment_pct = config.get("investment_pct", 0.01)
         self.leverage = config.get("leverage", 3)
         self.cpr_width_threshold = config.get("cpr_width_threshold", 0.2)
@@ -77,7 +77,7 @@ class SymbolStrategy:
         self.running = True
         self.tasks = []
         
-        logging.info(f"[{self.symbol}] Estrategia v90 (Pasiva) inicializada.")
+        logging.info(f"[{self.symbol}] Estrategia v98 (Con Order Sweeper) inicializada.")
 
     def save_state(self): self.state.save_state()
     def load_state(self): self.state.load_state()
@@ -214,6 +214,34 @@ class SymbolStrategy:
                 logging.error(f"[{self.symbol}] Timed tasks error: {e}")
                 await asyncio.sleep(10)
     
+    # --- NUEVO: ORDER SWEEPER (BARRENDERO DE ÓRDENES ZOMBIE) ---
+    async def reconcile_open_orders_loop(self):
+        """Verifica periódicamente si hay órdenes abiertas sin posición y las elimina."""
+        logging.info(f"[{self.symbol}] Order Sweeper iniciado (60s).")
+        while self.running:
+            try:
+                # 1. Ver si tenemos posición real
+                pos = await self._get_current_position()
+                qty = abs(float(pos.get("positionAmt", 0))) if pos else 0.0
+                
+                # 2. Si no hay posición, verificar si hay basura
+                if qty < 0.0001:
+                    open_orders = await self.client.futures_get_open_orders(symbol=self.symbol)
+                    if open_orders:
+                        logging.warning(f"[{self.symbol}] 🧹 ZOMBIE ORDERS DETECTADAS ({len(open_orders)}). Cancelando...")
+                        await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
+                        await self.telegram_handler._send_message(f"🧹 <b>{self.symbol}</b>: Órdenes basura eliminadas automáticamente.")
+            
+            except BinanceAPIException as e:
+                # Ignorar errores de red transitorios
+                if e.code != -1003: logging.error(f"[{self.symbol}] Sweeper error: {e}")
+            except Exception as e:
+                logging.error(f"[{self.symbol}] Sweeper loop error: {e}")
+            
+            # Ejecutar cada 60 segundos
+            await asyncio.sleep(60)
+    # -----------------------------------------------------------
+
     async def process_kline(self, k):
         if not k.get("x", False): return
         if not self.state.is_in_position:
@@ -236,22 +264,6 @@ class SymbolStrategy:
             self.orders_manager = OrdersManager(self.client, self.state, self.telegram_handler, self)
             self.risk_manager = RiskManager(bot_controller=self)
             self.load_state()
-
-            # --- AUTO-HEALING AL INICIO ---
-            # Verificar si la memoria coincide con la realidad
-            try:
-                real_pos = await self._get_current_position()
-                real_qty = abs(float(real_pos.get("positionAmt", 0))) if real_pos else 0.0
-                
-                if self.state.is_in_position and real_qty == 0:
-                    logging.warning(f"[{self.symbol}] Inconsistencia al inicio (Memoria=On, Binance=Off). Limpiando...")
-                    self.state.is_in_position = False
-                    self.state.current_position_info = {}
-                    self.state.save_state()
-                    await self.telegram_handler._send_message(f"🧹 <b>{self.symbol}</b>: Estado zombie limpiado al inicio.")
-            except Exception as e:
-                logging.error(f"Error en Auto-Healing: {e}")
-            # ------------------------------
             
             if self.state.daily_start_balance is None:
                  self.state.daily_start_balance = await self._get_account_balance()
@@ -259,6 +271,8 @@ class SymbolStrategy:
             self.tasks = [
                 asyncio.create_task(self.timed_tasks_loop()),
                 asyncio.create_task(self.account_poller_loop()),
+                # AÑADIR EL BARRENDERO AQUÍ
+                asyncio.create_task(self.reconcile_open_orders_loop()), 
             ]
             logging.info(f"[{self.symbol}] Tareas de fondo iniciadas.")
         except Exception as e:
