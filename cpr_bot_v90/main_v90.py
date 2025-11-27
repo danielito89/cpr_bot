@@ -51,17 +51,21 @@ DEFAULT_CONFIG = {
 }
 
 # --- CONFIGURACIÓN ESPECÍFICA POR PAR (Overrides) ---
+# --- CONFIGURACIÓN ESPECÍFICA POR PAR (Overrides) ---
 SYMBOL_CONFIGS = {
     "ETHUSDT": {
-        # ETH es "Runner": Trailing Activo
-        "breakout_tp_mult": 10.0,          # Sin techo
-        "trailing_stop_trigger_atr": 1.25, # Activar trailing
+        "breakout_tp_mult": 10.0,          # Runner: Sin techo
+        "trailing_stop_trigger_atr": 1.25, # Activar Trailing
+        "trailing_stop_distance_atr": 1.0
+    },
+    "BNBUSDT": {
+        "breakout_tp_mult": 10.0,          # Runner: Igual que ETH
+        "trailing_stop_trigger_atr": 1.25, 
         "trailing_stop_distance_atr": 1.0
     },
     "BTCUSDT": {
-        # BTC es "Sniper": TP Fijo (Hereda default, pero lo explicito)
-        "breakout_tp_mult": 1.25,          # TP Fijo
-        "trailing_stop_trigger_atr": 5.0,  # Trailing apagado (inalcanzable)
+        "breakout_tp_mult": 1.25,          # Sniper: TP Fijo
+        "trailing_stop_trigger_atr": 5.0,  # Trailing Apagado
         "trailing_stop_distance_atr": 1.0
     }
 }
