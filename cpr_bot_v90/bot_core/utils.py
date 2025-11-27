@@ -2,6 +2,7 @@ import logging
 from decimal import Decimal, ROUND_DOWN
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from binance.exceptions import BinanceAPIException
+from logging.handlers import RotatingFileHandler
 import httpx
 import json
 import shutil
@@ -20,6 +21,8 @@ CSV_HEADER = [
     "close_price_avg", "pnl", "pnl_percent_roi", "cpr_width", "atr_at_entry", "ema_filter"
 ]
 
+
+
 def setup_logging(log_file):
     """Configura el logger para la aplicación."""
     log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -27,11 +30,20 @@ def setup_logging(log_file):
     console = logging.StreamHandler()
     console.setFormatter(log_formatter)
 
+    file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
+    file_handler.setFormatter(log_formatter)
+
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.addHandler(console)
 
-    # Silenciar logs ruidosos
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    logger.addHandler(console)
+    logger.addHandler(file_handler)
+
+    # Silenciar librerías ruidosas
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("websockets").setLevel(logging.WARNING)
 
