@@ -108,7 +108,7 @@ class MockBotController:
         
         self.MAX_TRADE_SIZE_USDT = MAX_TRADE_SIZE_USDT
         self.MAX_DAILY_TRADES = MAX_DAILY_TRADES
-        
+
         # Configuración de Precisión según el Símbolo
         if "PEPE" in symbol:
             self.tick_size = 0.00000001
@@ -334,7 +334,7 @@ class BacktesterV5:
                 if yesterday_ts in df_1d.index:
                     d_row = df_1d.loc[yesterday_ts]
                     h, l, c = float(d_row['High']), float(d_row['Low']), float(d_row['Close'])
-                    self.state.daily_pivots = calculate_pivots_from_data(h, l, c, 0.01, 0.2)
+                    self.state.daily_pivots = calculate_pivots_from_data(h, l, c,self.controller.tick_size,CPR_WIDTH_THRESHOLD)
             
             self.state.cached_atr = row.ATR_1h
             self.state.cached_ema = row.EMA_1h
