@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # --- 1. CONFIGURACIÓN ---
-SYMBOL_TO_TEST = "ETHUSDT"
+SYMBOL_TO_TEST = "PEPEUSDT"
 START_BALANCE = 1000
 
 # --- FILTRO DE FECHAS (Opcional) ---
@@ -90,6 +90,7 @@ class MockBotController:
         self.simulator = simulator
         self.lock = asyncio.Lock()
         
+        self.enable_ranging = False
         # Inyectar Configuración
         self.investment_pct = INVESTMENT_PCT
         self.leverage = LEVERAGE
@@ -108,6 +109,8 @@ class MockBotController:
         
         self.MAX_TRADE_SIZE_USDT = MAX_TRADE_SIZE_USDT
         self.MAX_DAILY_TRADES = MAX_DAILY_TRADES
+
+        
 
         # Configuración de Precisión según el Símbolo
         if "PEPE" in symbol:

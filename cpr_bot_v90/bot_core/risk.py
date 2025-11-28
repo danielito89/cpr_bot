@@ -20,6 +20,7 @@ class RiskManager:
         self.telegram_handler = bot_controller.telegram_handler
         self.config = bot_controller 
 
+        # Configuración de Riesgo
         self.max_trade_size_usdt = getattr(self.config, 'MAX_TRADE_SIZE_USDT', 50000)
         self.max_daily_trades = getattr(self.config, 'MAX_DAILY_TRADES', 50) 
         self.min_balance_buffer = 10 
@@ -78,6 +79,7 @@ class RiskManager:
         return True, "OK"
 
     async def seek_new_trade(self, kline):
+        """Orquestador de Entrada (Híbrido: Breakout -> Rango)."""
         current_price = float(kline["c"])
         
         # 1. CHECK DE RIESGO
@@ -103,6 +105,7 @@ class RiskManager:
                 median_vol = self.state.cached_median_vol
                 if not median_vol: return
                 
+                # Filtro Volatilidad
                 atr = self.state.cached_atr
                 if hasattr(self.config, 'min_volatility_atr_pct'):
                     atr_pct = (atr / current_price) * 100
@@ -145,18 +148,19 @@ class RiskManager:
                         sl = current_price + atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price - atr * self.config.breakout_tp_mult]
                 
-                # 2. Rango (TPs Estructurales)
-                if not side:
+                # 2. Rango (Solo si no es Breakout Y si está habilitado)
+                # --- NUEVO: Interruptor de Rango ---
+                enable_ranging = getattr(self.config, 'enable_ranging', True)
+                
+                if not side and enable_ranging:
                     if current_price <= p["L3"]:
                         if vol_ok and is_green:
                             side, entry_type = SIDE_BUY, "Ranging Long"
                             sl = p["L4"] - atr * self.config.ranging_atr_multiplier
-                            
-                            # TPs: L1, H1, H3
+                            # TPs Estructurales: L1, H1, H3
                             potential_tps = [p["L1"], p["H1"], p["H3"]]
                             tp_prices = [tp for tp in potential_tps if tp > current_price]
-                            # Relleno si faltan
-                            while len(tp_prices) < 3:
+                            while len(tp_prices) < 3: # Relleno
                                 base = tp_prices[-1] if tp_prices else current_price
                                 tp_prices.append(base + atr)
 
@@ -164,15 +168,14 @@ class RiskManager:
                         if vol_ok and is_red:
                             side, entry_type = SIDE_SELL, "Ranging Short"
                             sl = p["H4"] + atr * self.config.ranging_atr_multiplier
-                            
-                            # TPs: H1, L1, L3
+                            # TPs Estructurales: H1, L1, L3
                             potential_tps = [p["H1"], p["L1"], p["L3"]]
                             tp_prices = [tp for tp in potential_tps if tp < current_price]
-                            # Relleno
-                            while len(tp_prices) < 3:
+                            while len(tp_prices) < 3: # Relleno
                                 base = tp_prices[-1] if tp_prices else current_price
                                 tp_prices.append(base - atr)
                 
+                # --- EJECUCIÓN ---
                 if side:
                     balance = await self.bot._get_account_balance()
                     if not balance: return
@@ -185,7 +188,7 @@ class RiskManager:
                     qty = float(format_qty(self.config.step_size, notional / current_price))
                     if qty <= 0: return
                     
-                    # Solo 1 TP para Breakout, hasta 3 para Rango
+                    # Breakout = 1 TP, Rango = 3 TPs
                     if entry_type.startswith("Breakout"): tp_prices = [tp_prices[0]]
                     else: tp_prices = tp_prices[:3]
 
@@ -217,10 +220,10 @@ class RiskManager:
             try:
                 pos = await self.bot._get_current_position()
                 
-                # Diagnóstico Zombie
+                # Diagnóstico
                 qty_real = float(pos.get("positionAmt", 0)) if pos else 0.0
-                if time.time() % 60 < 5:
-                     logging.info(f"[{self.config.symbol}] CHECK: Binance={qty_real} | Memoria={self.state.is_in_position}")
+                # if time.time() % 60 < 5:
+                #      logging.info(f"[{self.config.symbol}] CHECK: Binance={qty_real} | Memoria={self.state.is_in_position}")
 
                 if not pos: return
                 qty = abs(qty_real)
@@ -238,18 +241,15 @@ class RiskManager:
                     self.state.current_position_info = {
                         "quantity": qty, "entry_price": float(pos.get("entryPrice")),
                         "side": SIDE_BUY if float(pos.get("positionAmt")) > 0 else SIDE_SELL,
-                        "tps_hit_count": 0, "entry_time": self._get_now(), "total_pnl": 0.0,
-                        "unrealized_pnl": float(pos.get("unRealizedProfit", 0.0))
+                        "tps_hit_count": 0, "entry_time": self._get_now(), "total_pnl": 0.0
                     }
                     self.state.last_known_position_qty = qty
                     self.state.save_state()
                     return 
 
-                # Actualizar datos en vivo
-                if qty > 0:
-                    self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
-                    # FIX PNL: Leer y guardar el PnL no realizado
-                    self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit", 0.0))
+                # Updates
+                self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
+                self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
                 
                 # TP Parcial
                 if qty < self.state.last_known_position_qty:
@@ -300,13 +300,9 @@ class RiskManager:
             self.state.save_state()
 
     async def _handle_full_close(self):
-        logging.info(f"[{self.config.symbol}] Limpieza de cierre...")
+        logging.info(f"[{self.config.symbol}] Ejecutando limpieza de cierre...")
         
-        # Cancelar todo primero (Limpieza)
-        try: await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
-        except Exception: pass
-
-        # STATE FIRST
+        # 1. STATE FIRST (Liberar)
         old_info = self.state.current_position_info.copy()
         self.state.is_in_position = False
         self.state.current_position_info = {}
@@ -314,7 +310,11 @@ class RiskManager:
         self.state.sl_moved_to_be = False
         self.state.save_state()
 
-        # Reporte
+        # 2. Cancelar órdenes
+        try: await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
+        except Exception: pass
+
+        # 3. Reporte
         pnl = 0.0
         roi = 0.0
         try:
@@ -331,14 +331,23 @@ class RiskManager:
         self.state.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
         
         cooldown = 300
-        if total_pnl > 0: cooldown = 0
-        elif total_pnl < 0: cooldown = 900
-        
+        if total_pnl > 0:
+            cooldown = 0
+            logging.info(f"[{self.config.symbol}] WIN (+{total_pnl:.2f}). Sin cooldown.")
+        elif total_pnl < 0:
+            cooldown = 900
+            logging.info(f"[{self.config.symbol}] LOSS ({total_pnl:.2f}). Cooldown 15m.")
+            
         self.state.trade_cooldown_until = self._get_now() + cooldown
         self.state.save_state()
 
         icon = "✅" if total_pnl >= 0 else "❌"
-        msg = f"{icon} <b>{self.config.symbol} CERRADA</b>\nPnL: {total_pnl:.2f} USDT ({roi:.2f}%)"
+        wait_msg = f"⏳ Espera: {int(cooldown/60)}m" if cooldown > 0 else "🚀 Listo"
+        msg = f"{icon} <b>{self.config.symbol} CERRADA</b> {icon}\n" \
+              f"<b>PnL Total</b>: <code>{total_pnl:+.2f} USDT</code>\n" \
+              f"<b>ROI</b>: <code>{roi:+.2f}%</code>\n" \
+              f"<i>{wait_msg}</i>"
+        
         try: await self.telegram_handler._send_message(msg)
         except: pass
         
@@ -357,12 +366,15 @@ class RiskManager:
         self.state.current_position_info["tps_hit_count"] = count
         self.state.last_known_position_qty = qty
         self.state.save_state()
+        
         partial_pnl = 0.0
         try:
             last_trade = (await self.client.futures_account_trades(symbol=self.config.symbol, limit=1))[0]
             partial_pnl = float(last_trade.get("realizedPnl", 0.0))
         except Exception: pass
+
         logging.info(f"[{self.config.symbol}] TP{count} Parcial. PnL: {partial_pnl}")
-        await self.telegram_handler._send_message(f"🎯 <b>{self.config.symbol} TP{count}</b>\nPnL: <code>{partial_pnl:.2f}</code>")
+        await self.telegram_handler._send_message(f"🎯 <b>{self.config.symbol} TP{count}</b>\nPnL: <code>{partial_pnl:.2f}</code> | Restante: {qty}")
+        
         if count == 2 and not self.state.sl_moved_to_be:
             await self.orders_manager.move_sl_to_be(qty)
