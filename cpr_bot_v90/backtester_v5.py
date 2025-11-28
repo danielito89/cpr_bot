@@ -109,8 +109,20 @@ class MockBotController:
         self.MAX_TRADE_SIZE_USDT = MAX_TRADE_SIZE_USDT
         self.MAX_DAILY_TRADES = MAX_DAILY_TRADES
         
-        self.tick_size = 0.01
-        self.step_size = 0.001
+        # Configuración de Precisión según el Símbolo
+        if "PEPE" in symbol:
+            self.tick_size = 0.00000001
+            self.step_size = 1.0
+        elif "SHIB" in symbol or "BONK" in symbol:
+            self.tick_size = 0.000001
+            self.step_size = 1.0
+        elif "XRP" in symbol or "DOGE" in symbol:
+            self.tick_size = 0.00001
+            self.step_size = 1.0
+        else:
+            # Default para BTC, ETH, BNB, SOL
+            self.tick_size = 0.01
+            self.step_size = 0.001
 
     async def _get_account_balance(self): return self.state.balance
     
