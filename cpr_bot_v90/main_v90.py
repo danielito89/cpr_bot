@@ -27,7 +27,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TESTNET_MODE = os.environ.get("TESTNET_MODE", "false").lower() in ("1", "true", "yes")
 
-INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
 # --- CONFIGURACIÓN BASE (Default para nuevos pares) ---
 DEFAULT_CONFIG = {
