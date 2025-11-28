@@ -65,7 +65,7 @@ class RiskManager:
 
     async def seek_new_trade(self, kline):
         current_price = float(kline["c"])
-        
+                        
         can_open, reason = await self.can_trade("CHECK", current_price)
         if not can_open:
             if "Posición" not in reason and time.time() % 60 < 2:
@@ -97,6 +97,16 @@ class RiskManager:
                 vol_ok = current_volume > (median_vol * self.config.volume_factor)
                 p = self.state.daily_pivots
                 ema = self.state.cached_ema
+
+                # --- LOG INTELIGENTE: Solo si está "quemando" el nivel ---
+                # Si el precio está a menos del 0.2% de romper H4 o L4
+                dist_h4 = abs(current_price - p["H4"]) / current_price * 100
+                dist_l4 = abs(current_price - p["L4"]) / current_price * 100
+                
+                if (dist_h4 < 0.2 or dist_l4 < 0.2) and time.time() % 30 < 2:
+                     req_vol = median_vol * self.config.volume_factor
+                     logging.info(f"[{self.config.symbol}] 👀 OJO: Cerca de Nivel. Vol: {'✅' if vol_ok else '❌'} ({current_volume:.0f}/{req_vol:.0f})")
+                # ---------------------------------------------------------
                 
                 # Diagnóstico
                 dist_l4 = abs(current_price - p["L4"]) / current_price * 100
