@@ -28,7 +28,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TESTNET_MODE = os.environ.get("TESTNET_MODE", "false").lower() in ("1", "true", "yes")
 
 # --- PARES INICIALES (BNB AGREGADO) ---
-INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT", "1000PEPEUSDT"]
 
 # Configuración Ganadora + Nuevos Filtros
 DEFAULT_CONFIG = {
