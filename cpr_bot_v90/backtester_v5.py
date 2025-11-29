@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # --- 1. CONFIGURACIÓN ---
-SYMBOL_TO_TEST = "PEPEUSDT"
+SYMBOL_TO_TEST = "ETHUSDT"
 START_BALANCE = 1000
 
 # --- FILTRO DE FECHAS (Opcional) ---
@@ -90,7 +90,7 @@ class MockBotController:
         self.simulator = simulator
         self.lock = asyncio.Lock()
         
-        self.enable_ranging = False
+        self.enable_ranging = True
         # Inyectar Configuración
         self.investment_pct = INVESTMENT_PCT
         self.leverage = LEVERAGE
