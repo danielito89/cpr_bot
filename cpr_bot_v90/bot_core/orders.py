@@ -34,7 +34,7 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
         
-        # Verificación de llenado
+        # --- VERIFICACIÓN DE LLENADO ---
         filled = False
         order_id = market.get("orderId")
         avg_price = 0.0
@@ -72,20 +72,22 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
 
-        # SL / TP
+        # --- SL / TP ---
         sl_order_id = None
         try:
             batch = []
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             
-            # STOP LOSS NUCLEAR
+            # 1. STOP LOSS "NUCLEAR" (Cierra todo)
             batch.append({
-                "symbol": self.symbol, "side": sl_side, "type": STOP_MARKET,
+                "symbol": self.symbol, 
+                "side": sl_side, 
+                "type": STOP_MARKET,
                 "stopPrice": format_price(self.tick_size, sl_price),
-                "closePosition": "true" 
+                "closePosition": "true"
             })
             
-            # TPs
+            # 2. TPs
             notional_total = executed_qty * avg_price
             target_tps = self.take_profit_levels
             if (notional_total / target_tps) < 6.0: target_tps = 1
@@ -117,23 +119,16 @@ class OrdersManager:
             await self.close_position_manual(reason="Fallo SL/TP")
             return 
 
-        # --- CORRECCIÓN: INICIALIZACIÓN PNL ---
+        # Actualizar Estado
         self.state.is_in_position = True
         self.state.current_position_info = {
-            "side": side, 
-            "quantity": executed_qty, 
-            "entry_price": avg_price,
-            "entry_type": entry_type, 
-            "mark_price_entry": avg_price,
-            "atr_at_entry": self.state.cached_atr, 
-            "tps_hit_count": 0,
-            "entry_time": time.time(), 
-            "sl_order_id": sl_order_id,
+            "side": side, "quantity": executed_qty, "entry_price": avg_price,
+            "entry_type": entry_type, "mark_price_entry": avg_price,
+            "atr_at_entry": self.state.cached_atr, "tps_hit_count": 0,
+            "entry_time": time.time(), "sl_order_id": sl_order_id,
             "total_pnl": 0.0,
-            "unrealized_pnl": 0.0  # <--- ¡AQUÍ ESTÁ LA LÍNEA FALTANTE!
+            "unrealized_pnl": 0.0
         }
-        # --------------------------------------
-        
         self.state.last_known_position_qty = executed_qty
         self.state.sl_moved_to_be = False
         self.state.trade_cooldown_until = time.time() + 300
@@ -141,7 +136,11 @@ class OrdersManager:
 
         # Notificar
         try:
-            atr_text = f"{self.state.cached_atr:.2f}" if self.state.cached_atr else "N/A"
+            # --- FIX VISUAL: Usar formato de precio para el ATR ---
+            atr_val = self.state.cached_atr
+            atr_text = format_price(self.tick_size, atr_val) if atr_val else "N/A"
+            # -----------------------------------------------------
+            
             notional_usdt = executed_qty * avg_price
             side_icon = "🟢" if side == SIDE_BUY else "🔴"
             tp_str = "\n".join([f" {i+1}) {format_price(self.tick_size, t)}" for i, t in enumerate(final_tps)])
