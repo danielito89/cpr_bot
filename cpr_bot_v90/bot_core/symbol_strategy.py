@@ -179,14 +179,32 @@ class SymbolStrategy:
     async def _send_pivots_alert(self):
         p = self.state.daily_pivots
         if not p: return
+        
+        # Helper para formatear usando el tick_size real
+        def fmt(val):
+            return format_price(self.tick_size, val)
+
         s = f"📊 <b>Pivotes Camarilla ({self.symbol})</b>\n\n"
-        s += f"H: <code>{p.get('Y_H', 0.0):.2f}</code>\nL: <code>{p.get('Y_L', 0.0):.2f}</code>\nC: <code>{p.get('Y_C', 0.0):.2f}</code>\n\n"
-        s += f"🔥 <b>R6 (Target):</b> <code>{p.get('H6', 0.0):.2f}</code>\n🔴 <b>R5 (Target):</b> <code>{p.get('H5', 0.0):.2f}</code>\n🔴 R4 (Breakout): <code>{p.get('H4', 0.0):.2f}</code>\n🔴 R3 (Rango): <code>{p.get('H3', 0.0):.2f}</code>\n🟡 R2: <code>{p.get('H2', 0.0):.2f}</code>\n🟡 R1: <code>{p.get('H1', 0.0):.2f}</code>\n\n"
-        s += f"⚪ <b>P (Central):</b> <code>{p.get('P', 0.0):.2f}</code>\n\n"
-        s += f"🟢 S1: <code>{p.get('L1', 0.0):.2f}</code>\n🟢 S2: <code>{p.get('L2', 0.0):.2f}</code>\n🟢 S3 (Rango): <code>{p.get('L3', 0.0):.2f}</code>\n🔵 S4 (Breakout): <code>{p.get('L4', 0.0):.2f}</code>\n🔵 <b>S5 (Target):</b> <code>{p.get('L5', 0.0):.2f}</code>\n🔵 <b>S6 (Target):</b> <code>{p.get('L6', 0.0):.2f}</code>\n"
+        s += f"H: <code>{fmt(p.get('Y_H', 0))}</code>\n"
+        s += f"L: <code>{fmt(p.get('Y_L', 0))}</code>\n"
+        s += f"C: <code>{fmt(p.get('Y_C', 0))}</code>\n\n"
+        
+        s += f"🔥 <b>R6:</b> <code>{fmt(p.get('H6', 0))}</code>\n"
+        s += f"🔴 <b>R5:</b> <code>{fmt(p.get('H5', 0))}</code>\n"
+        s += f"🔴 R4: <code>{fmt(p.get('H4', 0))}</code>\n"
+        s += f"🔴 R3: <code>{fmt(p.get('H3', 0))}</code>\n"
+        
+        s += f"⚪ <b>P (Central):</b> <code>{fmt(p.get('P', 0))}</code>\n\n"
+        
+        s += f"🟢 S3: <code>{fmt(p.get('L3', 0))}</code>\n"
+        s += f"🔵 S4: <code>{fmt(p.get('L4', 0))}</code>\n"
+        s += f"🔵 <b>S5:</b> <code>{fmt(p.get('L5', 0))}</code>\n"
+        s += f"🔵 <b>S6:</b> <code>{fmt(p.get('L6', 0))}</code>\n"
+        
         cw = p.get("width", 0)
-        day_type = "Rango (CPR Ancho)" if p.get("is_ranging_day", True) else "Tendencia (CPR Estrecho)"
-        s += f"\n📅 <b>Análisis: {day_type}</b> ({cw:.2f}%)"
+        day_type = "Rango" if p.get("is_ranging_day", True) else "Tendencia"
+        s += f"\n📅 <b>{day_type}</b> (CPR {cw:.2f}%)"
+        
         await self.telegram_handler._send_message(s)
 
     async def timed_tasks_loop(self):

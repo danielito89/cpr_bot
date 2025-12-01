@@ -21,7 +21,6 @@ class OrdersManager:
         self.take_profit_levels = config.take_profit_levels
 
     async def place_bracket_order(self, side, qty, entry_price_signal, sl_price, tp_prices, entry_type):
-        """Coloca entrada y luego SL (Close Position) + TPs."""
         try:
             logging.info(f"[{self.symbol}] Enviando MARKET {side} {qty}")
             market = await self.client.futures_create_order(
@@ -34,7 +33,7 @@ class OrdersManager:
             self.state.trade_cooldown_until = time.time() + 300
             return
         
-        # --- VERIFICACIÓN DE LLENADO ---
+        # Verificar llenado
         filled = False
         order_id = market.get("orderId")
         avg_price = 0.0
@@ -78,16 +77,14 @@ class OrdersManager:
             batch = []
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             
-            # 1. STOP LOSS "NUCLEAR" (Cierra todo)
+            # 1. STOP LOSS "NUCLEAR"
             batch.append({
-                "symbol": self.symbol, 
-                "side": sl_side, 
-                "type": STOP_MARKET,
+                "symbol": self.symbol, "side": sl_side, "type": STOP_MARKET,
                 "stopPrice": format_price(self.tick_size, sl_price),
                 "closePosition": "true"
             })
             
-            # 2. TPs
+            # 2. TAKE PROFITS
             notional_total = executed_qty * avg_price
             target_tps = self.take_profit_levels
             if (notional_total / target_tps) < 6.0: target_tps = 1
@@ -111,11 +108,27 @@ class OrdersManager:
                 })
             
             results = await self.client.futures_place_batch_order(batchOrders=batch)
-            if results and len(results) > 0 and "orderId" in results[0]:
-                sl_order_id = results[0]["orderId"]
+            
+            # --- VALIDACIÓN ESTRICTA (FIX v96) ---
+            # Si results está vacío o el primer elemento (SL) no tiene orderId, FALLAMOS.
+            if not results or len(results) == 0:
+                raise Exception(f"Batch order devolvió respuesta vacía: {results}")
+            
+            # Verificar explícitamente el SL (índice 0)
+            sl_result = results[0]
+            if "orderId" not in sl_result:
+                # Si hay un código de error, lo levantamos para activar el cierre de emergencia
+                err_msg = sl_result.get("msg", "Unknown Error")
+                raise Exception(f"SL rechazado por Binance: {err_msg}")
+            
+            sl_order_id = sl_result["orderId"]
+            logging.info(f"[{self.symbol}] SL confirmado (ID: {sl_order_id}).")
+            # -------------------------------------
 
         except Exception as e:
-            logging.error(f"[{self.symbol}] Fallo SL/TP: {e}")
+            logging.error(f"[{self.symbol}] FALLO CRÍTICO SL/TP: {e}")
+            await self.telegram_handler._send_message(f"⚠️ <b>FAIL-SAFE ({self.symbol})</b>\nSL rechazado. CERRANDO POSICIÓN YA.")
+            # ¡Cierre de emergencia inmediato!
             await self.close_position_manual(reason="Fallo SL/TP")
             return 
 
@@ -126,8 +139,7 @@ class OrdersManager:
             "entry_type": entry_type, "mark_price_entry": avg_price,
             "atr_at_entry": self.state.cached_atr, "tps_hit_count": 0,
             "entry_time": time.time(), "sl_order_id": sl_order_id,
-            "total_pnl": 0.0,
-            "unrealized_pnl": 0.0
+            "total_pnl": 0.0, "unrealized_pnl": 0.0
         }
         self.state.last_known_position_qty = executed_qty
         self.state.sl_moved_to_be = False
@@ -136,11 +148,8 @@ class OrdersManager:
 
         # Notificar
         try:
-            # --- FIX VISUAL: Usar formato de precio para el ATR ---
             atr_val = self.state.cached_atr
             atr_text = format_price(self.tick_size, atr_val) if atr_val else "N/A"
-            # -----------------------------------------------------
-            
             notional_usdt = executed_qty * avg_price
             side_icon = "🟢" if side == SIDE_BUY else "🔴"
             tp_str = "\n".join([f" {i+1}) {format_price(self.tick_size, t)}" for i, t in enumerate(final_tps)])

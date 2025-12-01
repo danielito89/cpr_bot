@@ -207,34 +207,25 @@ class TelegramHandler:
         return s
 
     def _generate_pivots_text(self, bot):
-        """Genera el mensaje detallado de pivotes para el usuario."""
         p = bot.state.daily_pivots
         if not p: return f"<b>{bot.symbol}</b>: Sin pivotes."
         
-        s = f"📊 <b>Pivotes Camarilla ({bot.symbol})</b>\n\n"
-        s += f"H: <code>{p.get('Y_H', 0.0):.2f}</code>\n"
-        s += f"L: <code>{p.get('Y_L', 0.0):.2f}</code>\n"
-        s += f"C: <code>{p.get('Y_C', 0.0):.2f}</code>\n\n"
-        
-        s += f"🔥 <b>R6 (Target):</b> <code>{p.get('H6', 0.0):.2f}</code>\n"
-        s += f"🔴 <b>R5 (Target):</b> <code>{p.get('H5', 0.0):.2f}</code>\n"
-        s += f"🔴 R4 (Breakout): <code>{p.get('H4', 0.0):.2f}</code>\n"
-        s += f"🔴 R3 (Rango): <code>{p.get('H3', 0.0):.2f}</code>\n"
-        s += f"🟡 R2: <code>{p.get('H2', 0.0):.2f}</code>\n"
-        s += f"🟡 R1: <code>{p.get('H1', 0.0):.2f}</code>\n\n"
-        
-        s += f"⚪ <b>P (Central):</b> <code>{p.get('P', 0.0):.2f}</code>\n\n"
+        # Usar el tick_size del bot para formatear
+        from decimal import Decimal, ROUND_DOWN
+        def fmt(val):
+            try:
+                if bot.tick_size:
+                    return str(Decimal(str(val)).quantize(Decimal(str(bot.tick_size)), rounding=ROUND_DOWN))
+            except: pass
+            return f"{float(val):.8f}" # Fallback a 8 decimales
 
-        s += f"🟢 S1: <code>{p.get('L1', 0.0):.2f}</code>\n"
-        s += f"🟢 S2: <code>{p.get('L2', 0.0):.2f}</code>\n"
-        s += f"🟢 S3 (Rango): <code>{p.get('L3', 0.0):.2f}</code>\n"
-        s += f"🔵 S4 (Breakout): <code>{p.get('L4', 0.0):.2f}</code>\n"
-        s += f"🔵 <b>S5 (Target):</b> <code>{p.get('L5', 0.0):.2f}</code>\n"
-        s += f"🔵 <b>S6 (Target):</b> <code>{p.get('L6', 0.0):.2f}</code>\n"
+        s = f"📊 <b>Pivotes ({bot.symbol})</b>\n"
+        s += f"R4: <code>{fmt(p.get('H4', 0))}</code>\n"
+        s += f"R3: <code>{fmt(p.get('H3', 0))}</code>\n"
+        s += f"P : <code>{fmt(p.get('P', 0))}</code>\n"
+        s += f"S3: <code>{fmt(p.get('L3', 0))}</code>\n"
+        s += f"S4: <code>{fmt(p.get('L4', 0))}</code>\n"
         
         cw = p.get("width", 0)
-        is_ranging = p.get("is_ranging_day", True)
-        day_type = "Rango (CPR Ancho)" if is_ranging else "Tendencia (CPR Estrecho)"
-        s += f"\n📅 <b>Análisis: {day_type}</b> ({cw:.2f}%)"
-        
+        s += f"\nCPR: {cw:.2f}%"
         return s
