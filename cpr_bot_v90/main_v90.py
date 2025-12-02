@@ -53,29 +53,32 @@ DEFAULT_CONFIG = {
 }
 
 # Configuración Específica (Overrides)
-# --- CONFIGURACIÓN ESPECÍFICA POR PAR (Optimización v99) ---
+# --- CONFIGURACIÓN UNIFICADA GANADORA (v105) ---
 SYMBOL_CONFIGS = {
-    # BTC: El "Sniper" de Volumen Bajo
+    # BTC: Adaptativo (Base 1.1) + Sniper
     "BTCUSDT": {
-        "volume_factor": 1.1,               # Ganador en BTC
-        "breakout_tp_mult": 1.25,           # TP Fijo (Sniper)
-        "trailing_stop_trigger_atr": 5.0,   # Desactivar Trailing
+        "volume_factor": 1.1,               # Base
+        "strict_volume_factor": 1.5,        # Adaptativo
+        "breakout_tp_mult": 1.25,           # Sniper (TP Fijo)
+        "trailing_stop_trigger_atr": 5.0,   # Desactivado
         "trailing_stop_distance_atr": 1.0
     },
-    # ETH: El "Runner" de Volumen Alto
+    # ETH: Adaptativo (Base 1.2) + Runner
     "ETHUSDT": {
-        "volume_factor": 1.2,               # Ganador en ETH (Futuros)
-        "breakout_tp_mult": 10.0,           # Sin techo (Runner)
-        "trailing_stop_trigger_atr": 1.25,  # Activar Trailing rápido
+        "volume_factor": 1.1,               # Base
+        "strict_volume_factor": 1.5,        # Adaptativo
+        "breakout_tp_mult": 10.0,           # Runner
+        "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0
     },
-    # PEPE: El "Cohete" Volátil
+    # PEPE: Adaptativo (Base 1.2) + Runner
     "1000PEPEUSDT": {
-        "volume_factor": 1.2,               # Estándar
-        "breakout_tp_mult": 10.0,           # Runner extremo
-        "trailing_stop_trigger_atr": 1.25,
+        "volume_factor": 1.1,               # Base
+        "strict_volume_factor": 1.5,        # Adaptativo
+        "breakout_tp_mult": 10.0,           # Runner
+        "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0,
-        "investment_pct": 0.03              # Riesgo reducido (opcional)
+        "investment_pct": 0.02
     }
 }
 
