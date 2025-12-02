@@ -53,18 +53,30 @@ DEFAULT_CONFIG = {
 }
 
 # Configuración Específica (Overrides)
+# --- CONFIGURACIÓN ESPECÍFICA POR PAR (Optimización v99) ---
 SYMBOL_CONFIGS = {
-    "ETHUSDT": {
-        "breakout_tp_mult": 10.0,          # Runner
-        "trailing_stop_trigger_atr": 1.25,
+    # BTC: El "Sniper" de Volumen Bajo
+    "BTCUSDT": {
+        "volume_factor": 1.1,               # Ganador en BTC
+        "breakout_tp_mult": 1.25,           # TP Fijo (Sniper)
+        "trailing_stop_trigger_atr": 5.0,   # Desactivar Trailing
         "trailing_stop_distance_atr": 1.0
     },
-    "SOLUSDT": {
-        "breakout_tp_mult": 10.0,          # Runner
-        "trailing_stop_trigger_atr": 1.25,
+    # ETH: El "Runner" de Volumen Alto
+    "ETHUSDT": {
+        "volume_factor": 1.2,               # Ganador en ETH (Futuros)
+        "breakout_tp_mult": 10.0,           # Sin techo (Runner)
+        "trailing_stop_trigger_atr": 1.25,  # Activar Trailing rápido
         "trailing_stop_distance_atr": 1.0
+    },
+    # PEPE: El "Cohete" Volátil
+    "1000PEPEUSDT": {
+        "volume_factor": 1.2,               # Estándar
+        "breakout_tp_mult": 10.0,           # Runner extremo
+        "trailing_stop_trigger_atr": 1.25,
+        "trailing_stop_distance_atr": 1.0,
+        "investment_pct": 0.03              # Riesgo reducido (opcional)
     }
-    # BTC y BNB usan la default (Sniper)
 }
 
 if not API_KEY or not API_SECRET:
