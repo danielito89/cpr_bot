@@ -58,7 +58,7 @@ SYMBOL_CONFIGS = {
     # BTC: Adaptativo (Base 1.1) + Sniper
     "BTCUSDT": {
         "volume_factor": 1.1,               # Base
-        "strict_volume_factor": 1.5,        # Adaptativo
+        "strict_volume_factor": 10,         # Adaptativo
         "breakout_tp_mult": 1.25,           # Sniper (TP Fijo)
         "trailing_stop_trigger_atr": 5.0,   # Desactivado
         "trailing_stop_distance_atr": 1.0
@@ -66,7 +66,7 @@ SYMBOL_CONFIGS = {
     # ETH: Adaptativo (Base 1.2) + Runner
     "ETHUSDT": {
         "volume_factor": 1.1,               # Base
-        "strict_volume_factor": 1.5,        # Adaptativo
+        "strict_volume_factor": 10,         # Adaptativo
         "breakout_tp_mult": 10.0,           # Runner
         "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0
@@ -74,7 +74,7 @@ SYMBOL_CONFIGS = {
     # PEPE: Adaptativo (Base 1.2) + Runner
     "1000PEPEUSDT": {
         "volume_factor": 1.1,               # Base
-        "strict_volume_factor": 1.5,        # Adaptativo
+        "strict_volume_factor": 10,         # Adaptativo
         "breakout_tp_mult": 10.0,           # Runner
         "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0,
