@@ -36,7 +36,7 @@ MAX_DAILY_TRADES = 50
 # Estrategia
 EMA_PERIOD = 20
 ATR_PERIOD = 14
-VOLUME_FACTOR = 1.1
+VOLUME_FACTOR = 1.2
 CPR_WIDTH_THRESHOLD = 0.2
 TIME_STOP_HOURS = 12
 
@@ -51,7 +51,7 @@ BREAKOUT_SL_MULT = 1.0
 RANGING_TP_MULT = 0.8  
 BREAKOUT_TP_MULT = 1.25 
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 # --- IMPORTAR LÓGICA REAL ---
 try:
