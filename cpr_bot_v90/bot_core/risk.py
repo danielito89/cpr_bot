@@ -32,34 +32,45 @@ class RiskManager:
 
     async def can_trade(self, side, current_price):
         """JUEZ DE RIESGO: Decide si se permite abrir nueva posición."""
+        # 1. Estado
         if self.state.trading_paused: return False, "Pausado"
         if self.state.is_in_position: return False, "Ya en posición"
         
         now = self._get_now()
+        dt_now = datetime.utcfromtimestamp(now)
+        
+        # 2. Cooldown
         if now < self.state.trade_cooldown_until:
             wait = int(self.state.trade_cooldown_until - now)
             return False, f"Cooldown ({wait}s)"
 
-        FORBIDDEN_HOURS = [0, 4, 6, 10, 13]
-        current_hour = datetime.utcfromtimestamp(now).hour
-        if current_hour in FORBIDDEN_HOURS:
-            return False, f"Horario Blacklist ({current_hour}:00 UTC)"
-
-        if datetime.utcfromtimestamp(now).weekday() == 5:
+        # 3. Filtros de Calendario
+        # A. Filtro de Días (No operar Sábados)
+        if dt_now.weekday() == 5: 
             return False, "Día Bloqueado (Sábado)"
 
+        # B. Filtro Horario (UTC)
+        # Horas Tóxicas: 04, 10, 13 | Horas Zombie: 00, 06
+        FORBIDDEN_HOURS = [0, 4, 6, 10, 13]
+        if dt_now.hour in FORBIDDEN_HOURS:
+            return False, f"Horario Blacklist ({dt_now.hour}:00 UTC)"
+
+        # 4. Balance
         balance = await self.bot._get_account_balance()
         if balance is None: return False, "Error Balance"
         if balance < self.min_balance_buffer: return False, "Saldo Insuficiente"
 
+        # 5. Límite Diario
         start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
         realized_pnl = sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
         
         if start_bal > 0:
             daily_pnl_pct = (realized_pnl / start_bal) * 100
-            if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
+            limit_pct = -abs(self.config.daily_loss_limit_pct)
+            if daily_pnl_pct <= limit_pct:
                 return False, f"Límite Diario ({daily_pnl_pct:.2f}%)"
 
+        # 6. Frecuencia
         if len(self.state.daily_trade_stats) >= self.max_daily_trades:
             return False, "Max Trades Diarios"
 
@@ -68,15 +79,15 @@ class RiskManager:
     async def seek_new_trade(self, kline):
         current_price = float(kline["c"])
         
+        # 1. CHECK DE RIESGO
         can_open, reason = await self.can_trade("CHECK", current_price)
         if not can_open:
             if "Posición" not in reason and time.time() % 60 < 2:
                 logging.info(f"[{self.config.symbol}] ⛔ Bloqueado por: {reason}")
             return
 
-        if not self.state.daily_pivots:
-            if time.time() % 60 < 2: logging.info(f"[{self.config.symbol}] Esperando pivotes...")
-            return
+        # 2. ESTRATEGIA
+        if not self.state.daily_pivots: return
         if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]):
             if time.time() % 60 < 2: logging.info(f"[{self.config.symbol}] Esperando indicadores...")
             return
@@ -90,6 +101,7 @@ class RiskManager:
                 median_vol = self.state.cached_median_vol
                 if not median_vol: return
                 
+                # Filtro Volatilidad
                 atr = self.state.cached_atr
                 if hasattr(self.config, 'min_volatility_atr_pct'):
                     atr_pct = (atr / current_price) * 100
@@ -98,12 +110,12 @@ class RiskManager:
                             logging.info(f"[{self.config.symbol}] 💤 Mercado Lento: ATR {atr_pct:.2f}%")
                         return
 
-                # --- LÓGICA DE VOLUMEN DINÁMICO (Context Aware) ---
+                # --- LÓGICA DE VOLUMEN ADAPTATIVO (v103) ---
                 p = self.state.daily_pivots
                 is_ranging_day = p.get("is_ranging_day", True)
                 
-                base_factor = self.config.volume_factor
-                strict_factor = 1.5 # Vara alta para movimientos "contra natura"
+                base_factor = self.config.volume_factor # El valor de config (ej. 1.2 o 1.1)
+                strict_factor = 1.5 # Vara alta para ir en contra del día
                 
                 if is_ranging_day:
                     # Día de Rango: Fácil entrar en Rango, Difícil romper
@@ -116,7 +128,7 @@ class RiskManager:
                 
                 vol_ok_breakout = current_volume > req_vol_breakout
                 vol_ok_range = current_volume > req_vol_range
-                # -------------------------------------------------
+                # -------------------------------------------
 
                 ema = self.state.cached_ema
                 
@@ -154,9 +166,7 @@ class RiskManager:
                 
                 # 2. Rango (Secundario - Usa vol_ok_range)
                 if not side:
-                    # Chequeo de habilitación global
                     enable_ranging = getattr(self.config, 'enable_ranging', True)
-                    
                     if enable_ranging:
                         if current_price <= p["L3"]:
                             if vol_ok_range and is_green:
@@ -221,7 +231,7 @@ class RiskManager:
             try:
                 pos = await self.bot._get_current_position()
                 
-                # Diagnóstico
+                # Diagnóstico Zombie
                 qty_real = float(pos.get("positionAmt", 0)) if pos else 0.0
                 if time.time() % 60 < 5:
                      logging.info(f"[{self.config.symbol}] CHECK: Binance={qty_real} | Memoria={self.state.is_in_position}")
@@ -271,44 +281,11 @@ class RiskManager:
             except Exception as e:
                 if "1003" not in str(e): logging.error(f"[{self.config.symbol}] Check Error: {e}", exc_info=True)
 
-    async def _check_trailing_stop(self, current_price, qty):
-        info = self.state.current_position_info
-        entry = info.get('entry_price')
-        side = info.get('side')
-        atr = self.state.cached_atr
-        if not atr: return
-
-        trigger = atr * self.config.trailing_stop_trigger_atr
-        dist = atr * self.config.trailing_stop_distance_atr
-        new_sl = None
-
-        if side == SIDE_BUY:
-            if current_price > (entry + trigger):
-                pot_sl = current_price - dist
-                curr_sl = info.get("trailing_sl_price")
-                if curr_sl is None: curr_sl = entry
-                if pot_sl > curr_sl: new_sl = pot_sl
-        elif side == SIDE_SELL:
-            if current_price < (entry - trigger):
-                pot_sl = current_price + dist
-                curr_sl = info.get("trailing_sl_price")
-                if curr_sl is None: curr_sl = entry
-                if pot_sl < curr_sl: new_sl = pot_sl
-        
-        if new_sl:
-            logging.info(f"[{self.config.symbol}] Trailing SL -> {new_sl:.2f}")
-            await self.orders_manager.update_sl(new_sl, qty)
-            self.state.current_position_info["trailing_sl_price"] = new_sl
-            self.state.save_state()
-
     async def _handle_full_close(self):
         logging.info(f"[{self.config.symbol}] Ejecutando limpieza de cierre...")
-        
-        # Limpieza de órdenes (Prioridad)
         try: await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
         except Exception: pass
-
-        # STATE FIRST
+        
         old_info = self.state.current_position_info.copy()
         self.state.is_in_position = False
         self.state.current_position_info = {}
@@ -348,13 +325,10 @@ class RiskManager:
         self.state.save_state()
 
         wait_msg = f"⏳ Espera: {int(cooldown/60)}m" if cooldown > 0 else "🚀 Listo"
-        msg = (
-            f"{icon} <b>{self.config.symbol} {result_text}</b> {icon}\n"
-            f"────────────────\n"
-            f"💰 <b>PnL Total:</b> <code>{total_pnl:+.2f} USDT</code>\n"
-            f"📊 <b>ROI:</b> <code>{roi:+.2f}%</code>\n"
-            f"<i>{wait_msg}</i>"
-        )
+        msg = f"{icon} <b>{self.config.symbol} {result_text}</b> {icon}\n" \
+              f"<b>PnL Total</b>: <code>{total_pnl:+.2f} USDT</code>\n" \
+              f"<b>ROI</b>: <code>{roi:+.2f}%</code>\n" \
+              f"<i>{wait_msg}</i>"
         
         try: await self.telegram_handler._send_message(msg)
         except: pass
@@ -383,3 +357,30 @@ class RiskManager:
         await self.telegram_handler._send_message(f"🎯 <b>{self.config.symbol} TP{count}</b>\nPnL: <code>{partial_pnl:.2f}</code>")
         if count == 2 and not self.state.sl_moved_to_be:
             await self.orders_manager.move_sl_to_be(qty)
+    
+    async def _check_trailing_stop(self, current_price, qty):
+        info = self.state.current_position_info
+        entry = info.get('entry_price')
+        side = info.get('side')
+        atr = self.state.cached_atr
+        if not atr: return
+        trigger = atr * self.config.trailing_stop_trigger_atr
+        dist = atr * self.config.trailing_stop_distance_atr
+        new_sl = None
+        if side == SIDE_BUY:
+            if current_price > (entry + trigger):
+                pot_sl = current_price - dist
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
+                if pot_sl > curr_sl: new_sl = pot_sl
+        elif side == SIDE_SELL:
+            if current_price < (entry - trigger):
+                pot_sl = current_price + dist
+                curr_sl = info.get("trailing_sl_price")
+                if curr_sl is None: curr_sl = entry
+                if pot_sl < curr_sl: new_sl = pot_sl
+        if new_sl:
+            logging.info(f"[{self.config.symbol}] Trailing SL -> {new_sl:.2f}")
+            await self.orders_manager.update_sl(new_sl, qty)
+            self.state.current_position_info["trailing_sl_price"] = new_sl
+            self.state.save_state()
