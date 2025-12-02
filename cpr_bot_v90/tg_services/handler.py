@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import httpx
+from decimal import Decimal
 
 class TelegramHandler:
     def __init__(self, orchestrator, token, chat_id):
@@ -59,12 +60,9 @@ class TelegramHandler:
             
             if self.chat_id and chat_id != str(self.chat_id): return
             
-            # Parsear comando y argumentos
             parts = text.split()
             cmd = parts[0].lower()
             arg = parts[1].upper() if len(parts) > 1 else None
-
-            # --- COMANDOS ---
 
             if cmd == "/status":
                 report = self._generate_multibot_status(target_symbol=arg)
@@ -76,6 +74,8 @@ class TelegramHandler:
                     if bot: await self._send_message(self._generate_pivots_text(bot))
                     else: await self._send_message(f"⚠️ No encuentro el bot {arg}")
                 else:
+                    if not self.orchestrator.strategies:
+                         await self._send_message("💤 No hay bots activos.")
                     for bot in self.orchestrator.strategies.values():
                         await self._send_message(self._generate_pivots_text(bot))
             
@@ -99,7 +99,8 @@ class TelegramHandler:
 
             elif cmd == "/list":
                 active = list(self.orchestrator.strategies.keys())
-                await self._send_message(f"📋 <b>Bots Activos ({len(active)}):</b>\n" + ", ".join(active))
+                msg = f"📋 <b>Bots Activos ({len(active)}):</b>\n" + ", ".join(active) if active else "💤 Ninguno activo."
+                await self._send_message(msg)
 
             elif cmd == "/pausar":
                 target = arg if arg else "TODOS"
@@ -122,21 +123,21 @@ class TelegramHandler:
                     else:
                         await self._send_message(f"Bot {arg} no encontrado.")
 
-            # --- NUEVO COMANDO /reset ---
             elif cmd == "/reset":
                 if not arg:
-                    await self._send_message("⚠️ Uso: <code>/reset BTCUSDT</code> (Solo usar si el bot se traba)")
+                    await self._send_message("⚠️ Uso: <code>/reset BTCUSDT</code>")
                 else:
                     bot = self.orchestrator.strategies.get(arg)
                     if bot:
                         await self._send_message(f"🔄 <b>Reseteando estado de {arg}...</b>")
                         await bot.force_reset_state()
-                        await self._send_message(f"✅ <b>{arg}</b> reseteado. Listo para nuevas señales.")
+                        await self._send_message(f"✅ <b>{arg}</b> reseteado.")
                     else:
                         await self._send_message(f"Bot {arg} no encontrado.")
 
             elif cmd == "/limit":
-                 await self._send_message(f"Límite de pérdida diaria: {self.orchestrator.DEFAULT_CONFIG['DAILY_LOSS_LIMIT_PCT']}%")
+                 limit = self.orchestrator.DEFAULT_CONFIG.get('DAILY_LOSS_LIMIT_PCT', 'N/A')
+                 await self._send_message(f"🛡️ Límite de pérdida diaria: <b>{limit}%</b>")
             
             elif cmd == "/restart":
                  await self._send_message("♻️ Reiniciando Orquestador...")
@@ -148,13 +149,11 @@ class TelegramHandler:
                     "Comandos disponibles:\n"
                     "<code>/status</code> - Ver estado general\n"
                     "<code>/pivots</code> - Ver pivotes del día\n"
-                    "<code>/pausar</code> - Pausar nuevas entradas\n"
-                    "<code>/resumir</code> - Reanudar nuevas entradas\n"
-                    "<code>/cerrar</code> - Cerrar posición actual\n"
-                    "<code>/forzar_indicadores</code> - Recalcular EMA/ATR/Vol\n"
-                    "<code>/forzar_pivotes</code> - Recalcular Pivotes\n"
-                    "<code>/limit</code> - Ver límite de pérdida\n"
-                    "<code>/restart</code> - Reiniciar el bot"
+                    "<code>/pausar</code> - Pausar entradas\n"
+                    "<code>/resumir</code> - Reanudar entradas\n"
+                    "<code>/cerrar PAR</code> - Cierre manual\n"
+                    "<code>/reset PAR</code> - Resetear memoria\n"
+                    "<code>/list</code> - Ver pares activos"
                 )
             
         except Exception as e:
@@ -198,34 +197,40 @@ class TelegramHandler:
             icon = "🟢" if pnl >= 0 else "🔴"
             s += f"📉 <b>{pos.get('side')}</b> | PnL: {icon} {pnl:.2f} | Mark: {pos.get('mark_price')}\n"
         else:
-            s += "Checking signals...\n"
+            s += "💤 Esperando señal...\n"
 
-        atr = f"{bot.state.cached_atr:.2f}" if bot.state.cached_atr else "-"
+        atr = f"{bot.state.cached_atr:.4f}" if bot.state.cached_atr else "-"
         vol = f"{bot.state.cached_median_vol/1000:.1f}k" if bot.state.cached_median_vol else "-"
         s += f"📈 ATR: {atr} | VolMed: {vol}"
         
         return s
 
     def _generate_pivots_text(self, bot):
+        """Genera el mensaje de pivotes con formato inteligente de decimales."""
         p = bot.state.daily_pivots
-        if not p: return f"<b>{bot.symbol}</b>: Sin pivotes."
+        if not p: return f"<b>{bot.symbol}</b>: Sin pivotes calculados."
         
-        # Usar el tick_size del bot para formatear
-        from decimal import Decimal, ROUND_DOWN
+        # Función interna para formatear según el precio
         def fmt(val):
-            try:
-                if bot.tick_size:
-                    return str(Decimal(str(val)).quantize(Decimal(str(bot.tick_size)), rounding=ROUND_DOWN))
-            except: pass
-            return f"{float(val):.8f}" # Fallback a 8 decimales
+            if val is None: return "0.00"
+            val_f = float(val)
+            # Si es muy pequeño (tipo PEPE), usar 8 decimales
+            if val_f < 0.01: return f"{val_f:.8f}"
+            # Si es mediano (tipo ADA), usar 4
+            if val_f < 100: return f"{val_f:.4f}"
+            # Si es grande (BTC), usar 2
+            return f"{val_f:.2f}"
 
         s = f"📊 <b>Pivotes ({bot.symbol})</b>\n"
-        s += f"R4: <code>{fmt(p.get('H4', 0))}</code>\n"
-        s += f"R3: <code>{fmt(p.get('H3', 0))}</code>\n"
-        s += f"P : <code>{fmt(p.get('P', 0))}</code>\n"
-        s += f"S3: <code>{fmt(p.get('L3', 0))}</code>\n"
-        s += f"S4: <code>{fmt(p.get('L4', 0))}</code>\n"
+        s += f"R4: <code>{fmt(p.get('H4'))}</code>\n"
+        s += f"R3: <code>{fmt(p.get('H3'))}</code>\n"
+        s += f"P : <code>{fmt(p.get('P'))}</code>\n"
+        s += f"S3: <code>{fmt(p.get('L3'))}</code>\n"
+        s += f"S4: <code>{fmt(p.get('L4'))}</code>\n"
         
         cw = p.get("width", 0)
-        s += f"\nCPR: {cw:.2f}%"
+        is_ranging = p.get("is_ranging_day", True)
+        day_type = "Rango (CPR Ancho)" if is_ranging else "Tendencia (CPR Estrecho)"
+        s += f"\n📅 <b>{day_type}</b> (CPR {cw:.2f}%)"
+        
         return s

@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # --- 1. CONFIGURACIÓN DEL EXPERIMENTO ---
 SYMBOL_TO_TEST = "ETHUSDT"
-START_BALANCE = 10000
+START_BALANCE = 1000
 
 # --- VARIABLES DE VOLUMEN (TU LABORATORIO) ---
 VOLUME_FACTOR = 1.1          # BASE: Para operaciones a favor de la tendencia del día
@@ -44,7 +44,7 @@ TIME_STOP_HOURS = 12
 
 # Filtros
 MIN_VOLATILITY_ATR_PCT = 0.5
-TRAILING_STOP_TRIGGER_ATR = 1.5
+TRAILING_STOP_TRIGGER_ATR = 1.25
 TRAILING_STOP_DISTANCE_ATR = 1.0
 
 # Multiplicadores
