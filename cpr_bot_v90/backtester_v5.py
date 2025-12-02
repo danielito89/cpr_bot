@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v5.py
-# Versión: v5.9 (Soporte para Estrategia Adaptativa/Contextual)
+# Versión: v5.10 (Stress Test: Slippage + Fricción Real)
 
 import os
 import sys
@@ -15,28 +15,32 @@ from datetime import datetime, timedelta
 # Configuración
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-# --- 1. CONFIGURACIÓN DEL EXPERIMENTO ---
+# --- 1. CONFIGURACIÓN DEL LABORATORIO ---
 SYMBOL_TO_TEST = "ETHUSDT"
-START_BALANCE = 1000
+START_BALANCE = 10000
 
-# --- VARIABLES DE VOLUMEN (TU LABORATORIO) ---
-VOLUME_FACTOR = 1.1          # BASE: Para operaciones a favor de la tendencia del día
-STRICT_VOLUME_FACTOR = 1.5   # ESTRICTO: Para operaciones en contra (Rango en día de tendencia, etc.)
-# ---------------------------------------------
+# Variables de Estrategia (Ajusta aquí para probar tu hipótesis)
+VOLUME_FACTOR = 1.1          # Base (A favor de tendencia)
+STRICT_VOLUME_FACTOR = 3.0   # Estricto (En contra). ¡Prueba subir esto!
 
-# Filtro de Fechas
-TEST_START_DATE = None #"2025-01-01"
-TEST_END_DATE = None   #"2025-11-25"
+# Filtro de Fechas (Opcional)
+TEST_START_DATE = "2022-01-01" 
+TEST_END_DATE = "2025-12-01"   
+
+# --- 2. CONFIGURACIÓN DE REALISMO (FRICCIÓN) ---
+COMMISSION_PCT = 0.0004      # 0.04% Taker fee
+SLIPPAGE_PCT = 0.0005        # 0.05% Deslizamiento por operación (Entrada y Salida)
+# Nota: Slippage total por trade = 0.1% aprox.
+# -----------------------------------------------
 
 # Riesgo
 LEVERAGE = 30
 INVESTMENT_PCT = 0.05
-COMMISSION_PCT = 0.0004
 DAILY_LOSS_LIMIT_PCT = 15.0
 MAX_TRADE_SIZE_USDT = 50000
 MAX_DAILY_TRADES = 50
 
-# Estrategia
+# Estrategia Técnica
 EMA_PERIOD = 20
 ATR_PERIOD = 14
 CPR_WIDTH_THRESHOLD = 0.2
@@ -44,10 +48,10 @@ TIME_STOP_HOURS = 12
 
 # Filtros
 MIN_VOLATILITY_ATR_PCT = 0.5
-TRAILING_STOP_TRIGGER_ATR = 1.25
+TRAILING_STOP_TRIGGER_ATR = 1.5
 TRAILING_STOP_DISTANCE_ATR = 1.0
 
-# Multiplicadores
+# Multiplicadores (Estos se ajustan solos en risk.py real, aquí son mocks)
 RANGING_SL_MULT = 0.5 
 BREAKOUT_SL_MULT = 1.0 
 RANGING_TP_MULT = 0.8  
@@ -82,7 +86,6 @@ class MockOrdersManager:
         self.sim.close_position(reason)
 
 class MockBotController:
-    """Provee configuración al RiskManager."""
     def __init__(self, simulator, symbol):
         self.symbol = symbol
         self.client = None 
@@ -92,14 +95,14 @@ class MockBotController:
         self.simulator = simulator
         self.lock = asyncio.Lock()
         
+        # Inyectar Configuración
         self.investment_pct = INVESTMENT_PCT
         self.leverage = LEVERAGE
         self.cpr_width_threshold = CPR_WIDTH_THRESHOLD
         
-        # --- INYECCIÓN DE VOLUMEN ADAPTATIVO ---
-        self.volume_factor = VOLUME_FACTOR              # Base
-        self.strict_volume_factor = STRICT_VOLUME_FACTOR # Estricto
-        # ---------------------------------------
+        # Lógica Adaptativa
+        self.volume_factor = VOLUME_FACTOR
+        self.strict_volume_factor = STRICT_VOLUME_FACTOR
         
         self.take_profit_levels = 3
         self.breakout_atr_sl_multiplier = 1.0
@@ -107,11 +110,9 @@ class MockBotController:
         self.ranging_atr_multiplier = 0.5
         self.range_tp_mult = 2.0 
         self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
-        
         self.min_volatility_atr_pct = MIN_VOLATILITY_ATR_PCT
         self.trailing_stop_trigger_atr = TRAILING_STOP_TRIGGER_ATR
         self.trailing_stop_distance_atr = TRAILING_STOP_DISTANCE_ATR
-        
         self.MAX_TRADE_SIZE_USDT = MAX_TRADE_SIZE_USDT
         self.MAX_DAILY_TRADES = MAX_DAILY_TRADES
         
@@ -165,18 +166,30 @@ class BacktesterV5:
         self.end_date_actual = None
 
     def open_position(self, side, qty, price, sl, tps, type_):
-        notional = qty * price
+        # 1. Calcular Precio REAL de Entrada (Con Slippage)
+        # Si compras, pagas más. Si vendes, recibes menos.
+        if side == SIDE_BUY:
+            real_entry_price = price * (1 + SLIPPAGE_PCT)
+        else:
+            real_entry_price = price * (1 - SLIPPAGE_PCT)
+            
+        # 2. Calcular Notional
+        notional = qty * real_entry_price
+        
+        # 3. Check Max Size
         is_capped = False
         if notional > MAX_TRADE_SIZE_USDT:
             is_capped = True
-            qty = MAX_TRADE_SIZE_USDT / price
+            qty = MAX_TRADE_SIZE_USDT / real_entry_price
             notional = MAX_TRADE_SIZE_USDT
 
         comm = notional * COMMISSION_PCT
         self.state.balance -= comm
         self.state.is_in_position = True
+        
         self.state.current_position_info = {
-            "side": side, "quantity": qty, "entry_price": price,
+            "side": side, "quantity": qty, 
+            "entry_price": real_entry_price, # Guardamos el precio SUCIO
             "entry_type": type_, "tps_hit_count": 0,
             "total_pnl": -comm, "sl": sl, "tps": tps, 
             "entry_time": self.current_timestamp,
@@ -201,15 +214,26 @@ class BacktesterV5:
         info = self.state.current_position_info
         if not info: return
 
-        exit_price = self.state.current_price
-        pnl_gross = (exit_price - info['entry_price']) * info['quantity']
+        # Precio teórico de salida
+        exit_price_raw = self.state.current_price
+        
+        # 1. Calcular Precio REAL de Salida (Con Slippage)
+        if info['side'] == SIDE_BUY: # Cerrar Long = Vender
+            real_exit_price = exit_price_raw * (1 - SLIPPAGE_PCT)
+        else: # Cerrar Short = Comprar
+            real_exit_price = exit_price_raw * (1 + SLIPPAGE_PCT)
+
+        # 2. Calcular PnL
+        pnl_gross = (real_exit_price - info['entry_price']) * info['quantity']
         if info['side'] == SIDE_SELL: pnl_gross = -pnl_gross
-        comm_exit = (exit_price * info['quantity']) * COMMISSION_PCT
+        
+        comm_exit = (real_exit_price * info['quantity']) * COMMISSION_PCT
         comm_entry = info.get('comm_entry', 0.0)
         net_pnl = pnl_gross - comm_exit - comm_entry
         
         self.state.balance += (pnl_gross - comm_exit)
         
+        # Cooldown
         cooldown = 300
         if net_pnl > 0: cooldown = 0
         elif net_pnl < 0: cooldown = 900
@@ -231,6 +255,7 @@ class BacktesterV5:
         if not info: return
         high, low = row.High, row.Low
         
+        # SL
         current_sl = info['sl']
         sl_hit = (info['side'] == SIDE_BUY and low <= current_sl) or \
                  (info['side'] == SIDE_SELL and high >= current_sl)
@@ -239,6 +264,7 @@ class BacktesterV5:
             self.close_position("Stop-Loss")
             return
 
+        # TPs
         tps = info['tps']
         if len(tps) >= 2:
             tp2 = tps[1]
@@ -255,7 +281,8 @@ class BacktesterV5:
                 self.close_position("Take-Profit Final")
 
     async def run(self):
-        print(f"Iniciando Backtest V5.9 (Adaptativo) para {SYMBOL_TO_TEST}...")
+        print(f"Iniciando Backtest V5.10 (Stress Test) para {SYMBOL_TO_TEST}...")
+        print(f"Fricción Simulada: {SLIPPAGE_PCT*100}% por trade (Entry+Exit)")
         
         file_1h = f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv"
         file_1d = f"mainnet_data_1d_{SYMBOL_TO_TEST}.csv"
@@ -272,7 +299,6 @@ class BacktesterV5:
 
         print("Calculando Indicadores...")
         df_1m['MedianVol'] = df_1m['Quote_Asset_Volume'].rolling(window=60).median().shift(1)
-        
         df_1h['EMA_1h'] = df_1h['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
         tr = pd.concat([df_1h['High']-df_1h['Low'], abs(df_1h['High']-df_1h['Close'].shift(1)), abs(df_1h['Low']-df_1h['Close'].shift(1))], axis=1).max(axis=1)
         df_1h['ATR_1h'] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
@@ -286,7 +312,6 @@ class BacktesterV5:
         if TEST_END_DATE: df_merged = df_merged.loc[:TEST_END_DATE]
         
         if df_merged.empty: return
-
         self.start_date_actual = df_merged.index[0]
         self.end_date_actual = df_merged.index[-1]
         
@@ -300,13 +325,12 @@ class BacktesterV5:
             self.current_timestamp = row.Index.timestamp()
             self.state.current_time = row.Index
             self.state.current_price = row.Close
-            
             row_date = row.Index.date()
+            
             if current_date_obj != row_date:
                 current_date_obj = row_date
                 self.state.daily_trade_stats = []
                 self.state.daily_start_balance = self.state.balance
-                
                 yesterday_ts = pd.Timestamp(row_date - timedelta(days=1))
                 if yesterday_ts in df_1d.index:
                     d_row = df_1d.loc[yesterday_ts]
@@ -341,15 +365,15 @@ class BacktesterV5:
         gross_loss = abs(df[df['pnl'] < 0]['pnl'].sum())
         pf = gross_profit / gross_loss if gross_loss != 0 else 0
         capped_count = df['is_capped'].sum() if 'is_capped' in df.columns else 0
-        days_tested = (self.end_date_actual - self.start_date_actual).days
 
         print("\n" + "="*50)
-        print(f" RESULTADOS V5.9 FINAL: {SYMBOL_TO_TEST}")
-        print(f" Periodo: {self.start_date_actual} - {self.end_date_actual}")
+        print(f" RESULTADOS V5.10 (Stress Test): {SYMBOL_TO_TEST}")
+        print(f" Fricción Simulada: {SLIPPAGE_PCT*100}%")
         print("-" * 50)
         print(f" Vol Base: {VOLUME_FACTOR} | Vol Estricto: {STRICT_VOLUME_FACTOR}")
         print("-" * 50)
         print(f" PnL Neto:        ${total_pnl:.2f}")
+        print(f" Balance Final:   ${self.state.balance:.2f}")
         print(f" Profit Factor:   {pf:.2f}")
         print(f" Win Rate:        {win_rate:.2f}%")
         print(f" Total Trades:    {len(df)}")
