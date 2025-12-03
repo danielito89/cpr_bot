@@ -60,6 +60,42 @@ def descargar_datos_con_buffer(symbol, start_date_str, timeframe='1h', buffer_da
     
     print(f"✅ Datos descargados: {len(df)} velas. Desde {df.index[0]} hasta {df.index[-1]}")
     return df, target_start
+def cargar_datos_locales_con_buffer(filepath, start_date_str, buffer_days=30):
+    """
+    Carga TODO tu archivo local, pero recorta el DataFrame para que empiece
+    en (Fecha Inicio - Buffer) para garantizar pivotes correctos.
+    """
+    print(f"📂 Cargando archivo: {filepath}...")
+    
+    # 1. Cargar el archivo (Ajusta sep=',' o sep=';' según tu CSV)
+    df = pd.read_csv(filepath)
+    
+    # 2. Normalizar nombres de columnas (por si vienen en Mayúsculas)
+    df.columns = [col.lower() for col in df.columns]
+    
+    # 3. Asegurar que 'timestamp' o 'date' sea el índice datetime
+    # Ajusta 'timestamp' al nombre real de tu columna de fecha en el CSV
+    columna_fecha = 'timestamp' if 'timestamp' in df.columns else 'date'
+    df[columna_fecha] = pd.to_datetime(df[columna_fecha])
+    df.set_index(columna_fecha, inplace=True)
+    
+    # 4. CALCULAR EL RECORTE
+    target_start = pd.to_datetime(start_date_str)
+    buffer_date = target_start - timedelta(days=buffer_days)
+    
+    print(f"   - Fecha Objetivo del Backtest: {target_start.date()}")
+    print(f"   - Fecha de Corte (Buffer):     {buffer_date.date()}")
+    
+    # 5. FILTRAR
+    # Nos quedamos con los datos desde la fecha de buffer en adelante
+    df_filtrado = df[df.index >= buffer_date].copy()
+    
+    if df_filtrado.empty:
+        print("❌ ERROR: Tu archivo no tiene datos para esas fechas.")
+        return pd.DataFrame(), target_start
+        
+    print(f"✅ Datos Listos: {len(df_filtrado)} velas cargadas desde tu archivo.")
+    return df_filtrado, target_start
 
 # ==========================================
 # 2. GENERADOR DE REPORTE (KPIs)
