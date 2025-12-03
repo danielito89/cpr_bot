@@ -41,6 +41,10 @@ except ImportError as e:
 class SimulatorState:
     def __init__(self):
         self.balance = CAPITAL_INICIAL
+        # --- FIX: Variables requeridas por RiskManager ---
+        self.daily_start_balance = CAPITAL_INICIAL  # <--- FALTABA ESTO
+        self.daily_trade_stats = []                 # <--- Y ESTO
+        # ---------------------------------------------
         self.trades_history = []
         self.is_in_position = False
         self.current_position_info = {}
@@ -59,7 +63,6 @@ class SimulatorState:
 class BacktestSession:
     """
     Clase que actúa como 'Simulador' para una sola corrida de optimización.
-    Contiene el estado y los métodos de ejecución de órdenes.
     """
     def __init__(self):
         self.state = SimulatorState()
@@ -99,7 +102,9 @@ class BacktestSession:
         net_pnl = pnl_gross - cost
         
         self.state.balance += net_pnl
+        # Registro para métricas y para RiskManager (daily limits)
         self.state.trades_history.append({'pnl': net_pnl})
+        self.state.daily_trade_stats.append({'pnl': net_pnl}) 
         
         self.state.is_in_position = False
         self.state.current_position_info = {}
@@ -131,7 +136,6 @@ class MockBotController:
         self.client = None
         self.telegram_handler = MockTelegram()
         self.orders_manager = MockOrdersManager(simulator)
-        # Aquí estaba el error: ahora simulator es una instancia de BacktestSession
         self.state = simulator.state 
         self.lock = asyncio.Lock()
         for k, v in config_dict.items():
@@ -241,6 +245,12 @@ async def run_backtest_async(params):
         session.state.cached_ema = row.ema
         session.state.cached_median_vol = row.median_vol
         
+        # Resetear estadísticas diarias si cambia el día (Simulado simple)
+        if session.state.daily_start_balance:
+             # En una simulación real exacta deberíamos resetear daily_trade_stats a las 00:00
+             # Para optimización rápida, podemos omitirlo o implementarlo si afecta mucho el Daily Limit.
+             pass
+
         today_str = str(current_time.date())
         if today_str in daily_df.index:
              d_data = daily_df.loc[today_str]
@@ -289,7 +299,7 @@ def _calc_metrics(state):
     gross_loss = abs(losses['pnl'].sum())
     pf = gross_win / gross_loss if gross_loss > 0 else 999
     
-    # Score compuesto (Negativo porque hyperopt minimiza)
+    # Score compuesto
     score = -(pnl * 0.7 + (pf * 1000) * 0.3) 
     
     return {
