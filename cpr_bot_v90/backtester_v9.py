@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v9.py
-# Versión: v9.1 (Fix Crítico: Mock Client)
+# Versión: v9.2 (Fix Definitivo: Variables Globales Restauradas)
 
 import os
 import sys
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-# --- CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN ---
 SYMBOL_TO_TEST = "ETHUSDT"
 START_BALANCE = 10000
 COMMISSION_PCT = 0.0004
@@ -22,11 +22,27 @@ BASE_SLIPPAGE = 0.0002
 IMPACT_COEF = 0.0001 
 MAX_IMPACT = 0.01
 
-# Estrategia
+# Estrategia (Variables de ajuste)
 VOLUME_FACTOR = 1.2
 STRICT_VOLUME_FACTOR = 1.5
 TEST_START_DATE = "2022-01-01"
 TEST_END_DATE = "2025-12-01"
+
+# --- CONSTANTES TÉCNICAS (Restauradas) ---
+EMA_PERIOD = 20
+ATR_PERIOD = 14
+CPR_WIDTH_THRESHOLD = 0.2
+TIME_STOP_HOURS = 12
+MIN_VOLATILITY_ATR_PCT = 0.5
+TRAILING_STOP_TRIGGER_ATR = 1.25
+TRAILING_STOP_DISTANCE_ATR = 1.0
+
+# Riesgo
+LEVERAGE = 30
+INVESTMENT_PCT = 0.05
+DAILY_LOSS_LIMIT_PCT = 15.0
+MAX_TRADE_SIZE_USDT = 50000
+MAX_DAILY_TRADES = 50
 
 # Rutas
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -62,27 +78,26 @@ class MockBotController:
         self.telegram_handler = MockTelegram()
         self.orders_manager = MockOrdersManager(simulator)
         
-        # --- FIX: Agregar cliente Mock ---
+        # --- FIX: Cliente Mock ---
         self.client = None 
-        # ---------------------------------
         
         # Configuración
-        self.investment_pct = 0.05
-        self.leverage = 30
+        self.investment_pct = INVESTMENT_PCT
+        self.leverage = LEVERAGE
         self.volume_factor = VOLUME_FACTOR
         self.strict_volume_factor = STRICT_VOLUME_FACTOR
-        self.cpr_width_threshold = 0.2
+        self.cpr_width_threshold = CPR_WIDTH_THRESHOLD
         self.take_profit_levels = 3
         self.breakout_atr_sl_multiplier = 1.0
         self.breakout_tp_mult = 10.0
         self.ranging_atr_multiplier = 0.5
         self.range_tp_mult = 2.0 
-        self.daily_loss_limit_pct = 15.0
-        self.min_volatility_atr_pct = 0.5
-        self.trailing_stop_trigger_atr = 1.25
-        self.trailing_stop_distance_atr = 1.0
-        self.MAX_TRADE_SIZE_USDT = 50000
-        self.MAX_DAILY_TRADES = 50
+        self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
+        self.min_volatility_atr_pct = MIN_VOLATILITY_ATR_PCT
+        self.trailing_stop_trigger_atr = TRAILING_STOP_TRIGGER_ATR
+        self.trailing_stop_distance_atr = TRAILING_STOP_DISTANCE_ATR
+        self.MAX_TRADE_SIZE_USDT = MAX_TRADE_SIZE_USDT
+        self.MAX_DAILY_TRADES = MAX_DAILY_TRADES
         
         if "PEPE" in symbol or "SHIB" in symbol:
             self.tick_size = 0.00000001; self.step_size = 1.0
@@ -223,6 +238,7 @@ class BacktesterV9:
         if not self.state.is_in_position: return
         info = self.state.current_position_info
         high, low = row.High, row.Low
+        median_vol = row.MedianVol
         current_sl = info['sl']
         
         sl_hit = False
@@ -253,9 +269,14 @@ class BacktesterV9:
                     if info['tps_hit_count'] < 2:
                         info['tps_hit_count'] = 2
                         self.move_sl_to_be()
+                        
+        if info['entry_type'].startswith("Ranging"):
+             elapsed = self.current_timestamp - info['entry_time']
+             if (elapsed / 3600) > TIME_STOP_HOURS:
+                 self.close_position(f"Time-Stop ({TIME_STOP_HOURS}h)", row.MedianVol, exit_price_ref=row.Open)
 
     async def run(self):
-        print(f"Iniciando Backtest V9.1 para {SYMBOL_TO_TEST}...")
+        print(f"Iniciando Backtest V9.2 (Corregido) para {SYMBOL_TO_TEST}...")
         
         try:
             df_1h = pd.read_csv(os.path.join(DATA_DIR, f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv"), index_col="Open_Time", parse_dates=True)
@@ -290,16 +311,13 @@ class BacktesterV9:
             self.state.current_time = row.Index
             self.state.current_price = row.Close
             
-            # 1. Pendientes
             if self.state.pending_order:
                 self.execute_pending_order(row.Open, row.MedianVol)
 
-            # 2. Gestión
             if self.state.is_in_position:
                 await self.risk_manager._check_trailing_stop(row.Close, self.state.current_position_info.get('quantity', 0))
                 self.check_exits(row)
 
-            # 3. Señales
             if not self.state.is_in_position and not self.state.pending_order:
                 row_date = row.Index.date()
                 if current_date_obj != row_date:
@@ -310,7 +328,7 @@ class BacktesterV9:
                         d_row = df_1d.loc[yesterday_ts]
                         self.state.daily_pivots = calculate_pivots_from_data(
                             h=float(d_row['High']), l=float(d_row['Low']), c=float(d_row['Close']), 
-                            tick_size=self.controller.tick_size, cpr_width_threshold=0.2
+                            tick_size=self.controller.tick_size, cpr_width_threshold=CPR_WIDTH_THRESHOLD
                         )
                     else:
                         self.state.daily_pivots = None
@@ -341,7 +359,7 @@ class BacktesterV9:
         gross_loss = abs(df[df['pnl'] < 0]['pnl'].sum())
         pf = gross_win / gross_loss if gross_loss != 0 else 0
         
-        print(f"\nRESULTADOS V9.1 (Fix Client): {SYMBOL_TO_TEST}")
+        print(f"\nRESULTADOS V9.2 (Full Global): {SYMBOL_TO_TEST}")
         print(f"PnL: ${total_pnl:.2f} | PF: {pf:.2f} | WinRate: {win_rate:.2f}% | Trades: {len(df)}")
 
 if __name__ == "__main__":
