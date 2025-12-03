@@ -10,9 +10,10 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
-import pickle
+import warnings
 
-# Silenciar logs para velocidad
+# Filtrar advertencias de librerías
+warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.CRITICAL)
 
 # --- CONFIGURACIÓN ---
@@ -34,8 +35,86 @@ except ImportError as e:
     sys.exit(1)
 
 # ==========================================
-# 1. CLASES MOCK (Motor V10 Simplificado)
+# 1. CLASES MOCK Y SESIÓN
 # ==========================================
+
+class SimulatorState:
+    def __init__(self):
+        self.balance = CAPITAL_INICIAL
+        self.trades_history = []
+        self.is_in_position = False
+        self.current_position_info = {}
+        self.last_known_position_qty = 0.0
+        self.sl_moved_to_be = False
+        self.trade_cooldown_until = 0
+        self.trading_paused = False
+        self.cached_atr = 0
+        self.cached_ema = 0
+        self.cached_median_vol = 0
+        self.daily_pivots = {}
+        self.current_timestamp = 0
+        self.current_price = 0
+    def save_state(self): pass
+
+class BacktestSession:
+    """
+    Clase que actúa como 'Simulador' para una sola corrida de optimización.
+    Contiene el estado y los métodos de ejecución de órdenes.
+    """
+    def __init__(self):
+        self.state = SimulatorState()
+        self.commission = 0.0004
+        self.slippage = 0.0002
+
+    def open_position(self, side, qty, price, sl, tps, type_):
+        # Simular entrada
+        real_price = price * (1 + self.slippage) if side == SIDE_BUY else price * (1 - self.slippage)
+        cost = (qty * real_price) * self.commission
+        
+        self.state.balance -= cost
+        self.state.is_in_position = True
+        self.state.current_position_info = {
+            "side": side, "quantity": qty, "entry_price": real_price,
+            "sl": sl, "tps": tps, "entry_type": type_,
+            "tps_hit_count": 0, "trailing_sl_price": None,
+            "entry_time": self.state.current_timestamp
+        }
+        self.state.last_known_position_qty = qty
+        self.state.sl_moved_to_be = False
+
+    def close_position(self, reason, exit_price_override=None):
+        if not self.state.is_in_position: return
+        info = self.state.current_position_info
+        
+        # Precio de salida
+        base_price = exit_price_override if exit_price_override else self.state.current_price
+        
+        # Slippage salida
+        real_exit = base_price * (1 - self.slippage) if info['side'] == SIDE_BUY else base_price * (1 + self.slippage)
+        
+        pnl_gross = (real_exit - info['entry_price']) * info['quantity']
+        if info['side'] == SIDE_SELL: pnl_gross = -pnl_gross
+        
+        cost = (info['quantity'] * real_exit) * self.commission
+        net_pnl = pnl_gross - cost
+        
+        self.state.balance += net_pnl
+        self.state.trades_history.append({'pnl': net_pnl})
+        
+        self.state.is_in_position = False
+        self.state.current_position_info = {}
+        # Cooldown simple
+        self.state.trade_cooldown_until = self.state.current_timestamp + (900 if net_pnl < 0 else 0)
+
+    def move_sl_to_be(self):
+        if self.state.is_in_position:
+            self.state.current_position_info['sl'] = self.state.current_position_info['entry_price']
+            self.state.sl_moved_to_be = True
+
+    def update_sl(self, new_price):
+        if self.state.is_in_position:
+            self.state.current_position_info['sl'] = new_price
+
 class MockTelegram:
     async def _send_message(self, text): pass
 
@@ -52,9 +131,9 @@ class MockBotController:
         self.client = None
         self.telegram_handler = MockTelegram()
         self.orders_manager = MockOrdersManager(simulator)
-        self.state = simulator.state
+        # Aquí estaba el error: ahora simulator es una instancia de BacktestSession
+        self.state = simulator.state 
         self.lock = asyncio.Lock()
-        # Inyectar configuración dinámica
         for k, v in config_dict.items():
             setattr(self, k, v)
 
@@ -70,30 +149,9 @@ class MockBotController:
             "markPrice": self.state.current_price, "unRealizedProfit": 0
         }
 
-class SimulatorState:
-    def __init__(self):
-        self.balance = CAPITAL_INICIAL
-        self.daily_start_balance = CAPITAL_INICIAL
-        self.daily_trade_stats = []
-        self.trades_history = []
-        self.is_in_position = False
-        self.current_position_info = {}
-        self.last_known_position_qty = 0.0
-        self.sl_moved_to_be = False
-        self.trade_cooldown_until = 0
-        self.trading_paused = False
-        self.cached_atr = 0
-        self.cached_ema = 0
-        self.cached_median_vol = 0
-        self.daily_pivots = {}
-        self.current_timestamp = 0
-        self.current_price = 0
-    def save_state(self): pass
-
 # ==========================================
 # 2. CARGADOR DE DATOS (Global)
 # ==========================================
-# Variable global para cargar datos solo una vez
 GLOBAL_DF = None
 GLOBAL_START_DATE = None
 GLOBAL_DAILY_DF = None
@@ -112,7 +170,7 @@ def cargar_datos_memoria():
     df[col_fecha] = pd.to_datetime(df[col_fecha])
     df.set_index(col_fecha, inplace=True)
     
-    # Pre-cálculos masivos (Vectorización)
+    # Pre-cálculos masivos
     df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
     df['ema'] = df['close'].ewm(span=20).mean().shift(1)
     
@@ -122,13 +180,11 @@ def cargar_datos_memoria():
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean().shift(1)
 
-    # Buffer de recorte
     target_start = pd.to_datetime(TRADING_START_DATE)
     start_buffer = target_start - timedelta(days=BUFFER_DAYS)
     GLOBAL_DF = df[df.index >= start_buffer].copy()
     GLOBAL_START_DATE = target_start
 
-    # Pivotes Diarios Pre-calculados
     daily_df = df.resample('1D').agg({'high':'max','low':'min','close':'last'})
     daily_df['prev_high'] = daily_df['high'].shift(1)
     daily_df['prev_low'] = daily_df['low'].shift(1)
@@ -138,10 +194,9 @@ def cargar_datos_memoria():
     print(f"✅ Datos en RAM: {len(GLOBAL_DF)} velas.")
 
 # ==========================================
-# 3. FUNCIÓN OBJETIVO (Backtest Individual)
+# 3. EJECUCIÓN ASÍNCRONA
 # ==========================================
 async def run_backtest_async(params):
-    # Configurar parámetros dinámicos
     config = {
         "symbol": SYMBOL,
         "investment_pct": 0.05,
@@ -158,23 +213,21 @@ async def run_backtest_async(params):
         "step_size": 0.001,
         "MAX_TRADE_SIZE_USDT": 50000,
         "MAX_DAILY_TRADES": 50,
-        # Params a optimizar:
+        # Params optimizados
         "volume_factor": params['volume_factor'],
         "strict_volume_factor": params['strict_volume_factor'],
         "breakout_tp_mult": params['breakout_tp_mult'],
         "trailing_stop_trigger_atr": params['trailing_stop_trigger_atr']
     }
 
-    state = SimulatorState()
-    controller = MockBotController(state, config) # Hack para pasar state en init
-    controller.state = state # Asegurar ref
+    # Instanciamos la sesión (Simulador)
+    session = BacktestSession()
+    
+    # El controlador recibe la sesión, no solo el estado
+    controller = MockBotController(session, config)
+    
     risk_manager = RiskManager(controller)
     
-    # Costos
-    commission = 0.0004
-    slippage = 0.0002
-
-    # Loop Rápido
     df = GLOBAL_DF
     target_start = GLOBAL_START_DATE
     daily_df = GLOBAL_DAILY_DF
@@ -182,69 +235,49 @@ async def run_backtest_async(params):
     for current_time, row in df.iterrows():
         if current_time < target_start: continue
         
-        state.current_timestamp = current_time.timestamp()
-        state.current_price = row.close
-        state.cached_atr = row.atr
-        state.cached_ema = row.ema
-        state.cached_median_vol = row.median_vol
+        session.state.current_timestamp = current_time.timestamp()
+        session.state.current_price = row.close
+        session.state.cached_atr = row.atr
+        session.state.cached_ema = row.ema
+        session.state.cached_median_vol = row.median_vol
         
-        # Actualizar Pivotes (Solo si cambia el día, optimización simple)
-        # En prod esto es más complejo, aquí asumimos acceso directo por fecha
         today_str = str(current_time.date())
         if today_str in daily_df.index:
              d_data = daily_df.loc[today_str]
              if not pd.isna(d_data['prev_high']):
-                 state.daily_pivots = calculate_pivots_from_data(
+                 session.state.daily_pivots = calculate_pivots_from_data(
                      d_data['prev_high'], d_data['prev_low'], d_data['prev_close'], 
                      0.01, 0.2
                  )
 
         # 1. Gestión Salidas
-        if state.is_in_position:
-            await risk_manager._check_trailing_stop(row.close, state.current_position_info.get('quantity', 0))
+        if session.state.is_in_position:
+            await risk_manager._check_trailing_stop(row.close, session.state.current_position_info.get('quantity', 0))
             
-            # Check Exits Manual (SL/TP Fijo)
-            info = state.current_position_info
+            info = session.state.current_position_info
             high, low = row.high, row.low
             
             # SL
             if info.get('sl'):
                 hit = (info['side'] == SIDE_BUY and low <= info['sl']) or (info['side'] == SIDE_SELL and high >= info['sl'])
-                if hit: _close_pos(state, info['sl'], "SL", commission, slippage)
+                if hit: session.close_position("SL", exit_price_override=info['sl'])
 
             # TP
-            if state.is_in_position and info.get('tps'):
+            if session.state.is_in_position and info.get('tps'):
                 last_tp = info['tps'][-1]
                 hit = (info['side'] == SIDE_BUY and high >= last_tp) or (info['side'] == SIDE_SELL and low <= last_tp)
-                if hit: _close_pos(state, last_tp, "TP", commission, slippage)
+                if hit: session.close_position("TP", exit_price_override=last_tp)
 
         # 2. Entradas
-        if not state.is_in_position and state.daily_pivots:
+        if not session.state.is_in_position and session.state.daily_pivots:
             kline = {'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 'v': row.volume, 'q': row.quote_asset_volume, 'x': True}
-            
-            # Simulamos orders_manager.place_bracket_order interceptando la llamada
-            # Como RiskManager llama a place_bracket_order, necesitamos que ese mock ejecute la apertura
             await risk_manager.seek_new_trade(kline)
 
-    return _calc_metrics(state)
-
-def _close_pos(state, price, reason, comm, slip):
-    info = state.current_position_info
-    real_price = price * (1 - slip) if info['side'] == SIDE_BUY else price * (1 + slip)
-    pnl_gross = (real_price - info['entry_price']) * info['quantity']
-    if info['side'] == SIDE_SELL: pnl_gross = -pnl_gross
-    cost = (info['quantity'] * real_price) * comm
-    net_pnl = pnl_gross - cost
-    
-    state.balance += net_pnl
-    state.trades_history.append({'pnl': net_pnl})
-    state.is_in_position = False
-    state.current_position_info = {}
-    state.trade_cooldown_until = state.current_timestamp + (900 if net_pnl < 0 else 0)
+    return _calc_metrics(session.state)
 
 def _calc_metrics(state):
     trades = state.trades_history
-    if not trades: return {'loss': 999, 'pf': 0, 'pnl': 0, 'winrate': 0}
+    if not trades: return {'loss': 999, 'pf': 0, 'pnl': 0, 'winrate': 0, 'trades': 0}
     
     df = pd.DataFrame(trades)
     pnl = df['pnl'].sum()
@@ -256,10 +289,7 @@ def _calc_metrics(state):
     gross_loss = abs(losses['pnl'].sum())
     pf = gross_win / gross_loss if gross_loss > 0 else 999
     
-    # SCORE: Buscamos Max PnL + PF estable. 
-    # Penalizamos muy pocos trades para evitar overfitting extremo.
-    # Score negativo porque hyperopt busca MINIMIZAR
-    
+    # Score compuesto (Negativo porque hyperopt minimiza)
     score = -(pnl * 0.7 + (pf * 1000) * 0.3) 
     
     return {
@@ -280,32 +310,22 @@ def objective(params):
     res = loop.run_until_complete(run_backtest_async(params))
     loop.close()
     
-    # Imprimir progreso en vivo
     if res['trades'] > 10:
         print(f"Vol:{params['strict_volume_factor']:.1f} | TP:{params['breakout_tp_mult']:.1f} | Trail:{params['trailing_stop_trigger_atr']:.1f} -> PF:{res['pf']:.2f} | PnL:${res['pnl']:.0f} | WR:{res['winrate']:.1f}%")
     
     return res
 
 def run_optimizer():
-    # Cargar datos una vez
     cargar_datos_memoria()
     
     print("\n🧠 INICIANDO OPTIMIZACIÓN BAYESIANA (V10)...")
     print(f"   Objetivo: Maximizar PnL y Profit Factor")
     print("-" * 60)
     
-    # ESPACIO DE BÚSQUEDA (Aquí está la magia)
     space = {
-        # Base volume: rango estrecho
         'volume_factor': hp.uniform('volume_factor', 1.0, 1.3),
-        
-        # Strict Volume: Rango amplio porque viste que 20 funciona
         'strict_volume_factor': hp.quniform('strict_volume_factor', 1.5, 25.0, 0.5),
-        
-        # Estrategia Runner vs Sniper
         'breakout_tp_mult': hp.uniform('breakout_tp_mult', 1.25, 15.0),
-        
-        # Trailing Stop: Cuando activar
         'trailing_stop_trigger_atr': hp.uniform('trailing_stop_trigger_atr', 1.0, 6.0)
     }
     
@@ -314,7 +334,7 @@ def run_optimizer():
         fn=objective,
         space=space,
         algo=tpe.suggest,
-        max_evals=100, # Número de pruebas
+        max_evals=100,
         trials=trials
     )
     
@@ -323,12 +343,10 @@ def run_optimizer():
     print("="*60)
     print(best)
     
-    # Guardar resultados
     results = []
     for t in trials.trials:
         r = t['result']
         p = t['misc']['vals']
-        # Limpiar formato de params
         params_clean = {k: v[0] for k, v in p.items()}
         row = {**params_clean, 'pnl': r['pnl'], 'pf': r['pf'], 'winrate': r['winrate'], 'trades': r['trades']}
         results.append(row)
