@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v9.py
-# Versión: v9.0 (Auditada y Corregida)
-# - Slippage Realista (Volumen Dinámico)
-# - Ejecución Next Open (Sin Lookahead)
-# - Diagnóstico de Pivotes (Para evitar el error de 32 trades)
+# Versión: v9.1 (Fix Crítico: Mock Client)
 
 import os
 import sys
@@ -11,6 +8,8 @@ import pandas as pd
 import numpy as np
 import asyncio
 import logging
+import time
+import gc
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -19,7 +18,6 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 SYMBOL_TO_TEST = "ETHUSDT"
 START_BALANCE = 10000
 COMMISSION_PCT = 0.0004
-# Slippage más realista (0.02% base + impacto)
 BASE_SLIPPAGE = 0.0002
 IMPACT_COEF = 0.0001 
 MAX_IMPACT = 0.01
@@ -38,12 +36,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from bot_core.risk import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
-    from bot_core.utils import SIDE_BUY, SIDE_SELL
+    from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
 except ImportError:
     print("Error importando bot_core. Ejecuta desde la carpeta correcta.")
     sys.exit(1)
 
-# ... (Mocks de Telegram y Orders iguales a v8) ...
+# --- MOCKS ---
 class MockTelegram:
     async def _send_message(self, text): pass 
 
@@ -63,6 +61,10 @@ class MockBotController:
         self.lock = asyncio.Lock()
         self.telegram_handler = MockTelegram()
         self.orders_manager = MockOrdersManager(simulator)
+        
+        # --- FIX: Agregar cliente Mock ---
+        self.client = None 
+        # ---------------------------------
         
         # Configuración
         self.investment_pct = 0.05
@@ -124,7 +126,6 @@ class BacktesterV9:
         self.risk_manager = RiskManager(self.controller)
 
     def calculate_slippage(self, notional, median_vol):
-        # Fix: Evitar división por cero o NaN
         if not median_vol or median_vol <= 0: return MAX_IMPACT
         vol_ratio = notional / median_vol
         impact = IMPACT_COEF * (vol_ratio ** 0.8)
@@ -147,11 +148,9 @@ class BacktesterV9:
         notional = order['qty'] * open_price
         slip = self.calculate_slippage(notional, median_vol)
         
-        # Ejecución en Next Open con Slippage
         if order['side'] == SIDE_BUY: real_entry = open_price * (1 + slip)
         else: real_entry = open_price * (1 - slip)
 
-        # Check Gap (Si abrió saltando el SL)
         sl_hit = False
         if order['side'] == SIDE_BUY and real_entry <= order['sl']: sl_hit = True
         if order['side'] == SIDE_SELL and real_entry >= order['sl']: sl_hit = True
@@ -189,7 +188,6 @@ class BacktesterV9:
         if not self.state.is_in_position: return
         info = self.state.current_position_info
         
-        # Precio base (SL price o TP price o Current si es manual)
         base_price = exit_price_ref if exit_price_ref else self.state.current_price
         
         notional = info['quantity'] * base_price
@@ -227,18 +225,15 @@ class BacktesterV9:
         high, low = row.High, row.Low
         current_sl = info['sl']
         
-        # SL (Prioridad)
         sl_hit = False
         if info['side'] == SIDE_BUY and low <= current_sl: sl_hit = True
         if info['side'] == SIDE_SELL and high >= current_sl: sl_hit = True
         
         if sl_hit:
             self.state.current_price = current_sl
-            # Fix: Usar current_sl como referencia, slippage aplicará sobre eso
             self.close_position("Stop-Loss", row.MedianVol, exit_price_ref=current_sl)
             return
 
-        # TP (Check)
         tps = info['tps']
         if tps:
             last_tp = tps[-1]
@@ -260,9 +255,8 @@ class BacktesterV9:
                         self.move_sl_to_be()
 
     async def run(self):
-        print(f"Iniciando Backtest V9.0 para {SYMBOL_TO_TEST}...")
+        print(f"Iniciando Backtest V9.1 para {SYMBOL_TO_TEST}...")
         
-        # Carga de datos (Asegúrate que los paths estén bien)
         try:
             df_1h = pd.read_csv(os.path.join(DATA_DIR, f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv"), index_col="Open_Time", parse_dates=True)
             df_1d = pd.read_csv(os.path.join(DATA_DIR, f"mainnet_data_1d_{SYMBOL_TO_TEST}.csv"), index_col="Open_Time", parse_dates=True)
@@ -296,7 +290,7 @@ class BacktesterV9:
             self.state.current_time = row.Index
             self.state.current_price = row.Close
             
-            # 1. Pendientes (Next Open)
+            # 1. Pendientes
             if self.state.pending_order:
                 self.execute_pending_order(row.Open, row.MedianVol)
 
@@ -310,8 +304,6 @@ class BacktesterV9:
                 row_date = row.Index.date()
                 if current_date_obj != row_date:
                     current_date_obj = row_date
-                    # IMPORTANTE: Buscar el día anterior en df_1d
-                    # Ajuste de zona horaria simple: restar 1 día
                     yesterday_ts = pd.Timestamp(row_date - timedelta(days=1))
                     
                     if yesterday_ts in df_1d.index:
@@ -333,7 +325,7 @@ class BacktesterV9:
                     await self.risk_manager.seek_new_trade(k)
 
         if pivots_missing > 0:
-            print(f"⚠️ ADVERTENCIA: Faltaron pivotes en {pivots_missing} días (Datos diarios incompletos).")
+            print(f"⚠️ ADVERTENCIA: Faltaron pivotes en {pivots_missing} días.")
         self.print_results()
 
     def print_results(self):
@@ -345,9 +337,11 @@ class BacktesterV9:
         total_pnl = df['pnl'].sum()
         wins = len(df[df['pnl'] > 0])
         win_rate = (wins / len(df)) * 100
-        pf = df[df['pnl'] > 0]['pnl'].sum() / abs(df[df['pnl'] < 0]['pnl'].sum())
+        gross_win = df[df['pnl'] > 0]['pnl'].sum()
+        gross_loss = abs(df[df['pnl'] < 0]['pnl'].sum())
+        pf = gross_win / gross_loss if gross_loss != 0 else 0
         
-        print(f"\nRESULTADOS V9.0 (Auditado): {SYMBOL_TO_TEST}")
+        print(f"\nRESULTADOS V9.1 (Fix Client): {SYMBOL_TO_TEST}")
         print(f"PnL: ${total_pnl:.2f} | PF: {pf:.2f} | WinRate: {win_rate:.2f}% | Trades: {len(df)}")
 
 if __name__ == "__main__":
