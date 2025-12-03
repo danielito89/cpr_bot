@@ -1,242 +1,159 @@
-import ccxt
 import pandas as pd
 import numpy as np
+import os
 from datetime import datetime, timedelta
-import time
 
 # ==========================================
-# CONFIGURACIÓN GENERAL
+# ⚙️ CONFIGURACIÓN DEL BACKTEST
 # ==========================================
-SYMBOL = 'ETH/USDT'
-TIMEFRAME = '1h'
-TRADING_START_DATE = "2022-01-01"  # Fecha donde quieres que el bot empiece a operar
-BUFFER_DAYS = 25                   # Días extra hacia atrás para cargar indicadores previos
-CAPITAL_INICIAL = 1000             # USD
+SYMBOL = 'ETHUSDT'          # El par exacto que descargaste (sin barra /)
+TIMEFRAME = '1h'            # Timeframe de tu CSV (1h)
+TRADING_START_DATE = "2023-01-01"  # FECHA DONDE QUIERES EMPEZAR A OPERAR
+BUFFER_DAYS = 20            # Días extra hacia atrás para cargar la "previa"
+CAPITAL_INICIAL = 1000      # USD
+
+# Rutas relativas a donde corre el script (cpr_bot_v90/)
+DATA_FOLDER = "data"        
 
 # ==========================================
-# 1. MOTOR DE DATOS (CON BUFFER)
+# 1. CARGADOR DE DATOS (Modo Precisión Local)
 # ==========================================
-def descargar_datos_con_buffer(symbol, start_date_str, timeframe='1h', buffer_days=30):
+def cargar_datos_locales_con_buffer(symbol, start_date_str, buffer_days=20):
     """
-    Descarga datos desde (start_date - buffer) para asegurar que el primer día
-    operativo tenga historial previo para calcular pivotes.
+    Busca el archivo exacto generado por download_data.py y recorta
+    el DataFrame para incluir el 'buffer' de días previos necesario para los pivotes.
     """
-    # Configurar Exchange (Usamos Binance como ejemplo público)
-    exchange = ccxt.binance({'enableRateLimit': True})
+    # 1. Construir nombre de archivo exacto según download_data.py
+    # Formato esperado: mainnet_data_1h_ETHUSDT.csv
+    filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}.csv"
+    filepath = os.path.join(DATA_FOLDER, filename)
     
-    # Calcular fechas
-    target_start = pd.to_datetime(start_date_str)
-    download_start = target_start - timedelta(days=buffer_days)
-    since_ts = int(download_start.timestamp() * 1000)
+    print(f"\n📂 BUSCANDO ARCHIVO: {filepath}...")
     
-    print(f"\n📥 [DATA] Iniciando descarga...")
-    print(f"   - Objetivo Operativo: {target_start.date()}")
-    print(f"   - Descarga Real (Buffer): {download_start.date()} (Cargando {buffer_days} días extra)")
+    if not os.path.exists(filepath):
+        print(f"❌ ERROR: No encuentro el archivo. ¿Ejecutaste download_data.py primero?")
+        print(f"   Ruta buscada: {os.path.abspath(filepath)}")
+        return pd.DataFrame(), None
 
-    all_ohlcv = []
-    
-    # Bucle simple de paginación para CCXT
-    # NOTA: En producción, usa un while loop robusto. Aquí descargamos un bloque grande para el ejemplo.
+    # 2. Cargar CSV
     try:
-        # Descargamos un lote grande (limitado por el exchange, usualmente 1000 velas)
-        # Para backtests muy largos, necesitarás un bucle while 'since' < 'now'
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ts, limit=1000)
-        all_ohlcv.extend(ohlcv)
+        df = pd.read_csv(filepath)
+        # Normalizar columnas (minúsculas)
+        df.columns = [col.lower() for col in df.columns]
         
-        # Simulamos una segunda petición si es necesario (ejemplo simplificado)
-        if len(ohlcv) == 1000:
-            last_ts = ohlcv[-1][0]
-            ohlcv2 = exchange.fetch_ohlcv(symbol, timeframe, since=last_ts, limit=1000)
-            all_ohlcv.extend(ohlcv2)
-            
+        # Detectar columna de fecha (open_time o timestamp)
+        col_fecha = 'open_time' if 'open_time' in df.columns else 'timestamp'
+        df[col_fecha] = pd.to_datetime(df[col_fecha])
+        df.set_index(col_fecha, inplace=True)
+        
+        print(f"✅ Archivo cargado. Total histórico: {len(df)} velas.")
+        print(f"   Rango total: {df.index[0]} -> {df.index[-1]}")
+        
     except Exception as e:
-        print(f"❌ Error descargando datos: {e}")
-        return pd.DataFrame(), target_start
+        print(f"❌ Error leyendo el CSV: {e}")
+        return pd.DataFrame(), None
 
-    # Crear DataFrame
-    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    
-    print(f"✅ Datos descargados: {len(df)} velas. Desde {df.index[0]} hasta {df.index[-1]}")
-    return df, target_start
-def cargar_datos_locales_con_buffer(filepath, start_date_str, buffer_days=30):
-    """
-    Carga TODO tu archivo local, pero recorta el DataFrame para que empiece
-    en (Fecha Inicio - Buffer) para garantizar pivotes correctos.
-    """
-    print(f"📂 Cargando archivo: {filepath}...")
-    
-    # 1. Cargar el archivo (Ajusta sep=',' o sep=';' según tu CSV)
-    df = pd.read_csv(filepath)
-    
-    # 2. Normalizar nombres de columnas (por si vienen en Mayúsculas)
-    df.columns = [col.lower() for col in df.columns]
-    
-    # 3. Asegurar que 'timestamp' o 'date' sea el índice datetime
-    # Ajusta 'timestamp' al nombre real de tu columna de fecha en el CSV
-    columna_fecha = 'timestamp' if 'timestamp' in df.columns else 'date'
-    df[columna_fecha] = pd.to_datetime(df[columna_fecha])
-    df.set_index(columna_fecha, inplace=True)
-    
-    # 4. CALCULAR EL RECORTE
+    # 3. Calcular Fechas de Corte (La Cirugía)
     target_start = pd.to_datetime(start_date_str)
-    buffer_date = target_start - timedelta(days=buffer_days)
     
-    print(f"   - Fecha Objetivo del Backtest: {target_start.date()}")
-    print(f"   - Fecha de Corte (Buffer):     {buffer_date.date()}")
+    # Restamos X días a la fecha de inicio para tener datos previos (Buffer)
+    start_with_buffer = target_start - timedelta(days=buffer_days)
     
-    # 5. FILTRAR
-    # Nos quedamos con los datos desde la fecha de buffer en adelante
-    df_filtrado = df[df.index >= buffer_date].copy()
+    # 4. Filtrar DataFrame
+    # Nos quedamos con los datos desde (Fecha Inicio - Buffer) en adelante
+    df_filtrado = df[df.index >= start_with_buffer].copy()
     
     if df_filtrado.empty:
-        print("❌ ERROR: Tu archivo no tiene datos para esas fechas.")
-        return pd.DataFrame(), target_start
-        
-    print(f"✅ Datos Listos: {len(df_filtrado)} velas cargadas desde tu archivo.")
+        print(f"❌ ERROR: Tu CSV termina antes de la fecha de inicio requerida ({start_with_buffer}).")
+        return pd.DataFrame(), None
+
+    print(f"✂️  DATOS RECORTADOS PARA BACKTEST:")
+    print(f"   - Buffer inicia:      {df_filtrado.index[0]} (Calculamos indicadores aquí)")
+    print(f"   - Trading real inicia: {target_start} (Aquí empieza el dinero)")
+    print(f"   - Velas a procesar:   {len(df_filtrado)}")
+    
     return df_filtrado, target_start
 
 # ==========================================
-# 2. GENERADOR DE REPORTE (KPIs)
-# ==========================================
-def generar_reporte_profesional(trades, start_cap, end_cap):
-    if not trades:
-        print("\n⚠️ No se realizaron operaciones. Revisa la lógica o los datos.")
-        return
-
-    df_trades = pd.DataFrame(trades)
-    
-    # Cálculos básicos
-    total_trades = len(df_trades)
-    wins = df_trades[df_trades['pnl_usd'] > 0]
-    losses = df_trades[df_trades['pnl_usd'] <= 0]
-    
-    win_rate = (len(wins) / total_trades) * 100
-    total_pnl = end_cap - start_cap
-    roi = (total_pnl / start_cap) * 100
-    
-    avg_win = wins['pnl_usd'].mean() if not wins.empty else 0
-    avg_loss = losses['pnl_usd'].mean() if not losses.empty else 0
-    
-    # Profit Factor
-    gross_profit = wins['pnl_usd'].sum()
-    gross_loss = abs(losses['pnl_usd'].sum())
-    profit_factor = gross_profit / gross_loss if gross_loss != 0 else 999
-    
-    # Máximo Drawdown (Simulado sobre el balance final de cada trade)
-    # Crea una serie de balances acumulados
-    equity_curve = [start_cap]
-    current_bal = start_cap
-    for pnl in df_trades['pnl_usd']:
-        current_bal += pnl
-        equity_curve.append(current_bal)
-    
-    equity_series = pd.Series(equity_curve)
-    peak = equity_series.cummax()
-    drawdown = (equity_series - peak) / peak
-    max_drawdown = drawdown.min() * 100
-
-    print("\n" + "="*45)
-    print(f"📊 REPORTE DE RESULTADOS V9.3 - {SYMBOL}")
-    print("="*45)
-    print(f"💰 Balance Inicial:   ${start_cap:.2f}")
-    print(f"💰 Balance Final:     ${end_cap:.2f}")
-    print(f"📈 PnL Neto:          ${total_pnl:.2f} ({roi:.2f}%)")
-    print(f"📉 Max Drawdown:      {max_drawdown:.2f}%")
-    print("-" * 45)
-    print(f"🎲 Trades Totales:    {total_trades}")
-    print(f"✅ Win Rate:          {win_rate:.2f}%")
-    print(f"⚖️ Profit Factor:     {profit_factor:.2f} (Objetivo > 1.5)")
-    print("-" * 45)
-    print(f"🟢 Promedio Ganancia: ${avg_win:.2f}")
-    print(f"🔴 Promedio Pérdida:  ${avg_loss:.2f}")
-    print("="*45 + "\n")
-
-# ==========================================
-# 3. MOTOR DE BACKTEST (Lógica de Pivotes)
+# 2. MOTOR DE BACKTEST V9.3 (Lógica Pivotes)
 # ==========================================
 def backtest_v9_3(df, target_start_date):
-    print("\n⚙️  PROCESANDO DATOS Y CALCULANDO PIVOTES...")
+    print("\n⚙️  CALCULANDO PIVOTES VECTORIZADOS...")
     
-    # --- A. PRE-CÁLCULO DE PIVOTES DIARIOS (La Solución) ---
-    # Resampleamos a días para obtener OHLC D1
+    # --- A. PRE-CÁLCULO DE PIVOTES (Vectorizado) ---
+    # Convertimos velas de 1H a Días para sacar High/Low/Close diario
     daily_df = df.resample('1D').agg({
         'high': 'max',
         'low': 'min',
         'close': 'last'
     })
 
-    # SHIFT(1): Usamos los datos de AYER para calcular los niveles de HOY
-    # Si hoy es 2 de Enero, usamos High/Low/Close del 1 de Enero.
+    # [PRECISIÓN] Desplazamiento (Shift)
+    # Los datos de HOY se calculan con el High/Low/Close de AYER.
     daily_df['prev_high'] = daily_df['high'].shift(1)
     daily_df['prev_low'] = daily_df['low'].shift(1)
     daily_df['prev_close'] = daily_df['close'].shift(1)
     
-    # Fórmulas de Pivotes (Standard)
+    # Fórmulas Standard
     daily_df['P'] = (daily_df['prev_high'] + daily_df['prev_low'] + daily_df['prev_close']) / 3
     daily_df['R1'] = (2 * daily_df['P']) - daily_df['prev_low']
     daily_df['S1'] = (2 * daily_df['P']) - daily_df['prev_high']
     
-    # Eliminamos los días del inicio que no tienen "ayer" (los NaNs iniciales)
+    # Limpiamos NaNs generados por el shift en el primer día del buffer
     daily_df.dropna(inplace=True)
 
-    # --- B. INICIALIZACIÓN DE VARIABLES ---
+    # --- B. INICIALIZACIÓN ---
     balance = CAPITAL_INICIAL
-    position = None     # 'LONG', 'SHORT', None
+    position = None 
     entry_price = 0
     trades_history = []
     
-    # Filtramos el DF para iterar SOLO desde la fecha oficial de inicio
-    operational_df = df[df.index >= target_start_date]
+    # Filtramos para mostrar solo el loop operativo (sin el buffer) en los logs
+    # Pero el iterrows recorrerá todo lo que le pasemos, así que controlamos adentro.
     
-    if operational_df.empty:
-        print("❌ Error Crítico: No hay datos después de la fecha de inicio.")
-        return
-
-    print(f"🚀 INICIANDO LOOP DE TRADING ({len(operational_df)} velas)...")
+    print(f"🚀 INICIANDO SIMULACIÓN DESDE {target_start_date}...")
     
     # --- C. BUCLE VELA A VELA ---
-    for current_time, row in operational_df.iterrows():
+    for current_time, row in df.iterrows():
+        
+        # [PRECISIÓN] Si estamos en el periodo de Buffer, NO operamos, solo pasamos.
+        # (Aunque aquí ya tenemos pivotes pre-calculados, esto asegura respetar la fecha de inicio)
+        if current_time < target_start_date:
+            continue
+            
         price = row['close']
+        # Usamos solo la fecha (YYYY-MM-DD) para buscar el pivote correspondiente
         current_date_str = str(current_time.date())
         
-        # 1. BUSCAR PIVOTES DEL DÍA
+        # 1. BUSCAR PIVOTES DEL DÍA EN EL MAPA PRE-CALCULADO
         try:
             day_stats = daily_df.loc[current_date_str]
             pivot = day_stats['P']
             r1 = day_stats['R1']
             s1 = day_stats['S1']
         except KeyError:
-            # Si falta data de ese día específico, saltamos
+            # Si falta un día en el medio (ej. mantenimiento exchange), saltamos sin error.
             continue
             
-        # 2. ESTRATEGIA (Ejemplo simple de Pivotes)
+        # 2. ESTRATEGIA SIMPLE DE TEST
         # =========================================
         
-        # ENTRADA LONG: Si el precio cruza hacia arriba el Pivote
+        # ENTRADA LONG: Precio cruza Pivot hacia arriba
         if position is None:
-            # Condición: Precio mayor al pivote Y apertura menor (cruce)
             if row['close'] > pivot and row['open'] < pivot:
                 position = 'LONG'
                 entry_price = price
-                # print(f"   [LONG] {current_time} @ {price:.2f} | P: {pivot:.2f}")
         
-        # GESTIÓN DE POSICIÓN (Salida)
+        # GESTIÓN DE SALIDA (TP / SL)
         elif position == 'LONG':
-            # Take Profit en R1  OR  Stop Loss del 2%
             take_profit = r1
-            stop_loss = entry_price * 0.98 
+            stop_loss = entry_price * 0.98  # SL 2%
             
             if price >= take_profit or price <= stop_loss:
-                # Calcular PnL
                 pnl_pct = (price - entry_price) / entry_price
                 pnl_usd = balance * pnl_pct
-                
-                # Actualizar Balance
                 balance += pnl_usd
                 
-                # Guardar Trade
                 trades_history.append({
                     'date': current_time,
                     'type': 'LONG',
@@ -245,20 +162,48 @@ def backtest_v9_3(df, target_start_date):
                     'pnl_usd': pnl_usd,
                     'reason': 'TP' if price >= take_profit else 'SL'
                 })
-                
-                position = None # Reset
-                # print(f"   [CLOSE] {current_time} @ {price:.2f} | PnL: ${pnl_usd:.2f}")
+                position = None
 
-    # --- D. FINALIZAR ---
-    generar_reporte_profesional(trades_history, CAPITAL_INICIAL, balance)
+    # --- D. REPORTE FINAL ---
+    generar_reporte(trades_history, CAPITAL_INICIAL, balance)
+
+def generar_reporte(trades, start_cap, end_cap):
+    if not trades:
+        print("\n⚠️ 0 Trades realizados. Revisa si el precio cruzó el pivote alguna vez.")
+        return
+
+    df_t = pd.DataFrame(trades)
+    total_trades = len(df_t)
+    wins = df_t[df_t['pnl_usd'] > 0]
+    losses = df_t[df_t['pnl_usd'] <= 0]
+    
+    win_rate = (len(wins) / total_trades) * 100
+    total_pnl = end_cap - start_cap
+    
+    gross_profit = wins['pnl_usd'].sum()
+    gross_loss = abs(losses['pnl_usd'].sum())
+    pf = gross_profit / gross_loss if gross_loss != 0 else 999
+
+    print("\n" + "="*45)
+    print(f"📊 REPORTE DE RESULTADOS - {SYMBOL}")
+    print(f"   Periodo Analizado: {TRADING_START_DATE} en adelante")
+    print("="*45)
+    print(f"💰 Balance Inicial:   ${start_cap:.2f}")
+    print(f"💰 Balance Final:     ${end_cap:.2f}")
+    print(f"📈 PnL Neto:          ${total_pnl:.2f}")
+    print("-" * 45)
+    print(f"🎲 Trades Totales:    {total_trades}")
+    print(f"✅ Win Rate:          {win_rate:.2f}%")
+    print(f"⚖️ Profit Factor:     {pf:.2f}")
+    print("="*45 + "\n")
 
 # ==========================================
 # EJECUCIÓN
 # ==========================================
 if __name__ == "__main__":
-    # 1. Cargar datos con el "colchón" de seguridad
-    df_data, fecha_inicio_real = descargar_datos_con_buffer(SYMBOL, TRADING_START_DATE, TIMEFRAME, BUFFER_DAYS)
+    # 1. Cargamos TU archivo local con la lógica precisa del buffer
+    df_data, fecha_real = cargar_datos_locales_con_buffer(SYMBOL, TRADING_START_DATE, BUFFER_DAYS)
     
-    # 2. Ejecutar Backtest si hay datos
-    if not df_data.empty:
-        backtest_v9_3(df_data, fecha_inicio_real)
+    # 2. Corremos el backtest si cargó bien
+    if df_data is not None and not df_data.empty:
+        backtest_v9_3(df_data, fecha_real)
