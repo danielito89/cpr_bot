@@ -1,366 +1,228 @@
-#!/usr/bin/env python3
-# backtester_v9.py
-# Versión: v9.2 (Fix Definitivo: Variables Globales Restauradas)
-
-import os
-import sys
+import ccxt
 import pandas as pd
 import numpy as np
-import asyncio
-import logging
-import time
-import gc
 from datetime import datetime, timedelta
+import time
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+# ==========================================
+# CONFIGURACIÓN GENERAL
+# ==========================================
+SYMBOL = 'ETH/USDT'
+TIMEFRAME = '1h'
+TRADING_START_DATE = "2022-01-01"  # Fecha donde quieres que el bot empiece a operar
+BUFFER_DAYS = 25                   # Días extra hacia atrás para cargar indicadores previos
+CAPITAL_INICIAL = 1000             # USD
 
-# --- 1. CONFIGURACIÓN ---
-SYMBOL_TO_TEST = "ETHUSDT"
-START_BALANCE = 10000
-COMMISSION_PCT = 0.0004
-BASE_SLIPPAGE = 0.0002
-IMPACT_COEF = 0.0001 
-MAX_IMPACT = 0.01
+# ==========================================
+# 1. MOTOR DE DATOS (CON BUFFER)
+# ==========================================
+def descargar_datos_con_buffer(symbol, start_date_str, timeframe='1h', buffer_days=30):
+    """
+    Descarga datos desde (start_date - buffer) para asegurar que el primer día
+    operativo tenga historial previo para calcular pivotes.
+    """
+    # Configurar Exchange (Usamos Binance como ejemplo público)
+    exchange = ccxt.binance({'enableRateLimit': True})
+    
+    # Calcular fechas
+    target_start = pd.to_datetime(start_date_str)
+    download_start = target_start - timedelta(days=buffer_days)
+    since_ts = int(download_start.timestamp() * 1000)
+    
+    print(f"\n📥 [DATA] Iniciando descarga...")
+    print(f"   - Objetivo Operativo: {target_start.date()}")
+    print(f"   - Descarga Real (Buffer): {download_start.date()} (Cargando {buffer_days} días extra)")
 
-# Estrategia (Variables de ajuste)
-VOLUME_FACTOR = 1.2
-STRICT_VOLUME_FACTOR = 1.5
-TEST_START_DATE = "2022-01-01"
-TEST_END_DATE = "2025-12-01"
-
-# --- CONSTANTES TÉCNICAS (Restauradas) ---
-EMA_PERIOD = 20
-ATR_PERIOD = 14
-CPR_WIDTH_THRESHOLD = 0.2
-TIME_STOP_HOURS = 12
-MIN_VOLATILITY_ATR_PCT = 0.5
-TRAILING_STOP_TRIGGER_ATR = 1.25
-TRAILING_STOP_DISTANCE_ATR = 1.0
-
-# Riesgo
-LEVERAGE = 30
-INVESTMENT_PCT = 0.05
-DAILY_LOSS_LIMIT_PCT = 15.0
-MAX_TRADE_SIZE_USDT = 50000
-MAX_DAILY_TRADES = 50
-
-# Rutas
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# Imports Mock
-try:
-    from bot_core.risk import RiskManager
-    from bot_core.pivots import calculate_pivots_from_data
-    from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
-except ImportError:
-    print("Error importando bot_core. Ejecuta desde la carpeta correcta.")
-    sys.exit(1)
-
-# --- MOCKS ---
-class MockTelegram:
-    async def _send_message(self, text): pass 
-
-class MockOrdersManager:
-    def __init__(self, simulator): self.sim = simulator
-    async def place_bracket_order(self, side, qty, price, sl, tps, type):
-        self.sim.stage_order(side, qty, price, sl, tps, type)
-    async def move_sl_to_be(self, qty): self.sim.move_sl_to_be()
-    async def update_sl(self, new_price, qty, reason="Trailing"): self.sim.update_sl(new_price)
-    async def close_position_manual(self, reason): self.sim.close_position(reason)
-
-class MockBotController:
-    def __init__(self, simulator, symbol):
-        self.symbol = symbol
-        self.state = simulator.state 
-        self.simulator = simulator
-        self.lock = asyncio.Lock()
-        self.telegram_handler = MockTelegram()
-        self.orders_manager = MockOrdersManager(simulator)
+    all_ohlcv = []
+    
+    # Bucle simple de paginación para CCXT
+    # NOTA: En producción, usa un while loop robusto. Aquí descargamos un bloque grande para el ejemplo.
+    try:
+        # Descargamos un lote grande (limitado por el exchange, usualmente 1000 velas)
+        # Para backtests muy largos, necesitarás un bucle while 'since' < 'now'
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ts, limit=1000)
+        all_ohlcv.extend(ohlcv)
         
-        # --- FIX: Cliente Mock ---
-        self.client = None 
-        
-        # Configuración
-        self.investment_pct = INVESTMENT_PCT
-        self.leverage = LEVERAGE
-        self.volume_factor = VOLUME_FACTOR
-        self.strict_volume_factor = STRICT_VOLUME_FACTOR
-        self.cpr_width_threshold = CPR_WIDTH_THRESHOLD
-        self.take_profit_levels = 3
-        self.breakout_atr_sl_multiplier = 1.0
-        self.breakout_tp_mult = 10.0
-        self.ranging_atr_multiplier = 0.5
-        self.range_tp_mult = 2.0 
-        self.daily_loss_limit_pct = DAILY_LOSS_LIMIT_PCT
-        self.min_volatility_atr_pct = MIN_VOLATILITY_ATR_PCT
-        self.trailing_stop_trigger_atr = TRAILING_STOP_TRIGGER_ATR
-        self.trailing_stop_distance_atr = TRAILING_STOP_DISTANCE_ATR
-        self.MAX_TRADE_SIZE_USDT = MAX_TRADE_SIZE_USDT
-        self.MAX_DAILY_TRADES = MAX_DAILY_TRADES
-        
-        if "PEPE" in symbol or "SHIB" in symbol:
-            self.tick_size = 0.00000001; self.step_size = 1.0
-        else:
-            self.tick_size = 0.01; self.step_size = 0.001
-
-    async def _get_account_balance(self): return self.state.balance
-    def get_current_timestamp(self): return self.simulator.current_timestamp
-    async def _get_current_position(self):
-        if not self.state.is_in_position: return None
-        return { "positionAmt": self.state.current_position_info.get('quantity', 0), "entryPrice": 0, "markPrice": 0, "unRealizedProfit": 0 }
-
-class SimulatorState:
-    def __init__(self):
-        self.trading_paused = False
-        self.trade_cooldown_until = 0
-        self.daily_pivots = {}
-        self.last_pivots_date = None
-        self.cached_atr = None
-        self.cached_ema = None
-        self.cached_median_vol = None
-        self.is_in_position = False
-        self.current_position_info = {}
-        self.last_known_position_qty = 0.0
-        self.sl_moved_to_be = False
-        self.daily_trade_stats = []
-        self.daily_start_balance = START_BALANCE
-        self.balance = START_BALANCE
-        self.current_price = 0.0
-        self.current_time = None
-        self.trades_history = []
-        self.pending_order = None
-
-    def save_state(self): pass
-
-class BacktesterV9:
-    def __init__(self):
-        self.state = SimulatorState()
-        self.current_timestamp = 0.0
-        self.controller = MockBotController(self, SYMBOL_TO_TEST)
-        self.risk_manager = RiskManager(self.controller)
-
-    def calculate_slippage(self, notional, median_vol):
-        if not median_vol or median_vol <= 0: return MAX_IMPACT
-        vol_ratio = notional / median_vol
-        impact = IMPACT_COEF * (vol_ratio ** 0.8)
-        return BASE_SLIPPAGE + min(MAX_IMPACT, impact)
-
-    def stage_order(self, side, qty, price, sl, tps, type_):
-        self.state.pending_order = {
-            "side": side, "qty": qty, "sl": sl, "tps": tps, "type": type_,
-            "signal_price": price, "created_at": self.current_timestamp
-        }
-
-    def execute_pending_order(self, open_price, median_vol):
-        if self.current_timestamp < self.state.trade_cooldown_until:
-            self.state.pending_order = None
-            return
-
-        order = self.state.pending_order
-        self.state.pending_order = None
-        
-        notional = order['qty'] * open_price
-        slip = self.calculate_slippage(notional, median_vol)
-        
-        if order['side'] == SIDE_BUY: real_entry = open_price * (1 + slip)
-        else: real_entry = open_price * (1 - slip)
-
-        sl_hit = False
-        if order['side'] == SIDE_BUY and real_entry <= order['sl']: sl_hit = True
-        if order['side'] == SIDE_SELL and real_entry >= order['sl']: sl_hit = True
-        
-        comm = notional * COMMISSION_PCT
-        self.state.balance -= comm
-        
-        self.state.is_in_position = True
-        self.state.current_position_info = {
-            "side": order['side'], "quantity": order['qty'], 
-            "entry_price": real_entry, "entry_type": order['type'], 
-            "tps_hit_count": 0, "total_pnl": -comm, 
-            "sl": order['sl'], "tps": order['tps'], 
-            "entry_time": self.current_timestamp, "comm_entry": comm, 
-            "trailing_sl_price": None, "slippage_impact": slip
-        }
-        self.state.last_known_position_qty = order['qty']
-        self.state.sl_moved_to_be = False
-        
-        if sl_hit:
-            self.state.current_price = real_entry
-            self.close_position("Gap Kill", median_vol, exit_price_ref=real_entry)
-
-    def move_sl_to_be(self):
-        if self.state.is_in_position:
-            self.state.current_position_info['sl'] = self.state.current_position_info['entry_price']
-            self.state.sl_moved_to_be = True
-
-    def update_sl(self, new_price):
-        if self.state.is_in_position:
-            self.state.current_position_info['sl'] = new_price
-            self.state.sl_moved_to_be = True
-
-    def close_position(self, reason, current_median_vol, exit_price_ref=None):
-        if not self.state.is_in_position: return
-        info = self.state.current_position_info
-        
-        base_price = exit_price_ref if exit_price_ref else self.state.current_price
-        
-        notional = info['quantity'] * base_price
-        slip = self.calculate_slippage(notional, current_median_vol)
-        
-        if info['side'] == SIDE_BUY: real_exit = base_price * (1 - slip)
-        else: real_exit = base_price * (1 + slip)
-
-        pnl_gross = (real_exit - info['entry_price']) * info['quantity']
-        if info['side'] == SIDE_SELL: pnl_gross = -pnl_gross
-        
-        comm_exit = (real_exit * info['quantity']) * COMMISSION_PCT
-        net_pnl = pnl_gross - comm_exit - info.get('comm_entry', 0)
-        
-        self.state.balance += (pnl_gross - comm_exit)
-        
-        cooldown = 300
-        if net_pnl > 0: cooldown = 0
-        elif net_pnl < 0: cooldown = 900
-        self.state.trade_cooldown_until = self.current_timestamp + cooldown
-
-        self.state.trades_history.append({
-            'entry_time': info.get('entry_time'), 'exit_time': self.state.current_time,
-            'side': info['side'], 'type': info['entry_type'],
-            'pnl': net_pnl, 'reason': reason,
-            'impact_exit': slip
-        })
-        self.state.is_in_position = False
-        self.state.current_position_info = {}
-        self.state.daily_trade_stats.append({'pnl': net_pnl})
-
-    def check_exits(self, row):
-        if not self.state.is_in_position: return
-        info = self.state.current_position_info
-        high, low = row.High, row.Low
-        median_vol = row.MedianVol
-        current_sl = info['sl']
-        
-        sl_hit = False
-        if info['side'] == SIDE_BUY and low <= current_sl: sl_hit = True
-        if info['side'] == SIDE_SELL and high >= current_sl: sl_hit = True
-        
-        if sl_hit:
-            self.state.current_price = current_sl
-            self.close_position("Stop-Loss", row.MedianVol, exit_price_ref=current_sl)
-            return
-
-        tps = info['tps']
-        if tps:
-            last_tp = tps[-1]
-            tp_hit = False
-            if info['side'] == SIDE_BUY and high >= last_tp: tp_hit = True
-            if info['side'] == SIDE_SELL and low <= last_tp: tp_hit = True
+        # Simulamos una segunda petición si es necesario (ejemplo simplificado)
+        if len(ohlcv) == 1000:
+            last_ts = ohlcv[-1][0]
+            ohlcv2 = exchange.fetch_ohlcv(symbol, timeframe, since=last_ts, limit=1000)
+            all_ohlcv.extend(ohlcv2)
             
-            if tp_hit:
-                self.state.current_price = last_tp
-                self.close_position("Take-Profit", row.MedianVol, exit_price_ref=last_tp)
-                return
-            
-            if len(tps) >= 2:
-                tp2 = tps[1]
-                if (info['side'] == SIDE_BUY and high >= tp2) or \
-                   (info['side'] == SIDE_SELL and low <= tp2):
-                    if info['tps_hit_count'] < 2:
-                        info['tps_hit_count'] = 2
-                        self.move_sl_to_be()
-                        
-        if info['entry_type'].startswith("Ranging"):
-             elapsed = self.current_timestamp - info['entry_time']
-             if (elapsed / 3600) > TIME_STOP_HOURS:
-                 self.close_position(f"Time-Stop ({TIME_STOP_HOURS}h)", row.MedianVol, exit_price_ref=row.Open)
+    except Exception as e:
+        print(f"❌ Error descargando datos: {e}")
+        return pd.DataFrame(), target_start
 
-    async def run(self):
-        print(f"Iniciando Backtest V9.2 (Corregido) para {SYMBOL_TO_TEST}...")
+    # Crear DataFrame
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    
+    print(f"✅ Datos descargados: {len(df)} velas. Desde {df.index[0]} hasta {df.index[-1]}")
+    return df, target_start
+
+# ==========================================
+# 2. GENERADOR DE REPORTE (KPIs)
+# ==========================================
+def generar_reporte_profesional(trades, start_cap, end_cap):
+    if not trades:
+        print("\n⚠️ No se realizaron operaciones. Revisa la lógica o los datos.")
+        return
+
+    df_trades = pd.DataFrame(trades)
+    
+    # Cálculos básicos
+    total_trades = len(df_trades)
+    wins = df_trades[df_trades['pnl_usd'] > 0]
+    losses = df_trades[df_trades['pnl_usd'] <= 0]
+    
+    win_rate = (len(wins) / total_trades) * 100
+    total_pnl = end_cap - start_cap
+    roi = (total_pnl / start_cap) * 100
+    
+    avg_win = wins['pnl_usd'].mean() if not wins.empty else 0
+    avg_loss = losses['pnl_usd'].mean() if not losses.empty else 0
+    
+    # Profit Factor
+    gross_profit = wins['pnl_usd'].sum()
+    gross_loss = abs(losses['pnl_usd'].sum())
+    profit_factor = gross_profit / gross_loss if gross_loss != 0 else 999
+    
+    # Máximo Drawdown (Simulado sobre el balance final de cada trade)
+    # Crea una serie de balances acumulados
+    equity_curve = [start_cap]
+    current_bal = start_cap
+    for pnl in df_trades['pnl_usd']:
+        current_bal += pnl
+        equity_curve.append(current_bal)
+    
+    equity_series = pd.Series(equity_curve)
+    peak = equity_series.cummax()
+    drawdown = (equity_series - peak) / peak
+    max_drawdown = drawdown.min() * 100
+
+    print("\n" + "="*45)
+    print(f"📊 REPORTE DE RESULTADOS V9.3 - {SYMBOL}")
+    print("="*45)
+    print(f"💰 Balance Inicial:   ${start_cap:.2f}")
+    print(f"💰 Balance Final:     ${end_cap:.2f}")
+    print(f"📈 PnL Neto:          ${total_pnl:.2f} ({roi:.2f}%)")
+    print(f"📉 Max Drawdown:      {max_drawdown:.2f}%")
+    print("-" * 45)
+    print(f"🎲 Trades Totales:    {total_trades}")
+    print(f"✅ Win Rate:          {win_rate:.2f}%")
+    print(f"⚖️ Profit Factor:     {profit_factor:.2f} (Objetivo > 1.5)")
+    print("-" * 45)
+    print(f"🟢 Promedio Ganancia: ${avg_win:.2f}")
+    print(f"🔴 Promedio Pérdida:  ${avg_loss:.2f}")
+    print("="*45 + "\n")
+
+# ==========================================
+# 3. MOTOR DE BACKTEST (Lógica de Pivotes)
+# ==========================================
+def backtest_v9_3(df, target_start_date):
+    print("\n⚙️  PROCESANDO DATOS Y CALCULANDO PIVOTES...")
+    
+    # --- A. PRE-CÁLCULO DE PIVOTES DIARIOS (La Solución) ---
+    # Resampleamos a días para obtener OHLC D1
+    daily_df = df.resample('1D').agg({
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    })
+
+    # SHIFT(1): Usamos los datos de AYER para calcular los niveles de HOY
+    # Si hoy es 2 de Enero, usamos High/Low/Close del 1 de Enero.
+    daily_df['prev_high'] = daily_df['high'].shift(1)
+    daily_df['prev_low'] = daily_df['low'].shift(1)
+    daily_df['prev_close'] = daily_df['close'].shift(1)
+    
+    # Fórmulas de Pivotes (Standard)
+    daily_df['P'] = (daily_df['prev_high'] + daily_df['prev_low'] + daily_df['prev_close']) / 3
+    daily_df['R1'] = (2 * daily_df['P']) - daily_df['prev_low']
+    daily_df['S1'] = (2 * daily_df['P']) - daily_df['prev_high']
+    
+    # Eliminamos los días del inicio que no tienen "ayer" (los NaNs iniciales)
+    daily_df.dropna(inplace=True)
+
+    # --- B. INICIALIZACIÓN DE VARIABLES ---
+    balance = CAPITAL_INICIAL
+    position = None     # 'LONG', 'SHORT', None
+    entry_price = 0
+    trades_history = []
+    
+    # Filtramos el DF para iterar SOLO desde la fecha oficial de inicio
+    operational_df = df[df.index >= target_start_date]
+    
+    if operational_df.empty:
+        print("❌ Error Crítico: No hay datos después de la fecha de inicio.")
+        return
+
+    print(f"🚀 INICIANDO LOOP DE TRADING ({len(operational_df)} velas)...")
+    
+    # --- C. BUCLE VELA A VELA ---
+    for current_time, row in operational_df.iterrows():
+        price = row['close']
+        current_date_str = str(current_time.date())
         
+        # 1. BUSCAR PIVOTES DEL DÍA
         try:
-            df_1h = pd.read_csv(os.path.join(DATA_DIR, f"mainnet_data_1h_{SYMBOL_TO_TEST}.csv"), index_col="Open_Time", parse_dates=True)
-            df_1d = pd.read_csv(os.path.join(DATA_DIR, f"mainnet_data_1d_{SYMBOL_TO_TEST}.csv"), index_col="Open_Time", parse_dates=True)
-            df_1m = pd.read_csv(os.path.join(DATA_DIR, f"mainnet_data_1m_{SYMBOL_TO_TEST}.csv"), index_col="Open_Time", parse_dates=True, 
-                                usecols=['Open_Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Quote_Asset_Volume'])
-        except FileNotFoundError:
-            print(f"❌ Faltan archivos para {SYMBOL_TO_TEST}. Ejecuta download_data.py")
-            return
-
-        print("Calculando Indicadores...")
-        df_1m['MedianVol'] = df_1m['Quote_Asset_Volume'].rolling(window=60).median().shift(1)
-        df_1h['EMA_1h'] = df_1h['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
-        tr = pd.concat([df_1h['High']-df_1h['Low'], abs(df_1h['High']-df_1h['Close'].shift(1)), abs(df_1h['Low']-df_1h['Close'].shift(1))], axis=1).max(axis=1)
-        df_1h['ATR_1h'] = tr.ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
-        df_1h = df_1h.shift(1) 
-
-        print("Fusionando...")
-        df_merged = pd.merge_asof(df_1m, df_1h[['EMA_1h', 'ATR_1h']], left_index=True, right_index=True, direction='backward')
-        df_merged.dropna(inplace=True)
-        
-        if TEST_START_DATE: df_merged = df_merged.loc[TEST_START_DATE:]
-        if TEST_END_DATE: df_merged = df_merged.loc[:TEST_END_DATE]
-
-        print(f"Simulando {len(df_merged)} velas...")
-        
-        current_date_obj = None
-        pivots_missing = 0
-
-        for row in df_merged.itertuples():
-            self.current_timestamp = row.Index.timestamp()
-            self.state.current_time = row.Index
-            self.state.current_price = row.Close
+            day_stats = daily_df.loc[current_date_str]
+            pivot = day_stats['P']
+            r1 = day_stats['R1']
+            s1 = day_stats['S1']
+        except KeyError:
+            # Si falta data de ese día específico, saltamos
+            continue
             
-            if self.state.pending_order:
-                self.execute_pending_order(row.Open, row.MedianVol)
-
-            if self.state.is_in_position:
-                await self.risk_manager._check_trailing_stop(row.Close, self.state.current_position_info.get('quantity', 0))
-                self.check_exits(row)
-
-            if not self.state.is_in_position and not self.state.pending_order:
-                row_date = row.Index.date()
-                if current_date_obj != row_date:
-                    current_date_obj = row_date
-                    yesterday_ts = pd.Timestamp(row_date - timedelta(days=1))
-                    
-                    if yesterday_ts in df_1d.index:
-                        d_row = df_1d.loc[yesterday_ts]
-                        self.state.daily_pivots = calculate_pivots_from_data(
-                            h=float(d_row['High']), l=float(d_row['Low']), c=float(d_row['Close']), 
-                            tick_size=self.controller.tick_size, cpr_width_threshold=CPR_WIDTH_THRESHOLD
-                        )
-                    else:
-                        self.state.daily_pivots = None
-                        pivots_missing += 1
-
-                self.state.cached_atr = row.ATR_1h
-                self.state.cached_ema = row.EMA_1h
-                self.state.cached_median_vol = row.MedianVol
-                
-                if self.state.daily_pivots:
-                    k = {'o': row.Open, 'c': row.Close, 'h': row.High, 'l': row.Low, 'v': row.Volume, 'q': row.Quote_Asset_Volume, 'x': True}
-                    await self.risk_manager.seek_new_trade(k)
-
-        if pivots_missing > 0:
-            print(f"⚠️ ADVERTENCIA: Faltaron pivotes en {pivots_missing} días.")
-        self.print_results()
-
-    def print_results(self):
-        trades = self.state.trades_history
-        if not trades:
-            print("Sin trades.")
-            return
-        df = pd.DataFrame(trades)
-        total_pnl = df['pnl'].sum()
-        wins = len(df[df['pnl'] > 0])
-        win_rate = (wins / len(df)) * 100
-        gross_win = df[df['pnl'] > 0]['pnl'].sum()
-        gross_loss = abs(df[df['pnl'] < 0]['pnl'].sum())
-        pf = gross_win / gross_loss if gross_loss != 0 else 0
+        # 2. ESTRATEGIA (Ejemplo simple de Pivotes)
+        # =========================================
         
-        print(f"\nRESULTADOS V9.2 (Full Global): {SYMBOL_TO_TEST}")
-        print(f"PnL: ${total_pnl:.2f} | PF: {pf:.2f} | WinRate: {win_rate:.2f}% | Trades: {len(df)}")
+        # ENTRADA LONG: Si el precio cruza hacia arriba el Pivote
+        if position is None:
+            # Condición: Precio mayor al pivote Y apertura menor (cruce)
+            if row['close'] > pivot and row['open'] < pivot:
+                position = 'LONG'
+                entry_price = price
+                # print(f"   [LONG] {current_time} @ {price:.2f} | P: {pivot:.2f}")
+        
+        # GESTIÓN DE POSICIÓN (Salida)
+        elif position == 'LONG':
+            # Take Profit en R1  OR  Stop Loss del 2%
+            take_profit = r1
+            stop_loss = entry_price * 0.98 
+            
+            if price >= take_profit or price <= stop_loss:
+                # Calcular PnL
+                pnl_pct = (price - entry_price) / entry_price
+                pnl_usd = balance * pnl_pct
+                
+                # Actualizar Balance
+                balance += pnl_usd
+                
+                # Guardar Trade
+                trades_history.append({
+                    'date': current_time,
+                    'type': 'LONG',
+                    'entry': entry_price,
+                    'exit': price,
+                    'pnl_usd': pnl_usd,
+                    'reason': 'TP' if price >= take_profit else 'SL'
+                })
+                
+                position = None # Reset
+                # print(f"   [CLOSE] {current_time} @ {price:.2f} | PnL: ${pnl_usd:.2f}")
 
+    # --- D. FINALIZAR ---
+    generar_reporte_profesional(trades_history, CAPITAL_INICIAL, balance)
+
+# ==========================================
+# EJECUCIÓN
+# ==========================================
 if __name__ == "__main__":
-    asyncio.run(BacktesterV9().run())
+    # 1. Cargar datos con el "colchón" de seguridad
+    df_data, fecha_inicio_real = descargar_datos_con_buffer(SYMBOL, TRADING_START_DATE, TIMEFRAME, BUFFER_DAYS)
+    
+    # 2. Ejecutar Backtest si hay datos
+    if not df_data.empty:
+        backtest_v9_3(df_data, fecha_inicio_real)
