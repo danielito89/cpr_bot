@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # --- 1. CONFIGURACIÓN DE LABORATORIO ---
 SYMBOL_TO_TEST = "ETHUSDT"
-START_BALANCE = 10000
+START_BALANCE = 1000
 
 # Parámetros de Realismo
 COMMISSION_PCT = 0.0004
@@ -376,7 +376,7 @@ class BacktesterV8:
                     yesterday_ts = pd.Timestamp(row_date - timedelta(days=1))
                     if yesterday_ts in df_1d.index:
                         d_row = df_1d.loc[yesterday_ts]
-                        self.state.daily_pivots = calculate_pivots_from_data(h=float(d_row['High']), l=float(d_row['Low']), c=float(d_row['Close']), tick_size=self.controller.tick_size, width_threshold=0.2)
+                        self.state.daily_pivots = calculate_pivots_from_data(h=float(d_row['High']), l=float(d_row['Low']), c=float(d_row['Close']), tick_size=self.controller.tick_size, cpr_width_threshold=0.2)
 
                 self.state.cached_atr = row.ATR_1h
                 self.state.cached_ema = row.EMA_1h
