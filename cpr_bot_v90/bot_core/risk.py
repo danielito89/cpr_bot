@@ -38,13 +38,13 @@ class RiskManager:
             wait = int(self.state.trade_cooldown_until - now)
             return False, f"Cooldown ({wait}s)"
 
-        dt_now = datetime.utcfromtimestamp(now)
-        if dt_now.weekday() == 5: 
-            return False, "Día Bloqueado (Sábado)"
-
         FORBIDDEN_HOURS = [0, 4, 6, 10, 13]
-        if dt_now.hour in FORBIDDEN_HOURS:
-            return False, f"Horario Blacklist ({dt_now.hour}:00 UTC)"
+        current_hour = datetime.utcfromtimestamp(now).hour
+        if current_hour in FORBIDDEN_HOURS:
+            return False, f"Horario Blacklist ({current_hour}:00 UTC)"
+
+        if datetime.utcfromtimestamp(now).weekday() == 5:
+            return False, "Día Bloqueado (Sábado)"
 
         balance = await self.bot._get_account_balance()
         if balance is None: return False, "Error Balance"
@@ -55,8 +55,7 @@ class RiskManager:
         
         if start_bal > 0:
             daily_pnl_pct = (realized_pnl / start_bal) * 100
-            limit_pct = -abs(self.config.daily_loss_limit_pct)
-            if daily_pnl_pct <= limit_pct:
+            if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
                 return False, f"Límite Diario ({daily_pnl_pct:.2f}%)"
 
         if len(self.state.daily_trade_stats) >= self.max_daily_trades:
@@ -97,28 +96,29 @@ class RiskManager:
                             logging.info(f"[{self.config.symbol}] 💤 Mercado Lento: ATR {atr_pct:.2f}%")
                         return
 
-                p = self.state.daily_pivots
-                is_ranging_day = p.get("is_ranging_day", True)
+                # --- LÓGICA TRAP HUNTER (v100) ---
+                # Forzamos SIEMPRE la lógica de "Breakout Difícil / Rango Fácil"
+                # Esto atrapa los fakeouts en H4/L4 convirtiéndolos en reversiones
                 
-                base_factor = self.config.volume_factor
-                strict_factor = getattr(self.config, 'strict_volume_factor', 1.5)
+                base_factor = self.config.volume_factor # Ej: 1.1
+                strict_factor = getattr(self.config, 'strict_volume_factor', 10.0) # Ej: 10.0
                 
-                if is_ranging_day:
-                    req_vol_range = median_vol * base_factor
-                    req_vol_breakout = median_vol * strict_factor
-                else:
-                    req_vol_range = median_vol * strict_factor
-                    req_vol_breakout = median_vol * base_factor
+                # SIEMPRE exigente para romper, SIEMPRE fácil para rebotar
+                req_vol_range = median_vol * base_factor
+                req_vol_breakout = median_vol * strict_factor
                 
                 vol_ok_breakout = current_volume > req_vol_breakout
                 vol_ok_range = current_volume > req_vol_range
+                # ---------------------------------
 
+                p = self.state.daily_pivots
                 ema = self.state.cached_ema
                 
+                # Diagnóstico
                 dist_l4 = abs(current_price - p["L4"]) / current_price * 100
                 dist_h4 = abs(current_price - p["H4"]) / current_price * 100
                 if (dist_l4 < 0.3 or dist_h4 < 0.3) and time.time() % 10 < 2:
-                     logging.info(f"[{self.config.symbol}] 🔍 Cerca Nivel. Px:{current_price} Vol:{'✅' if vol_ok_breakout else '❌'} ({current_volume/1000:.0f}k vs {req_vol_breakout/1000:.0f}k)")
+                     logging.info(f"[{self.config.symbol}] 🔍 Cerca Nivel. Px:{current_price} VolBase:{'✅' if vol_ok_range else '❌'} VolStrict:{'✅' if vol_ok_breakout else '❌'}")
 
                 side = None
                 entry_type = None
@@ -127,7 +127,7 @@ class RiskManager:
                 is_green = current_price > open_price
                 is_red = current_price < open_price
 
-                # 1. Breakouts
+                # 1. Breakouts (Casi imposible de activar con Vol 10)
                 if current_price > p["H4"]:
                     if vol_ok_breakout and current_price > ema and is_green:
                         side, entry_type = SIDE_BUY, "Breakout Long"
@@ -139,28 +139,29 @@ class RiskManager:
                         sl = current_price + atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price - atr * self.config.breakout_tp_mult]
                 
-                # 2. Rango
+                # 2. Rango (La Máquina de Dinero)
+                # Si falla el breakout (99% veces), caemos aquí.
                 if not side:
-                    enable_ranging = getattr(self.config, 'enable_ranging', True)
-                    if enable_ranging:
-                        if current_price <= p["L3"]:
-                            if vol_ok_range and is_green:
-                                side, entry_type = SIDE_BUY, "Ranging Long"
-                                sl = p["L4"] - atr * self.config.ranging_atr_multiplier
-                                potential_tps = [p["L1"], p["H1"], p["H3"]]
-                                tp_prices = [tp for tp in potential_tps if tp > current_price]
-                                while len(tp_prices) < 3:
-                                    base = tp_prices[-1] if tp_prices else current_price
-                                    tp_prices.append(base + atr)
-                        elif current_price >= p["H3"]:
-                            if vol_ok_range and is_red:
-                                side, entry_type = SIDE_SELL, "Ranging Short"
-                                sl = p["H4"] + atr * self.config.ranging_atr_multiplier
-                                potential_tps = [p["H1"], p["L1"], p["L3"]]
-                                tp_prices = [tp for tp in potential_tps if tp < current_price]
-                                while len(tp_prices) < 3:
-                                    base = tp_prices[-1] if tp_prices else current_price
-                                    tp_prices.append(base - atr)
+                    # Habilitado siempre
+                    if current_price <= p["L3"]:
+                        if vol_ok_range and is_green:
+                            side, entry_type = SIDE_BUY, "Ranging Long"
+                            sl = p["L4"] - atr * self.config.ranging_atr_multiplier
+                            potential_tps = [p["L1"], p["H1"], p["H3"]]
+                            tp_prices = [tp for tp in potential_tps if tp > current_price]
+                            while len(tp_prices) < 3:
+                                base = tp_prices[-1] if tp_prices else current_price
+                                tp_prices.append(base + atr)
+
+                    elif current_price >= p["H3"]:
+                        if vol_ok_range and is_red:
+                            side, entry_type = SIDE_SELL, "Ranging Short"
+                            sl = p["H4"] + atr * self.config.ranging_atr_multiplier
+                            potential_tps = [p["H1"], p["L1"], p["L3"]]
+                            tp_prices = [tp for tp in potential_tps if tp < current_price]
+                            while len(tp_prices) < 3:
+                                base = tp_prices[-1] if tp_prices else current_price
+                                tp_prices.append(base - atr)
                 
                 if side:
                     balance = await self.bot._get_account_balance()
@@ -176,7 +177,6 @@ class RiskManager:
                     
                     if entry_type.startswith("Breakout"): tp_prices = [tp_prices[0]]
                     else: tp_prices = tp_prices[:3]
-
                     tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
                     
                     logging.info(f"!!! SEÑAL {self.config.symbol} !!! {entry_type}")
@@ -185,6 +185,9 @@ class RiskManager:
             except Exception as e:
                 logging.error(f"[{self.config.symbol}] Seek Error: {e}", exc_info=True)
 
+    # ... (Mantén el resto de funciones: _daily_loss_exceeded, check_position_state, _handle_full_close, etc. IGUALES)
+    # COPIAR EL RESTO DEL CÓDIGO DESDE LA v99.3
+    
     async def _daily_loss_exceeded(self, balance):
         if balance <= 0: return False
         start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
@@ -202,16 +205,13 @@ class RiskManager:
         async with self.bot.lock:
             try:
                 pos = await self.bot._get_current_position()
-                
                 if not pos: return
                 qty = abs(float(pos.get("positionAmt", 0)))
-                
                 if qty < 0.0001:
                     if self.state.is_in_position:
                         logging.info(f"[{self.config.symbol}] Cierre detectado. Limpiando...")
                         await self._handle_full_close()
                     return 
-                
                 if not self.state.is_in_position and qty > 0:
                     self.state.is_in_position = True
                     self.state.current_position_info = {
@@ -223,34 +223,20 @@ class RiskManager:
                     self.state.last_known_position_qty = qty
                     self.state.save_state()
                     return 
-
                 self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
                 self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
-                
                 if qty < self.state.last_known_position_qty:
                     await self._handle_partial_tp(qty)
-                
                 await self._check_trailing_stop(float(pos.get("markPrice")), qty)
-
-                # --- FIX TIME STOP (v108) ---
-                # Solo aplicamos Time Stop si es una estrategia de Rango
-                # Las estrategias de Breakout pueden correr libremente (gestionadas por Trailing)
                 if self.state.current_position_info.get("entry_type", "").startswith("Ranging"):
                     entry_time = self.state.current_position_info.get("entry_time", 0)
                     if entry_time > 0:
                         now = self._get_now()
                         if (now - entry_time) / 3600 > 12:
-                            logging.info(f"[{self.config.symbol}] Time Stop 12h (Rango).")
                             await self.orders_manager.close_position_manual(reason="Time Stop 12h")
-                # ----------------------------
-
             except Exception as e:
                 if "1003" not in str(e): logging.error(f"[{self.config.symbol}] Check Error: {e}", exc_info=True)
 
-    # ... (Resto de métodos: _check_trailing_stop, _handle_full_close, _handle_partial_tp IGUALES que v103)
-    # Asegúrate de mantenerlos al copiar.
-    # COPIAR EL RESTO DEL ARCHIVO v103 AQUÍ ABAJO PARA COMPLETAR
-    
     async def _check_trailing_stop(self, current_price, qty):
         info = self.state.current_position_info
         entry = info.get('entry_price')
