@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# backtester_v14_balanced.py
-# NIVEL: EQUILIBRADO (REALISTA)
+# backtester_v14.py
+# NIVEL: EQUILIBRADO (REALISTA) + FIX save_state
 # FIXES:
-# 1. Crash solucionado (trading_paused).
+# 1. Added save_state() mock to SimulatorState.
 # 2. Gap Cancel ELIMINADO (Ejecución Market siempre).
 # 3. Lógica SL vs TP basada en "Distancia al Open".
 # 4. Trailing Stop Intra-bar (High/Low).
@@ -29,10 +29,10 @@ CAPITAL_INICIAL = 1000
 CONFIG_SIMULADA = {
     "symbol": SYMBOL,
     "investment_pct": 0.05,
-    "leverage": 30,              
+    "leverage": 20,              
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,
-    "strict_volume_factor": 5,
+    "strict_volume_factor": 1.5,
     "take_profit_levels": 3,
     "breakout_atr_sl_multiplier": 1.0,
     "breakout_tp_mult": 1.25,
@@ -111,8 +111,10 @@ class SimulatorState:
         self.current_position_info = {}
         self.pending_order = None 
         
-        # FIX: Variable que faltaba y causaba el crash
+        # Variables necesarias para el RiskManager real
         self.trading_paused = False
+        self.sl_moved_to_be = False
+        self.trade_cooldown_until = 0
         
         self.cached_atr = 0
         self.cached_ema = 0
@@ -120,8 +122,10 @@ class SimulatorState:
         self.daily_pivots = {}
         self.current_timestamp = 0
         self.current_price = 0
-        self.sl_moved_to_be = False
-        self.trade_cooldown_until = 0
+
+    # --- FIX: Método Mock para evitar el error ---
+    def save_state(self):
+        pass # En simulación no guardamos nada en disco
 
 # ==========================================
 # 3. MOTOR DE BACKTEST (BALANCED)
@@ -259,8 +263,6 @@ class BacktesterV14:
             if hit_tp1:
                 info['tps_hit_count'] = 1
                 # Solo movemos SL para las SIGUIENTES velas.
-                # No forzamos un chequeo de salida en BE en esta misma vela,
-                # asumiendo que el "momentum" rompió TP1.
                 self.move_sl_to_be()
 
     # --- CARGA DE DATOS ---
