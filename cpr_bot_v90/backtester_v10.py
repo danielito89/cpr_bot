@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v10_final.py
-# FUSIÓN: Datos Locales Robustos + Lógica RiskManager Real
+# FUSIÓN: Datos Locales Robustos + Lógica RiskManager Real + REPORTE PROFESIONAL
 
 import os
 import sys
@@ -15,19 +15,19 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # --- 1. CONFIGURACIÓN ---
 SYMBOL = "ETHUSDT"
-TIMEFRAME = '1h'
+TIMEFRAME = '1m'
 TRADING_START_DATE = "2023-01-01"
 BUFFER_DAYS = 25
 CAPITAL_INICIAL = 1000
 
-# Parámetros (Iguales a tu main_v90.py)
+# Parámetros (Ajustados para 1m según tu solicitud previa)
 CONFIG_SIMULADA = {
     "symbol": SYMBOL,
     "investment_pct": 0.05,
-    "leverage": 20,              # Bajamos un poco para el test
+    "leverage": 30,              
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,        # Base
-    "strict_volume_factor": 1.5, # Trap Hunter
+    "strict_volume_factor": 5, # Trap Hunter (Bajado para que opere en 1m)
     "take_profit_levels": 3,
     "breakout_atr_sl_multiplier": 1.0,
     "breakout_tp_mult": 1.25,
@@ -100,8 +100,8 @@ class MockBotController:
 class SimulatorState:
     def __init__(self):
         self.balance = CAPITAL_INICIAL
+        self.equity_curve = [CAPITAL_INICIAL] # Para MDD
         self.daily_start_balance = CAPITAL_INICIAL
-        self.daily_trade_stats = []
         self.trades_history = []
         
         # Variables de estado del bot real
@@ -122,10 +122,10 @@ class SimulatorState:
         self.current_timestamp = 0
         self.current_price = 0
 
-    def save_state(self): pass # No guardar JSON en backtest
+    def save_state(self): pass 
 
 # ==========================================
-# 3. CARGADOR DE DATOS (El que funciona)
+# 3. CARGADOR DE DATOS
 # ==========================================
 def cargar_datos_locales_con_buffer(symbol, start_date_str, buffer_days):
     filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}.csv"
@@ -136,6 +136,7 @@ def cargar_datos_locales_con_buffer(symbol, start_date_str, buffer_days):
         print(f"❌ Archivo no encontrado: {filepath}")
         return None, None
 
+    print(f"📂 Cargando CSV: {filepath} ...")
     df = pd.read_csv(filepath)
     df.columns = [col.lower() for col in df.columns]
     col_fecha = 'open_time' if 'open_time' in df.columns else 'timestamp'
@@ -191,12 +192,9 @@ class BacktesterV10:
         if not self.state.is_in_position: return
         info = self.state.current_position_info
         
-        # Precio de salida es el actual del mercado
         exit_price = self.state.current_price
-        # Simular Slippage
         real_exit = exit_price * (1 - self.slippage) if info['side'] == SIDE_BUY else exit_price * (1 + self.slippage)
         
-        # Calcular PnL
         pnl_gross = (real_exit - info['entry_price']) * info['quantity']
         if info['side'] == SIDE_SELL: pnl_gross = -pnl_gross
         
@@ -204,18 +202,20 @@ class BacktesterV10:
         net_pnl = pnl_gross - cost
         
         self.state.balance += (pnl_gross - cost)
+        self.state.equity_curve.append(self.state.balance) # Actualizar curva
         
         # Registro
         self.state.trades_history.append({
             'date': datetime.fromtimestamp(self.state.current_timestamp),
             'type': info['entry_type'],
+            'side': info['side'],
             'pnl_usd': net_pnl,
-            'reason': reason
+            'reason': reason,
+            'balance': self.state.balance
         })
         
         self.state.is_in_position = False
         self.state.current_position_info = {}
-        # Cooldown simple
         self.state.trade_cooldown_until = self.state.current_timestamp + (900 if net_pnl < 0 else 0)
 
     def check_exits(self, row):
@@ -254,7 +254,7 @@ class BacktesterV10:
         df, target_start = cargar_datos_locales_con_buffer(SYMBOL, TRADING_START_DATE, BUFFER_DAYS)
         if df is None: return
 
-        # Pre-cálculos para eficiencia
+        # Pre-cálculos
         df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
         df['ema'] = df['close'].ewm(span=20).mean().shift(1)
         
@@ -272,6 +272,7 @@ class BacktesterV10:
         daily_df['prev_close'] = daily_df['close'].shift(1)
         
         print(f"🚀 INICIANDO BACKTEST REAL ({len(df)} velas)...")
+        print("⏳ Esto puede tardar un poco dependiendo de la velocidad de la Orange Pi...")
         
         for current_time, row in df.iterrows():
             if current_time < target_start: continue
@@ -284,57 +285,114 @@ class BacktesterV10:
             self.state.cached_ema = row.ema
             self.state.cached_median_vol = row.median_vol
             
-            # Actualizar Pivotes si cambia el día
+            # Actualizar Pivotes
             today_str = str(current_time.date())
             if today_str in daily_df.index:
                 d_data = daily_df.loc[today_str]
                 if not pd.isna(d_data['prev_high']):
-                    # Usar tu función real de pivotes
                     self.state.daily_pivots = calculate_pivots_from_data(
                         d_data['prev_high'], d_data['prev_low'], d_data['prev_close'], 
                         CONFIG_SIMULADA['tick_size'], CONFIG_SIMULADA['cpr_width_threshold']
                     )
 
-            # --- 1. GESTIÓN DE SALIDAS ---
+            # --- LÓGICA DE TRADING ---
             if self.state.is_in_position:
-                # Trailing Stop (Lógica real)
                 await self.risk_manager._check_trailing_stop(row.close, self.state.current_position_info['quantity'])
-                # SL/TP fijo
                 self.check_exits(row)
 
-            # --- 2. BUSCAR ENTRADAS (RiskManager Real) ---
             if not self.state.is_in_position:
-                # Formato kline que espera RiskManager
                 kline = {
                     'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low,
                     'v': row.volume, 'q': row.quote_asset_volume, 'x': True
                 }
                 await self.risk_manager.seek_new_trade(kline)
 
-        self.print_report()
+        self.generate_professional_report()
 
-    def print_report(self):
+    # ==========================================
+    # 5. GENERADOR DE REPORTES PROFESIONAL
+    # ==========================================
+    def generate_professional_report(self):
         trades = self.state.trades_history
+        equity = self.state.equity_curve
+        
         if not trades:
-            print("⚠️ Sin operaciones.")
+            print("\n⚠️ Sin operaciones realizadas. Revisa los filtros de volumen.")
             return
-            
+
         df_t = pd.DataFrame(trades)
-        wins = df_t[df_t['pnl_usd'] > 0]
-        losses = df_t[df_t['pnl_usd'] <= 0]
         
-        win_rate = len(wins) / len(df_t) * 100
+        # 1. Métricas Generales
+        total_trades = len(df_t)
+        winners = df_t[df_t['pnl_usd'] > 0]
+        losers = df_t[df_t['pnl_usd'] <= 0]
+        
         net_pnl = df_t['pnl_usd'].sum()
-        pf = wins['pnl_usd'].sum() / abs(losses['pnl_usd'].sum()) if len(losses) > 0 else 0
+        win_rate = (len(winners) / total_trades) * 100
         
-        print("\n" + "="*50)
-        print(f"📊 RESULTADO FINAL (Lógica Real RiskManager)")
-        print("="*50)
-        print(f"💰 PnL Neto:       ${net_pnl:.2f}")
-        print(f"🎲 Trades:         {len(df_t)}")
-        print(f"✅ Win Rate:       {win_rate:.2f}%")
-        print(f"⚖️ Profit Factor:  {pf:.2f}")
-        print("="*50)
+        avg_win = winners['pnl_usd'].mean() if not winners.empty else 0
+        avg_loss = losers['pnl_usd'].mean() if not losers.empty else 0
+        risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+        
+        gross_profit = winners['pnl_usd'].sum()
+        gross_loss = abs(losers['pnl_usd'].sum())
+        profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else 0
+
+        # 2. Drawdown Máximo (MDD)
+        equity_series = pd.Series(equity)
+        running_max = equity_series.cummax()
+        drawdown = (equity_series - running_max) / running_max * 100
+        max_drawdown = drawdown.min() # Es negativo
+
+        # 3. Retorno Total
+        total_return_pct = ((self.state.balance - CAPITAL_INICIAL) / CAPITAL_INICIAL) * 100
+
+        # 4. Tabla Mensual (Magia de Pandas)
+        df_t['month'] = df_t['date'].dt.to_period('M')
+        monthly_stats = df_t.groupby('month')['pnl_usd'].sum().reset_index()
+        monthly_stats['month'] = monthly_stats['month'].astype(str)
+        
+        # --- IMPRESIÓN DEL REPORTE ---
+        print("\n" + "="*60)
+        print(f"📊 REPORTE DE BACKTEST PROFESIONAL - {SYMBOL} ({TIMEFRAME})")
+        print("="*60)
+        
+        # A. Resumen Ejecutivo
+        print(f"{'Balance Inicial:':<25} ${CAPITAL_INICIAL:,.2f}")
+        print(f"{'Balance Final:':<25} ${self.state.balance:,.2f}")
+        print(f"{'Retorno Neto:':<25} ${net_pnl:,.2f} ({total_return_pct:.2f}%)")
+        print(f"{'Max Drawdown:':<25} {max_drawdown:.2f}%")
+        print("-" * 60)
+        
+        # B. Estadísticas de Trading
+        print(f"{'Total Trades:':<25} {total_trades}")
+        print(f"{'Win Rate:':<25} {win_rate:.2f}%  (Ganados: {len(winners)} | Perdidos: {len(losers)})")
+        print(f"{'Profit Factor:':<25} {profit_factor:.2f}")
+        print(f"{'Avg Win:':<25} ${avg_win:.2f}")
+        print(f"{'Avg Loss:':<25} ${avg_loss:.2f}")
+        print(f"{'Ratio Riesgo/Beneficio:':<25} 1 : {risk_reward_ratio:.2f}")
+        print("=" * 60)
+        
+        # C. Desglose Mensual
+        print("\n📅 DESGLOSE MENSUAL:")
+        print("-" * 40)
+        print(f"{'Mes':<15} | {'PnL (USD)':>15}")
+        print("-" * 40)
+        for _, row in monthly_stats.iterrows():
+            print(f"{row['month']:<15} | ${row['pnl_usd']:>14,.2f}")
+        print("-" * 40)
+        
+        # D. Mejores/Peores Operaciones
+        best_trade = df_t.loc[df_t['pnl_usd'].idxmax()]
+        worst_trade = df_t.loc[df_t['pnl_usd'].idxmin()]
+        
+        print("\n🏆 MEJOR TRADE:")
+        print(f"   Fecha: {best_trade['date']} | PnL: ${best_trade['pnl_usd']:.2f} | Tipo: {best_trade['type']}")
+        
+        print("\n💀 PEOR TRADE:")
+        print(f"   Fecha: {worst_trade['date']} | PnL: ${worst_trade['pnl_usd']:.2f} | Tipo: {worst_trade['type']}")
+        print("=" * 60)
+        print("✅ Fin del reporte.")
 
 if __name__ == "__main__":
     asyncio.run(BacktesterV10().run())

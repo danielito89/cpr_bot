@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 # 1. CONFIGURACIÓN GANADORA (A PROBAR EN 1M)
 # ==========================================
 PARAMS = {
-    'strict_volume_factor': 22.0,       # Valor obtenido del optimizer de 1H
+    'strict_volume_factor': 5.0,       # Valor obtenido del optimizer de 1H
     'breakout_tp_mult': 11.0,
     'trailing_stop_trigger_atr': 1.94,
     'volume_factor': 1.18,              
