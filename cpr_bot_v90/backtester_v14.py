@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # backtester_v14.py
-# NIVEL: EQUILIBRADO (REALISTA) + FIX save_state
+# NIVEL: EQUILIBRADO (REALISTA) + REPORTE PROFESIONAL
 # FIXES:
-# 1. Added save_state() mock to SimulatorState.
-# 2. Gap Cancel ELIMINADO (Ejecución Market siempre).
-# 3. Lógica SL vs TP basada en "Distancia al Open".
-# 4. Trailing Stop Intra-bar (High/Low).
+# 1. Execution at Open (N+1).
+# 2. Heurística de Proximidad para SL/TP.
+# 3. Reporte detallado (Mensual, Drawdown, etc).
+# 4. Mock save_state para evitar crash.
 
 import os
 import sys
@@ -59,7 +59,7 @@ except ImportError as e:
     sys.exit(1)
 
 # ==========================================
-# 2. MOCKS (FIXED)
+# 2. MOCKS
 # ==========================================
 class MockTelegram:
     async def _send_message(self, text): pass
@@ -67,7 +67,6 @@ class MockTelegram:
 class MockOrdersManager:
     def __init__(self, simulator): self.sim = simulator
     async def place_bracket_order(self, side, qty, price, sl, tps, type):
-        # Stage order para Open N+1
         self.sim.stage_order(side, qty, price, sl, tps, type)
     async def move_sl_to_be(self, qty): 
         self.sim.move_sl_to_be()
@@ -111,7 +110,6 @@ class SimulatorState:
         self.current_position_info = {}
         self.pending_order = None 
         
-        # Variables necesarias para el RiskManager real
         self.trading_paused = False
         self.sl_moved_to_be = False
         self.trade_cooldown_until = 0
@@ -123,9 +121,7 @@ class SimulatorState:
         self.current_timestamp = 0
         self.current_price = 0
 
-    # --- FIX: Método Mock para evitar el error ---
-    def save_state(self):
-        pass # En simulación no guardamos nada en disco
+    def save_state(self): pass
 
 # ==========================================
 # 3. MOTOR DE BACKTEST (BALANCED)
@@ -184,13 +180,12 @@ class BacktesterV14:
         self.state.current_position_info = {}
         self.state.trade_cooldown_until = self.state.current_timestamp + (900 if net_pnl < 0 else 0)
 
-    # --- LÓGICA DE EJECUCIÓN (SIMPLE Y REALISTA) ---
+    # --- LÓGICA DE EJECUCIÓN ---
     def execute_pending_order(self, row):
         order = self.state.pending_order
         open_price = row.open
         
-        # Ejecución Market al Open (Sin filtros de Gap Cancel)
-        # Aplicamos Slippage sobre el Open
+        # Slippage sobre el Open
         real_entry = open_price * (1 + self.slippage) if order['side'] == SIDE_BUY else open_price * (1 - self.slippage)
         
         cost = (order['quantity'] * real_entry) * self.commission
@@ -209,7 +204,7 @@ class BacktesterV14:
         }
         self.state.pending_order = None 
 
-    # --- LÓGICA DE SALIDA INTRA-VELA (BALANCED) ---
+    # --- LÓGICA DE SALIDA INTRA-VELA ---
     def check_exits(self, row):
         if not self.state.is_in_position: return
         info = self.state.current_position_info
@@ -220,7 +215,6 @@ class BacktesterV14:
         sl_price = info.get('sl')
         tps = info.get('tps', [])
         
-        # 1. Detectar si se tocaron niveles
         hit_sl = False
         hit_tp = False
         final_tp = tps[-1] if tps else None
@@ -235,12 +229,10 @@ class BacktesterV14:
                (info['side'] == SIDE_SELL and low <= final_tp):
                 hit_tp = True
 
-        # 2. Resolución de Conflictos (Heurística de Proximidad)
-        # Si toca ambos, asumimos que tocó primero el que estaba más cerca del Open
+        # Resolución de Conflictos (Heurística de Proximidad)
         if hit_sl and hit_tp:
             dist_sl = abs(open_p - sl_price)
             dist_tp = abs(open_p - final_tp)
-            
             if dist_sl < dist_tp:
                 self.close_position("SL (Prox)", sl_price)
             else:
@@ -255,14 +247,12 @@ class BacktesterV14:
             self.close_position("TP", final_tp)
             return
 
-        # 3. TP Parcial (Sin Pessimistic BE inmediato)
+        # TP Parcial
         if len(tps) > 1 and info['tps_hit_count'] == 0:
             tp1 = tps[0]
             hit_tp1 = (info['side'] == SIDE_BUY and high >= tp1) or (info['side'] == SIDE_SELL and low <= tp1)
-            
             if hit_tp1:
                 info['tps_hit_count'] = 1
-                # Solo movemos SL para las SIGUIENTES velas.
                 self.move_sl_to_be()
 
     # --- CARGA DE DATOS ---
@@ -316,7 +306,6 @@ class BacktesterV14:
                 self.state.daily_trade_stats = []
                 self.state.daily_start_balance = self.state.balance
                 self.last_date = current_date
-                # Actualizar pivotes
                 today_str = str(current_date)
                 if today_str in daily_df.index:
                     d_data = daily_df.loc[today_str]
@@ -335,11 +324,8 @@ class BacktesterV14:
 
             # 2. GESTIÓN DE POSICIÓN
             if self.state.is_in_position:
-                # Trailing Stop: Usamos High/Low para activar el trigger (Realista)
                 ts_check_price = row.high if self.state.current_position_info['side'] == SIDE_BUY else row.low
                 await self.risk_manager._check_trailing_stop(ts_check_price, self.state.current_position_info['quantity'])
-                
-                # Check Exits con heurística de proximidad
                 self.check_exits(row)
 
             # 3. ACTUALIZACIÓN DE ESTADO
@@ -355,42 +341,98 @@ class BacktesterV14:
                 }
                 await self.risk_manager.seek_new_trade(kline)
 
-        self.generate_report()
+        self.generate_professional_report()
 
-    def generate_report(self):
+    # --- REPORTE PROFESIONAL RESTAURADO ---
+    def generate_professional_report(self):
         trades = self.state.trades_history
+        equity = self.state.equity_curve
+        
         if not trades:
             print("\n⚠️ Sin operaciones.")
             return
 
         df_t = pd.DataFrame(trades)
-        net_pnl = df_t['pnl_usd'].sum()
+        
+        # 1. Métricas Generales
+        total_trades = len(df_t)
         winners = df_t[df_t['pnl_usd'] > 0]
         losers = df_t[df_t['pnl_usd'] <= 0]
         
-        print("\n" + "="*60)
-        print(f"📊 REPORTE FINAL V14 (BALANCED REALISM)")
-        print("="*60)
-        print(f"PnL Neto:       ${net_pnl:,.2f}")
-        print(f"Trades:         {len(df_t)}")
-        print(f"Win Rate:       {(len(winners)/len(df_t)*100):.2f}%")
+        net_pnl = df_t['pnl_usd'].sum()
+        win_rate = (len(winners) / total_trades) * 100
         
-        if not losers.empty:
-            pf = winners['pnl_usd'].sum() / abs(losers['pnl_usd'].sum())
-            print(f"Profit Factor:  {pf:.2f}")
-        else:
-            print("Profit Factor:  ∞")
+        avg_win = winners['pnl_usd'].mean() if not winners.empty else 0
+        avg_loss = losers['pnl_usd'].mean() if not losers.empty else 0
+        risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+        
+        gross_profit = winners['pnl_usd'].sum()
+        gross_loss = abs(losers['pnl_usd'].sum())
+        profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else 0
 
+        # 2. Drawdown Máximo (MDD)
+        equity_series = pd.Series(equity)
+        running_max = equity_series.cummax()
+        drawdown = (equity_series - running_max) / running_max * 100
+        max_drawdown = drawdown.min() 
+
+        # 3. Retorno Total
+        total_return_pct = ((self.state.balance - CAPITAL_INICIAL) / CAPITAL_INICIAL) * 100
+
+        # 4. Tabla Mensual
+        df_t['month'] = df_t['date'].dt.to_period('M')
+        monthly_stats = df_t.groupby('month')['pnl_usd'].sum().reset_index()
+        monthly_stats['month'] = monthly_stats['month'].astype(str)
+        
+        # --- IMPRESIÓN DEL REPORTE ---
+        print("\n" + "="*60)
+        print(f"📊 REPORTE DE BACKTEST PROFESIONAL - V14 (BALANCED)")
         print("="*60)
+        
+        print(f"{'Balance Inicial:':<25} ${CAPITAL_INICIAL:,.2f}")
+        print(f"{'Balance Final:':<25} ${self.state.balance:,.2f}")
+        print(f"{'Retorno Neto:':<25} ${net_pnl:,.2f} ({total_return_pct:.2f}%)")
+        print(f"{'Max Drawdown:':<25} {max_drawdown:.2f}%")
+        print("-" * 60)
+        
+        print(f"{'Total Trades:':<25} {total_trades}")
+        print(f"{'Win Rate:':<25} {win_rate:.2f}%  (W: {len(winners)} | L: {len(losers)})")
+        print(f"{'Profit Factor:':<25} {profit_factor:.2f}")
+        print(f"{'Avg Win:':<25} ${avg_win:.2f}")
+        print(f"{'Avg Loss:':<25} ${avg_loss:.2f}")
+        print(f"{'Ratio Riesgo/Beneficio:':<25} 1 : {risk_reward_ratio:.2f}")
+        print("=" * 60)
+        
+        print("\n📅 DESGLOSE MENSUAL:")
+        print("-" * 40)
+        print(f"{'Mes':<15} | {'PnL (USD)':>15}")
+        print("-" * 40)
+        for _, row in monthly_stats.iterrows():
+            print(f"{row['month']:<15} | ${row['pnl_usd']:>14,.2f}")
+        print("-" * 40)
 
         # Gráfico
         try:
-            plt.figure(figsize=(12, 6))
-            plt.plot([t['date'] for t in trades], [t['balance'] for t in trades])
-            plt.title('Backtest V14 - Balanced Realism')
+            plt.figure(figsize=(12, 8))
+            # Subplot 1: Equity
+            plt.subplot(2, 1, 1)
+            plt.plot([t['date'] for t in trades], [t['balance'] for t in trades], color='green')
+            plt.title(f'Curva de Equidad V14 - PF: {profit_factor:.2f}')
+            plt.grid(True, alpha=0.3)
+            plt.yscale('log')
+            
+            # Subplot 2: Drawdown
+            plt.subplot(2, 1, 2)
+            plt.plot([t['date'] for t in trades], [0] * len(trades), color='black', alpha=0.0) # Dummy fill
+            # (Generar serie de DD para plotear requeriría re-alinear índices, simplificamos ploteando equity line para rapidez)
+            # Mejor solo guardamos Equity para no complicar el script con pandas indexing
+            
+            plt.tight_layout()
             plt.savefig('backtest_v14_balanced.png')
-            print("📈 Gráfico guardado: backtest_v14_balanced.png")
-        except: pass
+            print("\n📈 Gráfico guardado: backtest_v14_balanced.png")
+            print("   (Usa 'python3 -m http.server 8000' para verlo)")
+        except Exception as e:
+            print(f"Error graficando: {e}")
 
 if __name__ == "__main__":
     asyncio.run(BacktesterV14().run())
