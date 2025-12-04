@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# backtester_v10_final.py
-# FUSIÓN: Datos Locales Robustos + Lógica RiskManager Real + REPORTE PROFESIONAL
+# backtester_v10.py
+# FUSIÓN: Datos Locales Robustos + Lógica RiskManager Real + REPORTE PROFESIONAL + FIX DAILY STATS
 
 import os
 import sys
@@ -20,14 +20,14 @@ TRADING_START_DATE = "2023-01-01"
 BUFFER_DAYS = 25
 CAPITAL_INICIAL = 1000
 
-# Parámetros (Ajustados para 1m según tu solicitud previa)
+# Parámetros (Ajustados para 1m)
 CONFIG_SIMULADA = {
     "symbol": SYMBOL,
     "investment_pct": 0.05,
-    "leverage": 30,              
+    "leverage": 20,              
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,        # Base
-    "strict_volume_factor": 5, # Trap Hunter (Bajado para que opere en 1m)
+    "strict_volume_factor": 1.5, # Trap Hunter
     "take_profit_levels": 3,
     "breakout_atr_sl_multiplier": 1.0,
     "breakout_tp_mult": 1.25,
@@ -64,7 +64,6 @@ class MockTelegram:
 class MockOrdersManager:
     def __init__(self, simulator): self.sim = simulator
     async def place_bracket_order(self, side, qty, price, sl, tps, type):
-        # En backtest, la orden entra al precio de señal (o con slippage simulado)
         self.sim.open_position(side, qty, price, sl, tps, type)
     async def move_sl_to_be(self, qty): self.sim.move_sl_to_be()
     async def update_sl(self, new_price, qty, reason=""): self.sim.update_sl(new_price)
@@ -78,7 +77,7 @@ class MockBotController:
         self.state = simulator.state
         self.lock = asyncio.Lock()
         
-        # Inyectar configuración como atributos
+        # Inyectar configuración
         for k, v in config_dict.items():
             setattr(self, k, v)
 
@@ -86,7 +85,6 @@ class MockBotController:
     def get_current_timestamp(self): return self.state.current_timestamp
     async def _get_current_position(self):
         if not self.state.is_in_position: return None
-        # Retorna formato Binance
         info = self.state.current_position_info
         amt = info.get('quantity', 0)
         if info.get('side') == SIDE_SELL: amt = -amt
@@ -94,15 +92,18 @@ class MockBotController:
             "positionAmt": amt,
             "entryPrice": info.get('entry_price'),
             "markPrice": self.state.current_price,
-            "unRealizedProfit": 0 # Simplificado
+            "unRealizedProfit": 0
         }
 
 class SimulatorState:
     def __init__(self):
         self.balance = CAPITAL_INICIAL
-        self.equity_curve = [CAPITAL_INICIAL] # Para MDD
+        self.equity_curve = [CAPITAL_INICIAL]
         self.daily_start_balance = CAPITAL_INICIAL
+        
+        # Historial general y estadísticas diarias (FIX: Agregado daily_trade_stats)
         self.trades_history = []
+        self.daily_trade_stats = [] 
         
         # Variables de estado del bot real
         self.is_in_position = False
@@ -158,13 +159,13 @@ class BacktesterV10:
         self.state = SimulatorState()
         self.controller = MockBotController(self, CONFIG_SIMULADA)
         self.risk_manager = RiskManager(self.controller)
+        self.last_date = None # Para controlar cambio de día
         
         # Costos simulados
         self.commission = 0.0004 # 0.04%
         self.slippage = 0.0002   # 0.02%
 
     def open_position(self, side, qty, price, sl, tps, type_):
-        # Simular Slippage en entrada
         real_price = price * (1 + self.slippage) if side == SIDE_BUY else price * (1 - self.slippage)
         cost = (qty * real_price) * self.commission
         
@@ -202,9 +203,9 @@ class BacktesterV10:
         net_pnl = pnl_gross - cost
         
         self.state.balance += (pnl_gross - cost)
-        self.state.equity_curve.append(self.state.balance) # Actualizar curva
+        self.state.equity_curve.append(self.state.balance)
         
-        # Registro
+        # Registro Histórico
         self.state.trades_history.append({
             'date': datetime.fromtimestamp(self.state.current_timestamp),
             'type': info['entry_type'],
@@ -212,6 +213,12 @@ class BacktesterV10:
             'pnl_usd': net_pnl,
             'reason': reason,
             'balance': self.state.balance
+        })
+        
+        # Registro Diario (FIX: Para que el RiskManager sepa cuánto ganamos hoy)
+        self.state.daily_trade_stats.append({
+            'pnl': net_pnl,
+            'timestamp': self.state.current_timestamp
         })
         
         self.state.is_in_position = False
@@ -228,7 +235,7 @@ class BacktesterV10:
         if sl:
             hit = (info['side'] == SIDE_BUY and low <= sl) or (info['side'] == SIDE_SELL and high >= sl)
             if hit:
-                self.state.current_price = sl # Asumimos llenado en SL
+                self.state.current_price = sl
                 self.close_position("SL")
                 return
 
@@ -242,7 +249,7 @@ class BacktesterV10:
                 self.close_position("TP Final")
                 return
             
-            # TP Parcial (Simulado simple: Mover a BE)
+            # TP Parcial
             if len(tps) > 1:
                 tp1 = tps[0]
                 hit_tp1 = (info['side'] == SIDE_BUY and high >= tp1) or (info['side'] == SIDE_SELL and low <= tp1)
@@ -277,6 +284,18 @@ class BacktesterV10:
         for current_time, row in df.iterrows():
             if current_time < target_start: continue
             
+            # --- FIX: GESTIÓN DE CAMBIO DE DÍA ---
+            current_date = current_time.date()
+            if self.last_date is None:
+                self.last_date = current_date
+            
+            if current_date != self.last_date:
+                # Nuevo día: Resetear estadísticas diarias y actualizar balance inicial del día
+                self.state.daily_trade_stats = []
+                self.state.daily_start_balance = self.state.balance
+                self.last_date = current_date
+
+            # Actualizar entorno
             self.state.current_timestamp = current_time.timestamp()
             self.state.current_price = row.close
             
@@ -286,7 +305,7 @@ class BacktesterV10:
             self.state.cached_median_vol = row.median_vol
             
             # Actualizar Pivotes
-            today_str = str(current_time.date())
+            today_str = str(current_date)
             if today_str in daily_df.index:
                 d_data = daily_df.loc[today_str]
                 if not pd.isna(d_data['prev_high']):
@@ -342,12 +361,12 @@ class BacktesterV10:
         equity_series = pd.Series(equity)
         running_max = equity_series.cummax()
         drawdown = (equity_series - running_max) / running_max * 100
-        max_drawdown = drawdown.min() # Es negativo
+        max_drawdown = drawdown.min() 
 
         # 3. Retorno Total
         total_return_pct = ((self.state.balance - CAPITAL_INICIAL) / CAPITAL_INICIAL) * 100
 
-        # 4. Tabla Mensual (Magia de Pandas)
+        # 4. Tabla Mensual
         df_t['month'] = df_t['date'].dt.to_period('M')
         monthly_stats = df_t.groupby('month')['pnl_usd'].sum().reset_index()
         monthly_stats['month'] = monthly_stats['month'].astype(str)
