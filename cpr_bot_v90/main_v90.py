@@ -59,7 +59,7 @@ SYMBOL_CONFIGS = {
     "BTCUSDT": {
         "volume_factor": 1.1,               # Base
         "strict_volume_factor": 10.0,       # Adaptativo
-        "breakout_tp_mult": 11,             # Sniper (TP Fijo)
+        "breakout_tp_mult": 1.25,             # Sniper (TP Fijo)
         "trailing_stop_trigger_atr": 5.0,   # Desactivado
         "trailing_stop_distance_atr": 1.0
     },
@@ -67,7 +67,7 @@ SYMBOL_CONFIGS = {
     "ETHUSDT": {
         "volume_factor": 1.2,               # Base
         "strict_volume_factor": 10.0,       # Adaptativo
-        "breakout_tp_mult": 11.0,           # Runner
+        "breakout_tp_mult": 1.25,           # Runner
         "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0
     },
@@ -75,7 +75,7 @@ SYMBOL_CONFIGS = {
     "1000PEPEUSDT": {
         "volume_factor": 1.2,               # Base
         "strict_volume_factor": 10.0,       # Adaptativo
-        "breakout_tp_mult": 11.0,           # Runner
+        "breakout_tp_mult": 1.25,           # Runner
         "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0,
         "investment_pct": 0.05

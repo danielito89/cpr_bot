@@ -40,7 +40,7 @@ CONFIG_SIMULADA = {
     "range_tp_mult": 2.0,
     "daily_loss_limit_pct": 15.0,
     "min_volatility_atr_pct": 0.3,
-    "trailing_stop_trigger_atr": 1.5,
+    "trailing_stop_trigger_atr": 1.25,
     "trailing_stop_distance_atr": 1.0,
     "tick_size": 0.01,
     "step_size": 0.001,
