@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 import asyncio
 import logging
+import glob
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
@@ -504,11 +505,23 @@ class BacktesterV18:
         print(f"💧 Avg Slippage:    {df_t['slippage_pct'].mean()*100:.4f}%")
         print("=" * 60)
         
-        # Gráficos
+        # ... (todo el código anterior de generate_report queda igual) ...
+
+        # --- SISTEMA DE GRÁFICOS CON ROTACIÓN (LAST 10) ---
+        # 1. Crear carpeta si no existe
+        output_folder = "backtest_results"
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
+        # 2. Generar nombre con fecha/hora
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{output_folder}/bt_{SYMBOL}_{timestamp}_PF{profit_factor:.2f}.png"
+
+        # 3. Graficar
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
         
         ax1.plot(pd.to_datetime(df_t['date']), df_t['balance'], label='Equity', color='green')
-        ax1.set_title(f"Equity Curve V18 - PF: {profit_factor:.2f} - DD: {max_dd:.2f}%")
+        ax1.set_title(f"V18 {SYMBOL} | PF: {profit_factor:.2f} | DD: {max_dd:.2f}% | Net: ${net_pnl:,.0f}")
         ax1.set_yscale('log')
         ax1.grid(True, alpha=0.3)
         ax1.legend()
@@ -519,5 +532,26 @@ class BacktesterV18:
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig('backtest_v18_full.png')
-        print("📈 Gráfico generado: backtest_v18_full.png")
+        plt.savefig(filename)
+        print(f"📈 Gráfico guardado: {filename}")
+        plt.close(fig) # Liberar memoria
+
+        # 4. Limpieza (Mantener solo los últimos 10)
+        list_of_files = glob.glob(f"{output_folder}/*.png")
+        # Ordenar por fecha de creación (los más viejos primero)
+        list_of_files.sort(key=os.path.getctime)
+        
+        while len(list_of_files) > 10:
+            oldest_file = list_of_files.pop(0) # Sacar el primero (más viejo)
+            os.remove(oldest_file)
+            print(f"🗑️ Limpieza: Borrado {oldest_file} (Límite 10 superado)")
+
+if __name__ == "__main__":
+    try:
+        # Instanciamos y corremos
+        backtester = BacktesterV18()
+        asyncio.run(backtester.run())
+    except KeyboardInterrupt:
+        print("\n🛑 Backtest detenido por el usuario.")
+    except Exception as e:
+        print(f"\n❌ Error fatal: {e}")
