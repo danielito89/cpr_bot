@@ -481,6 +481,19 @@ class BacktesterV18:
         drawdown = (equity - running_max) / running_max * 100
         max_dd = drawdown.min()
         
+        # [NUEVO] CÁLCULO DE RETORNO % REAL POR TRADE
+        # Reconstruimos el capital previo al trade para sacar el % exacto
+        # Retorno % = PnL / (Balance_Final - PnL)
+        df_t['prev_balance'] = df_t['balance'] - df_t['pnl_usd']
+        df_t['return_pct'] = df_t['pnl_usd'] / df_t['prev_balance']
+        
+        # Guardar CSV para Monte Carlo
+        csv_filename = f"trades_v18_{SYMBOL}.csv"
+        df_t.to_csv(csv_filename, index=False)
+        print(f"💾 Datos guardados para Monte Carlo: {csv_filename}")
+        
+        # ... siguen los prints del reporte ...
+        
         print("\n" + "="*60)
         print(f"📊 REPORTE V18 (FULL METRICS) - {SYMBOL}")
         print("="*60)
