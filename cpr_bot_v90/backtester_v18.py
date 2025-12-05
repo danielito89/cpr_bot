@@ -135,6 +135,8 @@ class SimulatorState:
         self.daily_pivots = {}
         self.current_timestamp = 0
         self.current_price = 0
+    def save_state(self): 
+        pass
 
 # ==========================================
 # 3. MOTOR V18 (AUDIT-READY)
