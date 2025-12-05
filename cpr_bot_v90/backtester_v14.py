@@ -29,10 +29,10 @@ CAPITAL_INICIAL = 1000
 CONFIG_SIMULADA = {
     "symbol": SYMBOL,
     "investment_pct": 0.05,
-    "leverage": 20,              
+    "leverage": 30,              
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,
-    "strict_volume_factor": 1.5,
+    "strict_volume_factor": 10,
     "take_profit_levels": 3,
     "breakout_atr_sl_multiplier": 1.0,
     "breakout_tp_mult": 1.25,
