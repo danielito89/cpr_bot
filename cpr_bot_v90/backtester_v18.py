@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 # backtester_v18.py
-# NIVEL: AUDIT-READY / ZERO-BUG
-#
-# CORRECCIONES (FIXES):
-# 1. PnL Short Calculation: (Entry - Exit) para claridad absoluta.
-# 2. SL Protection: Evita sobrescribir SL si ya está en BE.
-# 3. Accumulated PnL: El cooldown evalúa el trade COMPLETO (suma de parciales).
-# 4. Drawdown Curve: Visualización agregada.
+# NIVEL: AUDIT-READY / ZERO-BUG / FULL EXPORT
+# ACTUALIZADO: Incluye exportación CSV y Rotación de Gráficos
 
 import os
 import sys
+import glob
 import pandas as pd
 import numpy as np
 import asyncio
 import logging
-import glob
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
@@ -136,6 +131,7 @@ class SimulatorState:
         self.daily_pivots = {}
         self.current_timestamp = 0
         self.current_price = 0
+    
     def save_state(self): 
         pass
 
@@ -172,25 +168,22 @@ class BacktesterV18:
 
     def move_sl_to_be(self):
         if self.state.is_in_position:
-            # FIX 2: Evitar sobrescribir si ya se movió
             if not self.state.sl_moved_to_be:
                 self.state.current_position_info['sl'] = self.state.current_position_info['entry_price']
                 self.state.sl_moved_to_be = True
 
-    # --- EXECUTE EXIT (FIX 1 & 3) ---
+    # --- EXECUTE EXIT ---
     def execute_exit(self, reason, price, qty_to_close, candle_volume):
         info = self.state.current_position_info
         if qty_to_close <= 0: return 0.0
 
-        # Slippage
         slippage_pct = self.calculate_dynamic_slippage(price, qty_to_close, candle_volume)
         
         if info['side'] == SIDE_BUY:
-            real_exit = price * (1 - slippage_pct) # Vendo a bid
+            real_exit = price * (1 - slippage_pct) 
             pnl_gross = (real_exit - info['entry_price']) * qty_to_close
-        else: # SELL (SHORT)
-            real_exit = price * (1 + slippage_pct) # Recompro a ask (más caro)
-            # FIX 1: Fórmula explicita para shorts
+        else: # SELL
+            real_exit = price * (1 + slippage_pct) 
             pnl_gross = (info['entry_price'] - real_exit) * qty_to_close
         
         notional = qty_to_close * real_exit
@@ -200,7 +193,6 @@ class BacktesterV18:
         self.state.balance += net_pnl
         self.state.equity_curve.append(self.state.balance)
         
-        # FIX 3: Acumulamos PnL total del trade
         info['accumulated_pnl'] = info.get('accumulated_pnl', 0.0) + net_pnl
 
         self.state.trades_history.append({
@@ -215,7 +207,6 @@ class BacktesterV18:
         self.state.daily_trade_stats.append({'pnl': net_pnl, 'timestamp': self.state.current_timestamp})
 
         info['quantity'] -= qty_to_close
-        # Normalización para evitar float residual
         if info['quantity'] < (STEP_SIZE / 10): 
             info['quantity'] = 0.0
             
@@ -230,9 +221,7 @@ class BacktesterV18:
         
         self.execute_exit(reason, price, qty, candle_volume)
         
-        # FIX 3: Cooldown basado en resultado TOTAL
         total_trade_pnl = info.get('accumulated_pnl', 0.0)
-        
         self.state.is_in_position = False
         self.state.current_position_info = {}
         
@@ -250,9 +239,9 @@ class BacktesterV18:
         slippage_pct = self.calculate_dynamic_slippage(open_price, order['quantity'], candle_vol_usdt)
         
         if order['side'] == SIDE_BUY:
-            real_entry = open_price * (1 + slippage_pct) # Compro a Ask
+            real_entry = open_price * (1 + slippage_pct) 
         else:
-            real_entry = open_price * (1 - slippage_pct) # Vendo a Bid
+            real_entry = open_price * (1 - slippage_pct) 
         
         notional = order['quantity'] * real_entry
         cost = notional * self.commission
@@ -268,7 +257,7 @@ class BacktesterV18:
             "tps": order['tps'], 
             "entry_type": order['type'],
             "tps_hit_count": 0, 
-            "accumulated_pnl": -cost, # Iniciamos negativo por la comisión de entrada
+            "accumulated_pnl": -cost, 
             "entry_time": self.state.current_timestamp
         }
         self.state.pending_order = None 
@@ -302,7 +291,7 @@ class BacktesterV18:
             
             if is_hit: tps_hit_in_candle.append((i, tp))
 
-        # --- CONFLICT RESOLUTION ---
+        # CONFLICT RESOLUTION
         if hit_sl and tps_hit_in_candle:
             first_tp_idx, first_tp_price = tps_hit_in_candle[0]
             
@@ -317,8 +306,7 @@ class BacktesterV18:
                 if dist_tp < dist_sl:
                     self._process_partial_tp(first_tp_idx, first_tp_price, vol_usdt)
                     
-                    # Chequear si toca el nuevo SL (BE)
-                    new_sl = info.get('sl') # Puede haber cambiado en move_sl_to_be
+                    new_sl = info.get('sl') 
                     if new_sl:
                         hit_new_sl = False
                         if (info['side'] == SIDE_BUY and low <= new_sl) or \
@@ -442,7 +430,6 @@ class BacktesterV18:
 
         self.generate_report()
 
-    # --- REEMPLAZAR EL MÉTODO generate_report EN backtester_v18.py ---
     def generate_report(self):
         trades = self.state.trades_history
         if not trades:
@@ -450,7 +437,6 @@ class BacktesterV18:
             return
 
         df_t = pd.DataFrame(trades)
-        equity = pd.Series(self.state.equity_curve)
         
         # --- CÁLCULOS PROFESIONALES ---
         winners = df_t[df_t['pnl_usd'] > 0]
@@ -462,46 +448,32 @@ class BacktesterV18:
         net_pnl = df_t['pnl_usd'].sum()
         total_legs = len(df_t)
         
-        # Win Rate
         win_rate = (len(winners) / total_legs) * 100
-        
-        # Profit Factor (La métrica reina)
         profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else 999.0
         
-        # Averages
         avg_win = winners['pnl_usd'].mean() if not winners.empty else 0
         avg_loss = losers['pnl_usd'].mean() if not losers.empty else 0
         payoff_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
-        
-        # Expectancy (Esperanza matemática por trade)
         expectancy = (len(winners)/total_legs * avg_win) + (len(losers)/total_legs * avg_loss)
 
-        # Drawdown
+        equity = pd.Series(self.state.equity_curve)
         running_max = equity.cummax()
         drawdown = (equity - running_max) / running_max * 100
         max_dd = drawdown.min()
         
-        # [NUEVO] CÁLCULO DE RETORNO % REAL POR TRADE
-        # Reconstruimos el capital previo al trade para sacar el % exacto
-        # Retorno % = PnL / (Balance_Final - PnL)
+        # [EXPORTACIÓN PARA MONTE CARLO]
         df_t['prev_balance'] = df_t['balance'] - df_t['pnl_usd']
         df_t['return_pct'] = df_t['pnl_usd'] / df_t['prev_balance']
-        
-        # Guardar CSV para Monte Carlo
         csv_filename = f"trades_v18_{SYMBOL}.csv"
         df_t.to_csv(csv_filename, index=False)
         print(f"💾 Datos guardados para Monte Carlo: {csv_filename}")
         
-        # ... siguen los prints del reporte ...
-        
         print("\n" + "="*60)
         print(f"📊 REPORTE V18 (FULL METRICS) - {SYMBOL}")
         print("="*60)
-        # --- DATOS DE EJECUCIÓN ---
         print(f"⚙️  CONFIG: Lev x{CONFIG_SIMULADA['leverage']} | Vol {CONFIG_SIMULADA['volume_factor']} | Strict {CONFIG_SIMULADA['strict_volume_factor']}")
         print(f"🛠️  MODE: {EXECUTION_MODE} | TP Mult: {CONFIG_SIMULADA['breakout_tp_mult']} | Liq: {PARTICIPATION_RATE*100}%")
         print("-" * 60)
-        # --------------------------
         print(f"💰 Balance Inicial: ${CAPITAL_INICIAL:,.2f}")
         print(f"💰 Balance Final:   ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:   {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
@@ -518,19 +490,14 @@ class BacktesterV18:
         print(f"💧 Avg Slippage:    {df_t['slippage_pct'].mean()*100:.4f}%")
         print("=" * 60)
         
-        # ... (todo el código anterior de generate_report queda igual) ...
-
-        # --- SISTEMA DE GRÁFICOS CON ROTACIÓN (LAST 10) ---
-        # 1. Crear carpeta si no existe
+        # --- SISTEMA DE GRÁFICOS ---
         output_folder = "backtest_results"
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
 
-        # 2. Generar nombre con fecha/hora
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{output_folder}/bt_{SYMBOL}_{timestamp}_PF{profit_factor:.2f}.png"
 
-        # 3. Graficar
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
         
         ax1.plot(pd.to_datetime(df_t['date']), df_t['balance'], label='Equity', color='green')
@@ -547,21 +514,18 @@ class BacktesterV18:
         plt.tight_layout()
         plt.savefig(filename)
         print(f"📈 Gráfico guardado: {filename}")
-        plt.close(fig) # Liberar memoria
+        plt.close(fig)
 
-        # 4. Limpieza (Mantener solo los últimos 10)
+        # Rotación de logs (Keep last 10)
         list_of_files = glob.glob(f"{output_folder}/*.png")
-        # Ordenar por fecha de creación (los más viejos primero)
         list_of_files.sort(key=os.path.getctime)
-        
         while len(list_of_files) > 10:
-            oldest_file = list_of_files.pop(0) # Sacar el primero (más viejo)
-            os.remove(oldest_file)
-            print(f"🗑️ Limpieza: Borrado {oldest_file} (Límite 10 superado)")
+            oldest = list_of_files.pop(0)
+            os.remove(oldest)
+            print(f"🗑️ Limpieza: {oldest}")
 
 if __name__ == "__main__":
     try:
-        # Instanciamos y corremos
         backtester = BacktesterV18()
         asyncio.run(backtester.run())
     except KeyboardInterrupt:
