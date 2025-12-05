@@ -483,6 +483,11 @@ class BacktesterV18:
         print("\n" + "="*60)
         print(f"📊 REPORTE V18 (FULL METRICS) - {SYMBOL}")
         print("="*60)
+        # --- DATOS DE EJECUCIÓN ---
+        print(f"⚙️  CONFIG: Lev x{CONFIG_SIMULADA['leverage']} | Vol {CONFIG_SIMULADA['volume_factor']} | Strict {CONFIG_SIMULADA['strict_volume_factor']}")
+        print(f"🛠️  MODE: {EXECUTION_MODE} | TP Mult: {CONFIG_SIMULADA['breakout_tp_mult']} | Liq: {PARTICIPATION_RATE*100}%")
+        print("-" * 60)
+        # --------------------------
         print(f"💰 Balance Inicial: ${CAPITAL_INICIAL:,.2f}")
         print(f"💰 Balance Final:   ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:   {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
