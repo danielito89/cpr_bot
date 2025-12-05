@@ -117,22 +117,27 @@ def run_final_audit(returns, n_sims, n_steps, initial_balance, seed=42):
     global_mean = np.mean(returns)
     global_std = np.std(returns)
 
+    # Pre-cálculo para fallback rápido
+    fallback_scale = max(global_std, 1e-6)
+
     for i in range(n_sims):
+        # --- BARRA DE PROGRESO (Feedback visual) ---
+        if i % 100 == 0:
+            print(f"   🚀 Simulando trayectoria {i}/{n_sims}...", end='\r')
+        # -------------------------------------------
+
         current_balance = initial_balance
         peak_balance = initial_balance
         current_regime = 0 
         
         for t in range(n_steps):
             
-            # --- A. CRASH EVENT OVERRIDE (FIX USER #4) ---
-            # Probabilidad aumenta en régimen de pánico
+            # --- A. CRASH EVENT OVERRIDE ---
             regime_mult = 1.0 + (current_regime * 2.0) 
-            current_crash_prob = BASE_CRASH_PROB * regime_mult # FIX USER #1: Sintaxis arreglada
+            current_crash_prob = BASE_CRASH_PROB * regime_mult
             
             if np.random.random() < current_crash_prob:
-                # Severity aleatoria
                 severity = BASE_CRASH_SEVERITY * (1.0 + np.random.random() * 0.5)
-                # Salto directo de precio (ignora slippage/sizing)
                 current_balance *= (1 + severity)
                 
                 if current_balance > peak_balance: peak_balance = current_balance
@@ -141,30 +146,33 @@ def run_final_audit(returns, n_sims, n_steps, initial_balance, seed=42):
                 if current_balance < 10: 
                     equity_curves[i, t+1:] = 0
                     break
-                continue # FIX: Salta el resto del loop para este step
+                continue 
             
             # --- B. TRANSICIÓN RÉGIMEN ---
             if np.random.random() < PROB_SWITCH_REGIME:
                 current_regime = np.random.choice([0, 1, 2])
             
-            # --- C. GENERACIÓN STUDENT-T (FIX USER #1 & #3) ---
+            # --- C. GENERACIÓN STUDENT-T (OPTIMIZADO NUMPY) ---
+            # Reemplazamos scipy.stats por numpy puro para velocidad extrema
             pool = regime_pools[current_regime]
             
-            # Chequeo robusto para pools vacíos o sin varianza
             if len(pool) > 10 and np.std(pool) > 1e-9:
                 sample_mean = np.mean(pool)
                 sample_std = np.std(pool, ddof=1)
                 
                 # Scale Student-t
                 scale = sample_std * np.sqrt((df_student - 2) / df_student)
-                r = stats.t.rvs(df_student, loc=sample_mean, scale=scale)
                 
-                # Clipping Relativo Robusto: Max(5*Local, 3*Global)
+                # OPTIMIZACIÓN: NumPy Standard T manual
+                # r = loc + scale * t_standard
+                t_random = np.random.standard_t(df_student)
+                r = sample_mean + (scale * t_random)
+                
+                # Clipping Relativo Robusto
                 limit = max(5 * sample_std, 3 * global_std)
                 r = np.clip(r, sample_mean - limit, sample_mean + limit)
             else:
-                # Fallback Robusto
-                r = np.random.normal(loc=global_mean, scale=max(global_std, 1e-6))
+                r = np.random.normal(loc=global_mean, scale=fallback_scale)
             
             # --- D. SLIPPAGE & SIZING ---
             r_effective = apply_multiplicative_slippage(r)
@@ -181,7 +189,8 @@ def run_final_audit(returns, n_sims, n_steps, initial_balance, seed=42):
             if current_balance < 10: 
                 equity_curves[i, t+1:] = 0
                 break
-                
+    
+    print(f"   ✅ Simulación completada ({n_sims} runs).Procesando stats...")            
     return equity_curves
 
 def analyze_and_export(equity_curves, initial_balance, args):
