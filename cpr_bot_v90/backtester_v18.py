@@ -43,7 +43,7 @@ CONFIG_SIMULADA = {
     "leverage": 30,
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,
-    "strict_volume_factor": 5.0,
+    "strict_volume_factor": 20.0,
     "take_profit_levels": 3,
     "breakout_atr_sl_multiplier": 1.0,
     "breakout_tp_mult": 1.5,
