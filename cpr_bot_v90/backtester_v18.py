@@ -21,9 +21,9 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # --- 1. CONFIGURACIÓN ---
-SYMBOL = "1000PEPEUSDT" 
+SYMBOL = "ETHUSDT" 
 TIMEFRAME = '1m'
-TRADING_START_DATE = "2023-06-01"
+TRADING_START_DATE = "2023-01-01"
 BUFFER_DAYS = 25
 CAPITAL_INICIAL = 1000
 
@@ -44,10 +44,10 @@ else: # ETH, BTC
 CONFIG_SIMULADA = {
     "symbol": SYMBOL,
     "investment_pct": 0.05,
-    "leverage": 20,
+    "leverage": 30,
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,
-    "strict_volume_factor": 2.0,
+    "strict_volume_factor": 5.0,
     "take_profit_levels": 3,
     "breakout_atr_sl_multiplier": 1.0,
     "breakout_tp_mult": 1.5,
@@ -441,6 +441,7 @@ class BacktesterV18:
 
         self.generate_report()
 
+    # --- REEMPLAZAR EL MÉTODO generate_report EN backtester_v18.py ---
     def generate_report(self):
         trades = self.state.trades_history
         if not trades:
@@ -450,49 +451,68 @@ class BacktesterV18:
         df_t = pd.DataFrame(trades)
         equity = pd.Series(self.state.equity_curve)
         
+        # --- CÁLCULOS PROFESIONALES ---
         winners = df_t[df_t['pnl_usd'] > 0]
         losers = df_t[df_t['pnl_usd'] <= 0]
-        net_pnl = df_t['pnl_usd'].sum()
         
-        # Drawdown Calc
+        gross_profit = winners['pnl_usd'].sum()
+        gross_loss = abs(losers['pnl_usd'].sum())
+        
+        net_pnl = df_t['pnl_usd'].sum()
+        total_legs = len(df_t)
+        
+        # Win Rate
+        win_rate = (len(winners) / total_legs) * 100
+        
+        # Profit Factor (La métrica reina)
+        profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else 999.0
+        
+        # Averages
+        avg_win = winners['pnl_usd'].mean() if not winners.empty else 0
+        avg_loss = losers['pnl_usd'].mean() if not losers.empty else 0
+        payoff_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+        
+        # Expectancy (Esperanza matemática por trade)
+        expectancy = (len(winners)/total_legs * avg_win) + (len(losers)/total_legs * avg_loss)
+
+        # Drawdown
         running_max = equity.cummax()
         drawdown = (equity - running_max) / running_max * 100
         max_dd = drawdown.min()
         
         print("\n" + "="*60)
-        print(f"📊 REPORTE V18 - AUDIT READY")
+        print(f"📊 REPORTE V18 (FULL METRICS) - {SYMBOL}")
         print("="*60)
+        print(f"💰 Balance Inicial: ${CAPITAL_INICIAL:,.2f}")
         print(f"💰 Balance Final:   ${self.state.balance:,.2f}")
-        print(f"📈 Retorno Total:   {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
-        print(f"💸 Net PnL:         ${net_pnl:,.2f}")
+        print(f"🚀 Retorno Total:   {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
         print(f"📉 Max Drawdown:    {max_dd:.2f}%")
         print("-" * 60)
-        print(f"✅ Winning Legs:    {len(winners)}")
-        print(f"❌ Losing Legs:     {len(losers)}")
+        print(f"🎲 Win Rate:        {win_rate:.2f}%")
+        print(f"🏆 Profit Factor:   {profit_factor:.2f}")
+        print(f"⚖️ Risk/Reward:     1 : {payoff_ratio:.2f}")
+        print(f"🧠 Expectancy:      ${expectancy:.2f} por ejecución")
+        print("-" * 60)
+        print(f"🔢 Total Legs:      {total_legs}")
+        print(f"✅ Winning Legs:    {len(winners)} (Avg: ${avg_win:.2f})")
+        print(f"❌ Losing Legs:     {len(losers)}  (Avg: ${avg_loss:.2f})")
         print(f"💧 Avg Slippage:    {df_t['slippage_pct'].mean()*100:.4f}%")
         print("=" * 60)
         
+        # Gráficos
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
         
-        # Plot Equity
         ax1.plot(pd.to_datetime(df_t['date']), df_t['balance'], label='Equity', color='green')
-        ax1.set_title(f"Equity Curve V18 - Max DD: {max_dd:.2f}%")
+        ax1.set_title(f"Equity Curve V18 - PF: {profit_factor:.2f} - DD: {max_dd:.2f}%")
         ax1.set_yscale('log')
         ax1.grid(True, alpha=0.3)
         ax1.legend()
         
-        # Plot Drawdown
-        # Ajustamos el índice del drawdown para que coincida con los trades (aprox)
-        # Como equity_curve tiene más puntos (cada update), simplificamos usando el índice de df_t
-        # Para precisión real necesitaríamos timestamps en equity_curve, pero para viz rápida:
         ax2.plot(drawdown.values, color='red', linewidth=1)
         ax2.set_title("Drawdown %")
         ax2.fill_between(range(len(drawdown)), drawdown, 0, color='red', alpha=0.3)
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig('backtest_v18_audit.png')
-        print("📈 Gráfico generado: backtest_v18_audit.png")
-
-if __name__ == "__main__":
-    asyncio.run(BacktesterV18().run())
+        plt.savefig('backtest_v18_full.png')
+        print("📈 Gráfico generado: backtest_v18_full.png")
