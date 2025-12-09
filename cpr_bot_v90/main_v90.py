@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
     "range_tp_mult": 2.0,
     "ema_period": 20,
     "ema_timeframe": "1h",
-    "indicator_update_interval_minutes": 15,
+    "indicator_update_interval_minutes": 3,
     "DAILY_LOSS_LIMIT_PCT": float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "15.0")),
     
     "MIN_VOLATILITY_ATR_PCT": 0.5,     

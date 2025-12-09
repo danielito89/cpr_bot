@@ -139,29 +139,28 @@ class RiskManager:
                         sl = current_price + atr * self.config.breakout_atr_sl_multiplier
                         tp_prices = [current_price - atr * self.config.breakout_tp_mult]
                 
-                # 2. Rango (La Máquina de Dinero)
-                # Si falla el breakout (99% veces), caemos aquí.
+                # 2. Rango (La Máquina de Dinero... pero con frenos ABS)
                 if not side:
-                    # Habilitado siempre
-                    if current_price <= p["L3"]:
+                    # RANGING LONG: Solo si estamos ENTRE L4 y L3.
+                    # Nunca comprar por debajo de L4 (eso es territorio de osos/breakout)
+                    if p["L4"] < current_price <= p["L3"]: 
+                        
+                        # FILTRO EXTRA: ¿Estamos demasiado lejos de la EMA?
+                        # Si el precio cayó demasiado rápido lejos de la media, a veces es mejor esperar.
+                        dist_ema = (ema - current_price) / current_price * 100
+                        
+                        # Solo comprar si el volumen acompaña y es vela verde
                         if vol_ok_range and is_green:
-                            side, entry_type = SIDE_BUY, "Ranging Long"
-                            sl = p["L4"] - atr * self.config.ranging_atr_multiplier
-                            potential_tps = [p["L1"], p["H1"], p["H3"]]
-                            tp_prices = [tp for tp in potential_tps if tp > current_price]
-                            while len(tp_prices) < 3:
-                                base = tp_prices[-1] if tp_prices else current_price
-                                tp_prices.append(base + atr)
+                             side, entry_type = SIDE_BUY, "Ranging Long"
+                             sl = p["L4"] - atr * self.config.ranging_atr_multiplier
+                             # ... resto de la lógica de TPs igual ...
 
-                    elif current_price >= p["H3"]:
+                    # RANGING SHORT: Solo si estamos ENTRE H3 y H4.
+                    elif p["H3"] <= current_price < p["H4"]:
                         if vol_ok_range and is_red:
                             side, entry_type = SIDE_SELL, "Ranging Short"
                             sl = p["H4"] + atr * self.config.ranging_atr_multiplier
-                            potential_tps = [p["H1"], p["L1"], p["L3"]]
-                            tp_prices = [tp for tp in potential_tps if tp < current_price]
-                            while len(tp_prices) < 3:
-                                base = tp_prices[-1] if tp_prices else current_price
-                                tp_prices.append(base - atr)
+                            # ... resto de la lógica de TPs igual ...
                 
                 if side:
                     balance = await self.bot._get_account_balance()

@@ -50,7 +50,7 @@ class SymbolStrategy:
         self.range_tp_mult = config.get("range_tp_mult", 2.0)
         self.ema_period = config.get("ema_period", 20)
         self.ema_timeframe = config.get("ema_timeframe", "1h")
-        self.indicator_update_interval_minutes = config.get("indicator_update_interval_minutes", 15)
+        self.indicator_update_interval_minutes = config.get("indicator_update_interval_minutes", 3)
         self.daily_loss_limit_pct = config.get("DAILY_LOSS_LIMIT_PCT", 5.0)
         
         # Nuevos parámetros
