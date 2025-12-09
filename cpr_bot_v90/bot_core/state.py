@@ -79,7 +79,8 @@ class StateManager:
 
             self.cached_atr = state.get("cached_atr")
             self.cached_ema = state.get("cached_ema")
-            self.cached_median_vol = state.get("cached_median_vol") 
+            self.cached_median_vol = state.get("cached_median_vol")
+            self.cached_adx = state.get("cached_adx")
             self.trading_paused = state.get("trading_paused", False)
             self.daily_start_balance = state.get("daily_start_balance", None)
 

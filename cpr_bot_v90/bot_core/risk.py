@@ -68,27 +68,38 @@ class RiskManager:
         
         can_open, reason = await self.can_trade("CHECK", current_price)
         if not can_open:
+            # Loguear bloqueo solo ocasionalmente para no saturar
             if "Posición" not in reason and time.time() % 60 < 2:
                 logging.info(f"[{self.config.symbol}] ⛔ Bloqueado por: {reason}")
             return
 
+        # Verificaciones previas de datos
         if not self.state.daily_pivots:
             if time.time() % 60 < 2: logging.info(f"[{self.config.symbol}] Esperando pivotes...")
             return
-        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol]):
-            if time.time() % 60 < 2: logging.info(f"[{self.config.symbol}] Esperando indicadores...")
+        
+        # Ahora requerimos también ADX en los indicadores
+        if not all([self.state.cached_atr, self.state.cached_ema, self.state.cached_median_vol, self.state.cached_adx]):
+            if time.time() % 60 < 2: logging.info(f"[{self.config.symbol}] Esperando indicadores (ATR, EMA, Vol, ADX)...")
             return
         
         async with self.bot.lock:
             if self.state.is_in_position: return
             
             try:
+                # --- DATOS DE ENTRADA ---
                 open_price = float(kline["o"])
                 current_volume = float(kline["q"])
-                median_vol = self.state.cached_median_vol
-                if not median_vol: return
                 
+                median_vol = self.state.cached_median_vol
                 atr = self.state.cached_atr
+                ema = self.state.cached_ema
+                adx = self.state.cached_adx
+                p = self.state.daily_pivots
+
+                if not median_vol: return
+
+                # Filtro de Volatilidad Mínima
                 if hasattr(self.config, 'min_volatility_atr_pct'):
                     atr_pct = (atr / current_price) * 100
                     if atr_pct < self.config.min_volatility_atr_pct:
@@ -96,72 +107,87 @@ class RiskManager:
                             logging.info(f"[{self.config.symbol}] 💤 Mercado Lento: ATR {atr_pct:.2f}%")
                         return
 
-                # --- LÓGICA TRAP HUNTER (v100) ---
-                # Forzamos SIEMPRE la lógica de "Breakout Difícil / Rango Fácil"
-                # Esto atrapa los fakeouts en H4/L4 convirtiéndolos en reversiones
+                # --- LÓGICA DE VOLUMEN (TRAP HUNTER) ---
+                base_factor = self.config.volume_factor 
+                strict_factor = getattr(self.config, 'strict_volume_factor', 3.0) # Default 3.0 para tendencia
                 
-                base_factor = self.config.volume_factor # Ej: 1.1
-                strict_factor = getattr(self.config, 'strict_volume_factor', 10.0) # Ej: 10.0
-                
-                # SIEMPRE exigente para romper, SIEMPRE fácil para rebotar
                 req_vol_range = median_vol * base_factor
                 req_vol_breakout = median_vol * strict_factor
                 
                 vol_ok_breakout = current_volume > req_vol_breakout
                 vol_ok_range = current_volume > req_vol_range
-                # ---------------------------------
-
-                p = self.state.daily_pivots
-                ema = self.state.cached_ema
                 
-                # Diagnóstico
+                # --- DIAGNÓSTICO (Logs) ---
+                # Mostrar info si estamos cerca de un nivel clave
                 dist_l4 = abs(current_price - p["L4"]) / current_price * 100
                 dist_h4 = abs(current_price - p["H4"]) / current_price * 100
                 if (dist_l4 < 0.3 or dist_h4 < 0.3) and time.time() % 10 < 2:
-                     logging.info(f"[{self.config.symbol}] 🔍 Cerca Nivel. Px:{current_price} VolBase:{'✅' if vol_ok_range else '❌'} VolStrict:{'✅' if vol_ok_breakout else '❌'}")
+                     logging.info(f"[{self.config.symbol}] 🔍 Cerca Nivel. Px:{current_price} ADX:{adx:.1f} VolStrict:{'✅' if vol_ok_breakout else '❌'}")
 
+                # --- LÓGICA DE DECISIÓN HÍBRIDA (ADX) ---
                 side = None
                 entry_type = None
                 sl = None
                 tp_prices = []
+                
                 is_green = current_price > open_price
                 is_red = current_price < open_price
-
-                # 1. Breakouts (Casi imposible de activar con Vol 10)
-                if current_price > p["H4"]:
-                    if vol_ok_breakout and current_price > ema and is_green:
-                        side, entry_type = SIDE_BUY, "Breakout Long"
-                        sl = current_price - atr * self.config.breakout_atr_sl_multiplier
-                        tp_prices = [current_price + atr * self.config.breakout_tp_mult]
-                elif current_price < p["L4"]:
-                    if vol_ok_breakout and current_price < ema and is_red:
-                        side, entry_type = SIDE_SELL, "Breakout Short"
-                        sl = current_price + atr * self.config.breakout_atr_sl_multiplier
-                        tp_prices = [current_price - atr * self.config.breakout_tp_mult]
                 
-                # 2. Rango (La Máquina de Dinero... pero con frenos ABS)
-                if not side:
-                    # RANGING LONG: Solo si estamos ENTRE L4 y L3.
-                    # Nunca comprar por debajo de L4 (eso es territorio de osos/breakout)
-                    if p["L4"] < current_price <= p["L3"]: 
-                        
-                        # FILTRO EXTRA: ¿Estamos demasiado lejos de la EMA?
-                        # Si el precio cayó demasiado rápido lejos de la media, a veces es mejor esperar.
-                        dist_ema = (ema - current_price) / current_price * 100
-                        
-                        # Solo comprar si el volumen acompaña y es vela verde
+                # UMBRAL DE RÉGIMEN
+                ADX_THRESHOLD = 25.0
+                is_trending = adx > ADX_THRESHOLD
+                is_ranging = adx <= ADX_THRESHOLD
+
+                # 1. ESTRATEGIA DE TENDENCIA (BREAKOUT)
+                # Solo si el ADX es fuerte (> 25)
+                if is_trending:
+                    if current_price > p["H4"]:
+                        # Breakout Long
+                        if vol_ok_breakout and current_price > ema and is_green:
+                            side, entry_type = SIDE_BUY, "Breakout Long (Trend)"
+                            sl = current_price - atr * self.config.breakout_atr_sl_multiplier
+                            tp_prices = [current_price + atr * self.config.breakout_tp_mult]
+                    
+                    elif current_price < p["L4"]:
+                        # Breakout Short
+                        if vol_ok_breakout and current_price < ema and is_red:
+                            side, entry_type = SIDE_SELL, "Breakout Short (Trend)"
+                            sl = current_price + atr * self.config.breakout_atr_sl_multiplier
+                            tp_prices = [current_price - atr * self.config.breakout_tp_mult]
+
+                # 2. ESTRATEGIA DE RANGO (REVERSIÓN)
+                # Solo si el ADX es débil (<= 25). Evita operar contra tendencias fuertes.
+                if is_ranging and not side:
+                    # Distancia a la EMA (Filtro de seguridad contra crashes repentinos)
+                    dist_ema = abs(ema - current_price) / current_price * 100
+                    
+                    # Ranging Long (Compra en soporte L3/L4)
+                    # Condición: Precio ENTRE L4 y L3 (Zona de compra), NO debajo de L4.
+                    if p["L4"] < current_price <= p["L3"]:
+                        # Filtro EMA: No comprar si se alejó más de un 2% de la media (cuchillo cayendo)
                         if vol_ok_range and is_green and dist_ema < 2.0:
-                             side, entry_type = SIDE_BUY, "Ranging Long"
-                             sl = p["L4"] - atr * self.config.ranging_atr_multiplier
-                             # ... resto de la lógica de TPs igual ...
+                            side, entry_type = SIDE_BUY, "Ranging Long (Chop)"
+                            sl = p["L4"] - atr * self.config.ranging_atr_multiplier
+                            potential_tps = [p["L1"], p["H1"], p["H3"]]
+                            # Lógica de TPs dinámicos
+                            tp_prices = [tp for tp in potential_tps if tp > current_price]
+                            while len(tp_prices) < 3:
+                                base = tp_prices[-1] if tp_prices else current_price
+                                tp_prices.append(base + atr)
 
-                    # RANGING SHORT: Solo si estamos ENTRE H3 y H4.
+                    # Ranging Short (Venta en resistencia H3/H4)
+                    # Condición: Precio ENTRE H3 y H4.
                     elif p["H3"] <= current_price < p["H4"]:
-                        if vol_ok_range and is_red:
-                            side, entry_type = SIDE_SELL, "Ranging Short"
+                        if vol_ok_range and is_red and dist_ema < 2.0:
+                            side, entry_type = SIDE_SELL, "Ranging Short (Chop)"
                             sl = p["H4"] + atr * self.config.ranging_atr_multiplier
-                            # ... resto de la lógica de TPs igual ...
+                            potential_tps = [p["H1"], p["L1"], p["L3"]]
+                            tp_prices = [tp for tp in potential_tps if tp < current_price]
+                            while len(tp_prices) < 3:
+                                base = tp_prices[-1] if tp_prices else current_price
+                                tp_prices.append(base - atr)
                 
+                # --- EJECUCIÓN DE LA ORDEN ---
                 if side:
                     balance = await self.bot._get_account_balance()
                     if not balance: return
@@ -174,19 +200,18 @@ class RiskManager:
                     qty = float(format_qty(self.config.step_size, notional / current_price))
                     if qty <= 0: return
                     
-                    if entry_type.startswith("Breakout"): tp_prices = [tp_prices[0]]
+                    # Ajustar lista de TPs según tipo de entrada
+                    if "Breakout" in entry_type: tp_prices = [tp_prices[0]]
                     else: tp_prices = tp_prices[:3]
+                    
                     tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
                     
-                    logging.info(f"!!! SEÑAL {self.config.symbol} !!! {entry_type}")
+                    logging.info(f"!!! SEÑAL {self.config.symbol} !!! {entry_type} (ADX: {adx:.1f})")
                     await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
             except Exception as e:
                 logging.error(f"[{self.config.symbol}] Seek Error: {e}", exc_info=True)
 
-    # ... (Mantén el resto de funciones: _daily_loss_exceeded, check_position_state, _handle_full_close, etc. IGUALES)
-    # COPIAR EL RESTO DEL CÓDIGO DESDE LA v99.3
-    
     async def _daily_loss_exceeded(self, balance):
         if balance <= 0: return False
         start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
@@ -206,11 +231,15 @@ class RiskManager:
                 pos = await self.bot._get_current_position()
                 if not pos: return
                 qty = abs(float(pos.get("positionAmt", 0)))
+                
+                # Caso: Posición Cerrada (qty ~ 0)
                 if qty < 0.0001:
                     if self.state.is_in_position:
                         logging.info(f"[{self.config.symbol}] Cierre detectado. Limpiando...")
                         await self._handle_full_close()
                     return 
+                
+                # Caso: Posición Nueva Detectada (Externamente o por lag)
                 if not self.state.is_in_position and qty > 0:
                     self.state.is_in_position = True
                     self.state.current_position_info = {
@@ -222,17 +251,27 @@ class RiskManager:
                     self.state.last_known_position_qty = qty
                     self.state.save_state()
                     return 
+                
+                # Caso: Monitoreo de Posición Activa
                 self.state.current_position_info['mark_price'] = float(pos.get("markPrice"))
                 self.state.current_position_info['unrealized_pnl'] = float(pos.get("unRealizedProfit"))
+                
+                # Detectar TP Parcial (reducción de cantidad)
                 if qty < self.state.last_known_position_qty:
                     await self._handle_partial_tp(qty)
+                
+                # Chequear Trailing Stop
                 await self._check_trailing_stop(float(pos.get("markPrice")), qty)
-                if self.state.current_position_info.get("entry_type", "").startswith("Ranging"):
+                
+                # Time Stop (Solo para Ranging)
+                entry_type = self.state.current_position_info.get("entry_type", "")
+                if "Ranging" in entry_type:
                     entry_time = self.state.current_position_info.get("entry_time", 0)
                     if entry_time > 0:
                         now = self._get_now()
-                        if (now - entry_time) / 3600 > 12:
+                        if (now - entry_time) / 3600 > 12: # 12 horas máx
                             await self.orders_manager.close_position_manual(reason="Time Stop 12h")
+                            
             except Exception as e:
                 if "1003" not in str(e): logging.error(f"[{self.config.symbol}] Check Error: {e}", exc_info=True)
 
@@ -242,14 +281,16 @@ class RiskManager:
         side = info.get('side')
         atr = self.state.cached_atr
         if not atr: return
+        
         trigger = atr * self.config.trailing_stop_trigger_atr
         dist = atr * self.config.trailing_stop_distance_atr
         new_sl = None
+        
         if side == SIDE_BUY:
             if current_price > (entry + trigger):
                 pot_sl = current_price - dist
                 curr_sl = info.get("trailing_sl_price")
-                if curr_sl is None: curr_sl = entry
+                if curr_sl is None: curr_sl = entry # SL inicial o BE
                 if pot_sl > curr_sl: new_sl = pot_sl
         elif side == SIDE_SELL:
             if current_price < (entry - trigger):
@@ -257,6 +298,7 @@ class RiskManager:
                 curr_sl = info.get("trailing_sl_price")
                 if curr_sl is None: curr_sl = entry
                 if pot_sl < curr_sl: new_sl = pot_sl
+        
         if new_sl:
             logging.info(f"[{self.config.symbol}] Trailing SL -> {new_sl:.2f}")
             await self.orders_manager.update_sl(new_sl, qty)
@@ -267,12 +309,14 @@ class RiskManager:
         logging.info(f"[{self.config.symbol}] Ejecutando limpieza de cierre...")
         try: await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
         except Exception: pass
+        
         old_info = self.state.current_position_info.copy()
         self.state.is_in_position = False
         self.state.current_position_info = {}
         self.state.last_known_position_qty = 0.0
         self.state.sl_moved_to_be = False
         self.state.save_state()
+        
         pnl = 0.0
         roi = 0.0
         try:
@@ -284,26 +328,33 @@ class RiskManager:
                  margin = (entry * qty) / self.config.leverage
                  roi = (pnl / margin) * 100
         except Exception: pass
+        
         total_pnl = old_info.get("total_pnl", 0) + pnl
         self.state.daily_trade_stats.append({"pnl": total_pnl, "roi": roi})
-        cooldown = 300
+        
+        # Cooldown dinámico
+        cooldown = 300 # Default (BE)
         if total_pnl > 0:
-            cooldown = 0
+            cooldown = 0 # Ganancia: Sin espera
             result_text = "TAKE PROFIT / WIN"
             icon = "✅"
         elif total_pnl < 0:
-            cooldown = 900
+            cooldown = 900 # Pérdida: 15 min
             result_text = "STOP LOSS"
             icon = "🛑"
         else:
             result_text = "BREAK EVEN"
             icon = "🛡️"
+            
         self.state.trade_cooldown_until = self._get_now() + cooldown
         self.state.save_state()
+        
         wait_msg = f"⏳ Espera: {int(cooldown/60)}m" if cooldown > 0 else "🚀 Listo"
         msg = f"{icon} <b>{self.config.symbol} {result_text}</b> {icon}\n💰 <b>PnL:</b> <code>{total_pnl:+.2f}</code> | <b>ROI:</b> <code>{roi:+.2f}%</code>\n<i>{wait_msg}</i>"
+        
         try: await self.telegram_handler._send_message(msg)
         except: pass
+        
         try:
             td = {
                 "timestamp_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -319,12 +370,16 @@ class RiskManager:
         self.state.current_position_info["tps_hit_count"] = count
         self.state.last_known_position_qty = qty
         self.state.save_state()
+        
         partial_pnl = 0.0
         try:
             last_trade = (await self.client.futures_account_trades(symbol=self.config.symbol, limit=1))[0]
             partial_pnl = float(last_trade.get("realizedPnl", 0.0))
         except Exception: pass
+        
         logging.info(f"[{self.config.symbol}] TP{count} Parcial. PnL: {partial_pnl}")
         await self.telegram_handler._send_message(f"🎯 <b>{self.config.symbol} TP{count}</b>\nPnL: <code>{partial_pnl:.2f}</code>")
-        if count == 2 and not self.state.sl_moved_to_be:
+        
+        # Mover a BE tras el primer TP (o segundo, configurable)
+        if count == 1 and not self.state.sl_moved_to_be:
             await self.orders_manager.move_sl_to_be(qty)

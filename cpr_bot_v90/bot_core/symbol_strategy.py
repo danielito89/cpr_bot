@@ -22,7 +22,7 @@ from .utils import (
     SIDE_BUY, SIDE_SELL, CSV_HEADER
 )
 from .pivots import calculate_pivots_from_data
-from .indicators import calculate_atr, calculate_ema, calculate_median_volume
+from .indicators import calculate_atr, calculate_ema, calculate_median_volume, calculate_adx
 from .state import StateManager
 from .orders import OrdersManager
 from .risk import RiskManager
@@ -151,10 +151,14 @@ class SymbolStrategy:
             kl_1h = await self._get_klines(interval="1h", limit=50)
             kl_ema = await self._get_klines(interval=self.ema_timeframe, limit=max(self.ema_period * 2, 100))
             kl_1m = await self._get_klines(interval="1m", limit=61)
+            highs_1h = [float(k[2]) for k in kl_1h]
+            lows_1h = [float(k[3]) for k in kl_1h]
+            closes_1h = [float(k[4]) for k in kl_1h]
             
             self.state.cached_atr = calculate_atr(kl_1h, self.atr_period)
             self.state.cached_ema = calculate_ema(kl_ema, self.ema_period)
             self.state.cached_median_vol = calculate_median_volume(kl_1m)
+            self.state.cached_adx = calculate_adx(highs_1h, lows_1h, closes_1h, period=14)
             
             logging.info(f"[{self.symbol}] Indicadores: ATR={self.state.cached_atr:.2f}, EMA={self.state.cached_ema:.2f}, VolMed={self.state.cached_median_vol:.0f}")
         except Exception as e:

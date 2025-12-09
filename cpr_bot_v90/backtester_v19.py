@@ -307,6 +307,26 @@ class BacktesterV19:
                 df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
+            #ADX
+            adx_period = 14
+            df['up_move'] = df['high'] - df['high'].shift(1)
+            df['down_move'] = df['low'].shift(1) - df['low']
+            
+            df['plus_dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
+            df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
+            
+            df['tr'] = df['atr'] # Ya calculado antes (aproximado)
+            
+            # Suavizado (EWM alpha=1/period es similar a Wilder)
+            df['tr_smooth'] = df['tr'].ewm(alpha=1/adx_period, adjust=False).mean()
+            df['plus_dm_smooth'] = df['plus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
+            df['minus_dm_smooth'] = df['minus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
+            
+            df['di_plus'] = 100 * (df['plus_dm_smooth'] / df['tr_smooth'])
+            df['di_minus'] = 100 * (df['minus_dm_smooth'] / df['tr_smooth'])
+            
+            df['dx'] = 100 * abs(df['di_plus'] - df['di_minus']) / (df['di_plus'] + df['di_minus'])
+            df['adx'] = df['dx'].ewm(alpha=1/adx_period, adjust=False).mean()
             
             return df, target_start
         except Exception as e:
@@ -355,6 +375,7 @@ class BacktesterV19:
             self.state.cached_atr = row.atr
             self.state.cached_ema = row.ema
             self.state.cached_median_vol = row.median_vol
+            self.state.cached_adx = row.adx
 
             if not self.state.is_in_position and not self.state.pending_order:
                 kline = {'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 'v': row.volume, 'q': row.quote_asset_volume, 'x': True}
