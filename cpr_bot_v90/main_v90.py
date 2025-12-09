@@ -27,8 +27,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TESTNET_MODE = os.environ.get("TESTNET_MODE", "false").lower() in ("1", "true", "yes")
 
-# --- PARES INICIALES (BNB AGREGADO) ---
-INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# --- PARES INICIALES ---
+INITIAL_SYMBOLS = []
 
 # Configuración Ganadora + Nuevos Filtros
 DEFAULT_CONFIG = {
