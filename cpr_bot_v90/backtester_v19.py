@@ -88,6 +88,7 @@ class SimulatorState:
         self.trading_paused = False
         self.sl_moved_to_be = False
         self.trade_cooldown_until = 0
+        self.last_known_position_qty = 0.0
         self.cached_atr = 0
         self.cached_ema = 0
         self.cached_median_vol = 0
