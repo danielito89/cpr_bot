@@ -12,7 +12,7 @@ SAR_AF_MAX = 0.2          # Parabolic SAR: Maximo paso
 EXPIRATION_HOURS = 5      # Horas para cancelar orden pendiente
 EXIT_HOURS = 9            # Horas para cerrar trade por tiempo
 INITIAL_BALANCE = 1000    # Balance inicial
-TIMEFRAME_STR = "1h"      # String para buscar en el nombre del archivo (ej: mainnet_data_1h...)
+TIMEFRAME_STR = "1h"      # String para buscar en el nombre del archivo
 
 # ==========================================
 # 🛠️ FUNCIONES DE CARGA Y CÁLCULO
@@ -20,19 +20,17 @@ TIMEFRAME_STR = "1h"      # String para buscar en el nombre del archivo (ej: mai
 
 def load_data_smart(symbol):
     """
-    Replica la lógica de búsqueda de tu backtester v19.
-    Busca en varias carpetas y formatos de nombre sin mover los datos.
+    Carga datos buscando en varias carpetas y normaliza el nombre de la columna fecha.
     """
     print(f"🔍 Buscando datos para {symbol} ({TIMEFRAME_STR})...")
     
-    # Nombres de archivo posibles (Prioridad al formato que mostraste)
     possible_filenames = [
-        f"mainnet_data_{TIMEFRAME_STR}_{symbol}_2020-2021.csv", # Prioridad crash/específico
-        f"mainnet_data_{TIMEFRAME_STR}_{symbol}.csv",           # Normal
-        f"{symbol}_{TIMEFRAME_STR}.csv"                          # Formato genérico por si acaso
+        f"mainnet_data_{TIMEFRAME_STR}_{symbol}_2020-2021.csv",
+        f"mainnet_data_{TIMEFRAME_STR}_{symbol}.csv",
+        f"{symbol}_{TIMEFRAME_STR}.csv"
     ]
     
-    # Rutas donde buscar (Tal cual las tienes en tu v19)
+    # Rutas típicas
     search_paths = ["data", "cpr_bot_v90/data", "."]
     
     for filename in possible_filenames:
@@ -42,20 +40,30 @@ def load_data_smart(symbol):
                 print(f"✅ Archivo encontrado: {full_path}")
                 try:
                     df = pd.read_csv(full_path)
-                    # Normalizar columnas a minúsculas
+                    
+                    # 1. Normalizar nombres de columnas a minúsculas
+                    # (Open_Time -> open_time, High -> high, etc.)
                     df.columns = [c.lower() for c in df.columns]
                     
-                    # Normalizar fecha
+                    # 2. CORRECCIÓN CLAVE: Renombrar columna de fecha a 'timestamp'
+                    # Tu downloader usa 'open_time', lo estandarizamos aquí.
+                    if 'open_time' in df.columns:
+                        df.rename(columns={'open_time': 'timestamp'}, inplace=True)
+                    elif 'date' in df.columns:
+                        df.rename(columns={'date': 'timestamp'}, inplace=True)
+                    
+                    # 3. Convertir a objetos datetime
                     if 'timestamp' in df.columns:
                         df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    elif 'date' in df.columns:
-                        df['timestamp'] = pd.to_datetime(df['date'])
-                    
+                    else:
+                        print(f"⚠️ Advertencia: No se encontró columna de fecha en {filename}")
+                        continue # Intentar siguiente archivo si este está mal
+
                     return df
                 except Exception as e:
                     print(f"⚠️ Error leyendo {full_path}: {e}")
 
-    print(f"❌ ERROR CRÍTICO: No se encontró ningún archivo de datos para {symbol}.")
+    print(f"❌ ERROR CRÍTICO: No se encontró ningún archivo de datos válido para {symbol}.")
     return None
 
 def calculate_atr(df, period):
@@ -70,7 +78,7 @@ def calculate_atr(df, period):
     return tr.rolling(window=period).mean()
 
 def run_strategy(symbol):
-    # 1. CARGA DE DATOS INTELIGENTE
+    # 1. CARGA DE DATOS
     df = load_data_smart(symbol)
     
     if df is None or df.empty:
@@ -83,6 +91,7 @@ def run_strategy(symbol):
     df['atr'] = calculate_atr(df, ATR_PERIOD)
     
     # PDH (Previous Daily High)
+    # IMPORTANTE: Ahora 'timestamp' existe seguro gracias a la corrección en load_data_smart
     df_daily = df.set_index('timestamp').resample('D')['high'].max().shift(1)
     df['date_only'] = df['timestamp'].dt.date
     df['pdh'] = df['date_only'].map(df_daily.index.to_series().dt.date.map(df_daily))
@@ -188,7 +197,7 @@ def run_strategy(symbol):
                 pending_active = False 
 
         # BUSCAR SEÑAL (SETUP)
-        # Tendencia Bajista + SAR sobre precio
+        # Tendencia Bajista + SAR sobre precio + SAR descendente (implícito en tendencia bajista)
         if position is None and not pending_active and trend == -1:
             if sar > close:
                 pending_active = True
@@ -211,13 +220,11 @@ def run_strategy(symbol):
     if total_trades > 0:
         total_return = ((balance - INITIAL_BALANCE) / INITIAL_BALANCE) * 100
         print(f"Retorno Total:   {total_return:.2f}%")
+        avg_pnl = sum([t['pnl'] for t in trades]) / total_trades
+        print(f"Avg PnL per trade: ${avg_pnl:.2f}")
 
 # ==========================================
 # 🏁 EJECUCIÓN
 # ==========================================
 if __name__ == "__main__":
-    # SOLO CAMBIA EL NOMBRE DEL SÍMBOLO AQUÍ
-    # El script buscará automáticamente 'mainnet_data_1h_ETHUSDT.csv' 
-    # en tus carpetas habituales.
-    
     run_strategy("ETHUSDT")
