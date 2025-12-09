@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 # --- 1. CONFIGURACIÓN ---
 SYMBOL = "ETHUSDT" 
 TIMEFRAME = '1m'
-TRADING_START_DATE = "2023-01-01"
+TRADING_START_DATE = "2020-01-01"
 BUFFER_DAYS = 25
 CAPITAL_INICIAL = 1000
 
@@ -46,10 +46,11 @@ CONFIG_SIMULADA = {
     "strict_volume_factor": 20.0,
     "take_profit_levels": 3,
     "breakout_atr_sl_multiplier": 1.0,
-    "breakout_tp_mult": 1.5,
+    "breakout_tp_mult": 1.25,
+    "indicator_update_interval_minutes": 3, # ¡IMPORTANTE! Simular el lag de 3 min
     "ranging_atr_multiplier": 0.5,
     "range_tp_mult": 2.0,
-    "daily_loss_limit_pct": 10.0,
+    "daily_loss_limit_pct": 15.0,
     "min_volatility_atr_pct": 0.3,
     "trailing_stop_trigger_atr": 1.25,
     "trailing_stop_distance_atr": 1.0,
@@ -348,9 +349,13 @@ class BacktesterV18:
             self.move_sl_to_be()
 
     def load_data(self):
-        filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}.csv"
+        #filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}.csv"
+        filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}_2020-2021.csv"
         filepath = os.path.join("data", filename)
         if not os.path.exists(filepath):
+             print(f"⚠️ No encontré {filename}, buscando el normal...")
+             filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}.csv"
+             filepath = os.path.join("data", filename)
              all_files = os.listdir("data")
              csvs = [f for f in all_files if f.endswith(".csv")]
              if csvs: filepath = os.path.join("data", csvs[0])
