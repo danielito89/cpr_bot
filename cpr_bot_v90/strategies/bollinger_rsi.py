@@ -9,29 +9,33 @@ try:
     HAS_TALIB = True
 except:
     HAS_TALIB = False
-    print("❌ TA-Lib no está instalado. Instálalo para usar V46.")
+    print("❌ TA-Lib no está instalado. Instálalo para usar V47.")
 
 # ======================================================
-#  🔥 CONFIG V46 – CONNORS RSI-2 SCALPER
+#  🔥 CONFIG V47 – CONNORS ENHANCED
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
-# ---- Estrategia Core (Mean Reversion Ultra-Rápida) ----
-RSI_PERIOD = 2          # El secreto de Connors: RSI muy corto
-RSI_BUY_LEVEL = 10      # Nivel de pánico extremo (Standard es 10 o 5 para crypto)
-TREND_MA_PERIOD = 200   # Filtro Macro (SMA 200)
-EXIT_MA_PERIOD = 5      # Salida rápida al tocar la media de 5
+# ---- Estrategia Core ----
+RSI_PERIOD = 2          
+RSI_BUY_LEVEL = 10      
+TREND_MA_PERIOD = 200   
+
+# MEJORA 1: Salida extendida para capturar más profit
+EXIT_MA_PERIOD = 7      # Subido de 5 a 7 (Más recorrido)
+
+# MEJORA 2: Filtro de Volatilidad Mínima
+MIN_VOL_PCT = 0.005     # 0.5% (Solo operar si hay movimiento real)
 
 # ---- Salidas de Emergencia ----
-STOP_LOSS_ATR = 4.0     # Stop de catástrofe (amplio, para dejar trabajar la prob)
-EXIT_HOURS = 24         # Si no rebotó en 24h, salir
+STOP_LOSS_ATR = 4.0     
+EXIT_HOURS = 24         
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-# Usamos un % fijo del equity porque la estrategia tiene alto Win Rate
-FIXED_RISK_PCT = 0.05   # 5% del capital por trade (Size agresivo por alta prob)
+FIXED_RISK_PCT = 0.05   
 COMMISSION = 0.0004         
 SPREAD_PCT = 0.0004         
 SLIPPAGE_PCT = 0.0006       
@@ -41,7 +45,7 @@ MIN_QTY = 0.01
 QTY_PRECISION = 3 
 
 # ---- Filtros ----
-BAD_HOURS = [3,4,5]     # Evitar hora muerta
+BAD_HOURS = [3,4,5]     
 
 # ======================================================
 #  🧩 DATA LOADING
@@ -82,25 +86,28 @@ def load_data(symbol):
     return df
 
 # ======================================================
-#  📐 INDICADORES (V46)
+#  📐 INDICADORES (V47)
 # ======================================================
 
 def calc_indicators(df):
-    print("📐 Calculando indicadores V46 (RSI-2 + SMA)...")
+    print("📐 Calculando indicadores V47...")
 
     if not HAS_TALIB: raise Exception("TA-Lib requerido.")
 
     # 1. RSI Ultra Corto
     df['rsi_2'] = talib.RSI(df['close'], timeperiod=RSI_PERIOD)
-    df['rsi_prev'] = df['rsi_2'].shift(1) # Para evitar lookahead
+    df['rsi_prev'] = df['rsi_2'].shift(1) 
 
     # 2. Medias Móviles
-    df['sma_trend'] = talib.SMA(df['close'], timeperiod=TREND_MA_PERIOD) # Filtro Trend
-    df['sma_exit'] = talib.SMA(df['close'], timeperiod=EXIT_MA_PERIOD)   # Trigger Salida
+    df['sma_trend'] = talib.SMA(df['close'], timeperiod=TREND_MA_PERIOD) 
+    df['sma_exit'] = talib.SMA(df['close'], timeperiod=EXIT_MA_PERIOD)   
 
-    # 3. ATR para Stop de Emergencia
+    # 3. ATR
     df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
     df['atr_prev'] = df['atr'].shift(1)
+    
+    # 4. Volatilidad Relativa (Para filtro)
+    df['vol_pct'] = df['atr_prev'] / df['close']
 
     # Gap Detection
     jump = abs(df['open'] - df['close'].shift(1))
@@ -113,7 +120,7 @@ def calc_indicators(df):
     return df
 
 # ======================================================
-#  🚀 BACKTEST ENGINE – V46
+#  🚀 BACKTEST ENGINE – V47
 # ======================================================
 
 def run_backtest(symbol):
@@ -121,12 +128,11 @@ def run_backtest(symbol):
     if df is None: return
     df = calc_indicators(df)
 
-    print(f"🚀 Iniciando Backtest V46 (Connors RSI-2) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V47 (Connors Enhanced) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     equity_curve = [balance]
 
-    # Estado
     position = None
     entry = 0; quantity = 0; sl = 0
     entry_time = None
@@ -145,7 +151,7 @@ def run_backtest(symbol):
         
         # Costos
         rel_vol = atr_prev / c
-        slippage_pct = SLIPPAGE_PCT # Simplificado para V46
+        slippage_pct = SLIPPAGE_PCT 
         total_entry_cost = slippage_pct + SPREAD_PCT + BASE_LATENCY
 
         if row.gap: cooldown = 24
@@ -157,26 +163,27 @@ def run_backtest(symbol):
         if position is None and cooldown == 0:
             if ts.hour not in BAD_HOURS:
                 
-                # A) Filtro Tendencia: Precio > SMA 200
+                # A) Filtro Tendencia
                 trend_ok = c > row.sma_trend
                 
-                # B) Trigger: RSI(2) < 10 (Sobreventa profunda)
-                # Usamos rsi_prev para decidir al cierre de la vela anterior
-                # Entramos en la APERTURA de esta vela
+                # B) Trigger RSI
                 oversold = row.rsi_prev < RSI_BUY_LEVEL
                 
-                if trend_ok and oversold:
+                # C) MEJORA: FILTRO VOLATILIDAD
+                # Solo operamos si hay suficiente movimiento para pagar el spread
+                vol_ok = row.vol_pct > MIN_VOL_PCT
+                
+                if trend_ok and oversold and vol_ok:
                     
                     # --- EJECUCIÓN ---
                     base_entry = o
                     entry_price = base_entry * (1 + total_entry_cost)
                     
-                    # Stop de Emergencia (Lejos)
+                    # Stop de Emergencia
                     sl_price = entry_price - (atr_prev * STOP_LOSS_ATR)
                     
-                    # Sizing: % Fijo del Balance (Fixed Fractional)
+                    # Sizing Fijo
                     risk_capital = balance * FIXED_RISK_PCT
-                    # Usamos apalancamiento implícito (max 2x o 3x según config, pero controlado por %)
                     qty = risk_capital / entry_price 
                     
                     if qty >= MIN_QTY:
@@ -215,13 +222,10 @@ def run_backtest(symbol):
             exit_price = None
             reason = None
 
-            # A) Salida Táctica: Cierre > SMA 5
-            # Connors sale cuando el precio cruza la media corta. 
-            # Esto suele pasar en 1 o 2 velas.
-            # Verificamos si el CIERRE actual está por encima de la SMA5 actual
+            # A) Salida Táctica: MEJORA SMA 7
             if c > row.sma_exit:
                 exit_price = c * (1 - slippage_pct)
-                reason = "Target (SMA5)"
+                reason = "Target (SMA)"
 
             # B) Stop Loss Emergencia
             elif l <= sl:
@@ -272,7 +276,7 @@ def run_backtest(symbol):
     trades_df = pd.DataFrame(trades)
 
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS FINALES V46 – CONNORS RSI-2: {symbol}")
+    print(f"📊 RESULTADOS FINALES V47 – CONNORS ENHANCED: {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
     print(f"📈 Retorno Total:   {total_return:.2f}%")
