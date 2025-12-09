@@ -9,29 +9,23 @@ try:
     HAS_TALIB = True
 except:
     HAS_TALIB = False
-    print("❌ TA-Lib no está instalado. Instálalo para usar V44.")
+    print("❌ TA-Lib no está instalado. Instálalo para usar V45.")
 
 # ======================================================
-#  🔥 CONFIG V44 – SMART SNIPER (PATCHED)
+#  🔥 CONFIG V45 – LIQUIDITY SWEEP (PRICE ACTION)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
-# ---- Estrategia Core ----
-SAR_ACCEL = 0.01       
-SAR_MAX = 0.1          
-EMA_TREND_PERIOD = 200 
-ATR_PERIOD = 50        
-
-# ---- Filtros ----
-MIN_VOLATILITY_RATIO = 0.7  
-ENTRY_BUFFER = 1.0003       
+# ---- Estrategia Core (SMC / Price Action) ----
+SWING_LOOKBACK = 20     # Miramos el mínimo de las últimas 20 velas
+EMA_TREND = 200         # Filtro Macro (Solo sweeps a favor de tendencia)
 
 # ---- Salidas ----
-SL_ATR_MULT = 1.2      
-TP_ATR_MULT = 1.8      
-EXIT_HOURS = 48        
+RR_TARGET = 2.0         # Risk:Reward fijo de 1:2 (Simple y efectivo)
+SL_BUFFER = 0.001       # 0.1% de aire debajo de la mecha del sweep
+EXIT_HOURS = 24         # Scalp/DayTrade rápido (1 día máx)
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
@@ -42,7 +36,6 @@ SPREAD_PCT = 0.0004
 SLIPPAGE_PCT = 0.0006       
 BASE_LATENCY = 0.0001
 
-# FIX: Cantidad Mínima y Precisión (Binance standard para ETH)
 MIN_QTY = 0.01
 QTY_PRECISION = 3 
 
@@ -50,7 +43,7 @@ DD_LIMIT = 0.15
 DD_FACTOR = 0.5
 MAX_LEVER = 20              
 
-MAX_TRADES_MONTH = 15     
+MAX_TRADES_MONTH = 20     
 BAD_HOURS = [3,4,5]
 
 # ======================================================
@@ -72,9 +65,7 @@ def load_data(symbol):
                 break
         if df is not None: break
 
-    if df is None:
-        print("❌ No se encontró archivo.")
-        return None
+    if df is None: return None
 
     df.columns = [c.lower() for c in df.columns]
     col_map = {'open_time': 'timestamp', 'date': 'timestamp'}
@@ -94,32 +85,25 @@ def load_data(symbol):
     return df
 
 # ======================================================
-#  📐 INDICADORES
+#  📐 INDICADORES (V45)
 # ======================================================
 
 def calc_indicators(df):
-    print("📐 Calculando indicadores V44...")
+    print("📐 Calculando indicadores V45 (Liquidity Sweeps)...")
 
     if not HAS_TALIB: raise Exception("TA-Lib requerido.")
 
-    # 1. ATR Lento
-    df['atr_raw'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=ATR_PERIOD)
-    df['atr'] = df['atr_raw'].ewm(span=20).mean() 
+    # 1. ATR (Para dimensionamiento de posición, no para SL)
+    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
     df['atr_prev'] = df['atr'].shift(1)
 
-    # 2. SAR Lento
-    df['sar'] = talib.SAR(df['high'], df['low'], acceleration=SAR_ACCEL, maximum=SAR_MAX)
-    df['sar_prev'] = df['sar'].shift(1)
+    # 2. EMA Tendencia
+    df['ema_trend'] = talib.EMA(df['close'], timeperiod=EMA_TREND)
 
-    # 3. EMA Tendencia
-    df['ema_trend'] = talib.EMA(df['close'], timeperiod=EMA_TREND_PERIOD)
-
-    # 4. Volatility Ratio
-    df['range'] = df['high'] - df['low']
-    df['avg_range'] = df['range'].rolling(window=20).mean()
-    # FIX: Guard contra división por cero
-    df['avg_range'] = df['avg_range'].replace(0, np.nan) 
-    df['vr'] = df['range'] / df['avg_range']
+    # 3. SWING POINTS (Liquidez)
+    # El Swing Low es el mínimo de las últimas N velas (sin contar la actual)
+    # Shift(1) es vital para no mirar el Low de la vela que estamos analizando
+    df['swing_low_support'] = df['low'].rolling(window=SWING_LOOKBACK).min().shift(1)
 
     # Gap Detection
     jump = abs(df['open'] - df['close'].shift(1))
@@ -134,7 +118,7 @@ def calc_indicators(df):
     return df
 
 # ======================================================
-#  🚀 BACKTEST ENGINE – V44
+#  🚀 BACKTEST ENGINE – V45
 # ======================================================
 
 def run_backtest(symbol):
@@ -142,7 +126,7 @@ def run_backtest(symbol):
     if df is None: return
     df = calc_indicators(df)
 
-    print(f"🚀 Iniciando Backtest V44 (Patched) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V45 (Liquidity Sweep) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     peak = balance
@@ -150,13 +134,8 @@ def run_backtest(symbol):
 
     # Estado
     position = None
-    entry = 0
-    quantity = 0
-    sl = 0
-    tp = 0
-    entry_time = None
+    entry = 0; quantity = 0; sl = 0; tp = 0; entry_time = None
     
-    # FIX: Variable persistente para comisión de entrada
     position_comm_paid = 0.0 
     
     month = -1; trades_month = 0; cooldown = 0
@@ -165,20 +144,17 @@ def run_backtest(symbol):
 
     for i in range(len(df)):
         row = df.iloc[i]
-        
         trade_active_this_candle = False
 
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
-        atr = row.atr
         atr_prev = row.atr_prev
-        sar = row.sar
-        sar_prev = row.sar_prev
+        swing_support = row.swing_low_support
         
-        # Costos Fijos
+        # Costos
         total_friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
 
-        # Gestión Mensual & Cooldown
+        # Gestión Mes
         if ts.month != month:
             month = ts.month
             trades_month = 0
@@ -187,107 +163,76 @@ def run_backtest(symbol):
         if cooldown > 0: cooldown -= 1
 
         # ============================================================
-        # 1) BÚSQUEDA DE ENTRADA
+        # 1) BÚSQUEDA DE ENTRADA (SWEEP & RECLAIM)
         # ============================================================
         if position is None and cooldown == 0:
             if trades_month < MAX_TRADES_MONTH and ts.hour not in BAD_HOURS:
                 
-                # Filtros
+                # A) Filtro Tendencia: Solo Sweeps alcistas sobre la EMA
                 trend_ok = c > row.ema_trend
-                vol_ok = row.vr > MIN_VOLATILITY_RATIO
                 
-                if trend_ok and vol_ok:
+                # B) Patrón Sweep:
+                # 1. El precio perforó el soporte (Low < Swing Low)
+                # 2. Pero cerró POR ENCIMA del soporte (Close > Swing Low)
+                # 3. Y la vela es verde (Close > Open) - Opcional pero recomendado
+                
+                swept_liquidity = l < swing_support
+                reclaimed_level = c > swing_support
+                green_candle = c > o
+                
+                if trend_ok and swept_liquidity and reclaimed_level and green_candle:
                     
-                    sar_was_bearish = sar_prev > row.prev_close 
-                    price_breaks_sar = h > sar_prev
+                    # --- EJECUCIÓN ---
+                    # Entramos en la apertura de la SIGUIENTE vela (simulado aquí en el mismo loop
+                    # asumiendo ejecución inmediata al cierre/open siguiente)
+                    # Para backtest vectorizado loop: ejecutamos ahora con precio de cierre + friccion?
+                    # NO, lo correcto es: Detectamos señal en 'i', entramos en 'i+1'.
+                    # Pero para simplificar lógica en este framework:
+                    # Asumimos entrada al CIERRE de esta vela (Close) o simulamos Open siguiente (Close ~ Open next)
                     
-                    if sar_was_bearish and price_breaks_sar:
+                    # Usaremos CLOSE de la vela de sweep como base de entrada (Mark Price)
+                    base_price = c 
+                    entry_price = base_price * (1 + total_friction)
+                    
+                    # SL: Debajo de la mecha del sweep (Low de la vela actual)
+                    sl_price = l * (1 - SL_BUFFER)
+                    
+                    # TP: Risk Reward 1:2
+                    risk_dist = entry_price - sl_price
+                    tp_price = entry_price + (risk_dist * RR_TARGET)
+
+                    if risk_dist > 0:
+                        # Sizing
+                        vol_smooth = atr_prev / c
+                        var_factor = min(1.0, TARGET_VOL / max(vol_smooth, 1e-6))
+                        dd = (peak - balance) / peak
+                        dd_adj = DD_FACTOR if dd > DD_LIMIT else 1.0
                         
-                        # Trigger
-                        trigger_price = sar_prev * ENTRY_BUFFER
-                        entry_price = max(o, trigger_price)
-                        entry_price = entry_price * (1 + total_friction)
+                        final_risk_pct = BASE_VAR * var_factor * dd_adj
+                        risk_usd = peak * final_risk_pct
+
+                        max_contracts = (balance * MAX_LEVER) / entry_price
+                        qty = min(risk_usd / risk_dist, max_contracts)
                         
-                        # SL / TP
-                        sl_dist = atr_prev * SL_ATR_MULT
-                        tp_dist = atr_prev * TP_ATR_MULT
-                        sl_price = entry_price - sl_dist
-                        tp_price = entry_price + tp_dist
-                        
-                        risk_dist = entry_price - sl_price
+                        if qty < MIN_QTY: qty = 0
+                        else: qty = round(qty, QTY_PRECISION)
 
-                        if risk_dist > 0:
-                            # FIX: Safety Math para división por precio
-                            safe_c = c if c > 0 else 1e-6
-                            vol_smooth = atr_prev / safe_c
+                        if qty > 0:
+                            entry_comm = qty * entry_price * COMMISSION
+                            balance -= entry_comm
+
+                            position = "long"
+                            entry = entry_price
+                            sl = sl_price
+                            tp = tp_price
+                            quantity = qty
+                            entry_time = ts
                             
-                            var_factor = min(1.0, TARGET_VOL / max(vol_smooth, 1e-6))
-                            dd = (peak - balance) / peak
-                            dd_adj = DD_FACTOR if dd > DD_LIMIT else 1.0
+                            position_comm_paid = entry_comm
+                            trades_month += 1
+                            trade_active_this_candle = True
                             
-                            final_risk_pct = BASE_VAR * var_factor * dd_adj
-                            risk_usd = peak * final_risk_pct
-
-                            max_contracts = (balance * MAX_LEVER) / entry_price
-                            qty = min(risk_usd / risk_dist, max_contracts)
-                            
-                            # FIX: Cantidad mínima y redondeo
-                            if qty < MIN_QTY:
-                                qty = 0 # No trade si no alcanza el mínimo
-                            else:
-                                qty = round(qty, QTY_PRECISION)
-
-                            if qty > 0:
-                                entry_comm = qty * entry_price * COMMISSION
-                                balance -= entry_comm
-
-                                position = "long"
-                                entry = entry_price
-                                sl = sl_price
-                                tp = tp_price
-                                quantity = qty
-                                entry_time = ts
-                                
-                                # FIX: Persistir la comisión
-                                position_comm_paid = entry_comm
-                                
-                                trades_month += 1
-                                trade_active_this_candle = True
-
-                                # INTRA-CANDLE CHECK
-                                if l <= sl:
-                                    exit_price = sl * (1 - SLIPPAGE_PCT)
-                                    pnl = (exit_price - entry) * qty
-                                    fee = exit_price * qty * COMMISSION
-                                    
-                                    balance += (pnl - fee)
-                                    
-                                    # FIX: Usar variable persistida
-                                    net_pnl = pnl - position_comm_paid - fee
-                                    
-                                    trades.append({
-                                        "year": ts.year, "month": ts.month,
-                                        "pnl": net_pnl, "type": "SL Intra"
-                                    })
-                                    position = None
-                                    position_comm_paid = 0.0 # Reset
-                                
-                                elif h >= tp: 
-                                    exit_price = tp * (1 - SLIPPAGE_PCT)
-                                    pnl = (exit_price - entry) * qty
-                                    fee = exit_price * qty * COMMISSION
-                                    
-                                    balance += (pnl - fee)
-                                    if balance > peak: peak = balance
-                                    
-                                    net_pnl = pnl - position_comm_paid - fee
-                                    
-                                    trades.append({
-                                        "year": ts.year, "month": ts.month,
-                                        "pnl": net_pnl, "type": "TP Intra"
-                                    })
-                                    position = None
-                                    position_comm_paid = 0.0 # Reset
+                            # (No chequeamos Intra-Candle exit porque entramos al cierre)
 
         # ============================================================
         # 2) GESTIÓN DE POSICIÓN ABIERTA
@@ -301,11 +246,11 @@ def run_backtest(symbol):
             if l <= sl:
                 exit_raw = o if o < sl else sl 
                 exit_price = exit_raw * (1 - SLIPPAGE_PCT)
-                reason = "SL Trail"
+                reason = "SL"
 
-            # TP Check (Faltaba en V43 fuera de intra-candle)
+            # TP Check
             elif h >= tp:
-                exit_raw = o if o > tp else tp # Gap up favor
+                exit_raw = max(o, tp) # Gap up favor
                 exit_price = exit_raw * (1 - SLIPPAGE_PCT)
                 reason = "TP Target"
 
@@ -321,16 +266,15 @@ def run_backtest(symbol):
                 balance += (pnl - exit_comm)
                 if balance > peak: peak = balance
                 
-                # FIX: Usar variable persistida
-                net = pnl - position_comm_paid - exit_comm
-
+                net_pnl = pnl - position_comm_paid - exit_comm
+                
                 trades.append({
                     "year": entry_time.year, "month": entry_time.month,
-                    "pnl": net, "type": reason
+                    "pnl": net_pnl, "type": reason
                 })
                 
                 position = None
-                position_comm_paid = 0.0 # Reset
+                position_comm_paid = 0.0
                 trade_active_this_candle = True
 
         # ============================================================
@@ -356,7 +300,7 @@ def run_backtest(symbol):
     trades_df = pd.DataFrame(trades)
 
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS FINALES V44 – SMART SNIPER (PATCHED): {symbol}")
+    print(f"📊 RESULTADOS FINALES V45 – LIQUIDITY SWEEP: {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
     print(f"📈 Retorno Total:   {total_return:.2f}%")
