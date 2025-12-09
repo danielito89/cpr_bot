@@ -204,11 +204,35 @@ def run_strategy(symbol):
                 pending_trigger = pdh
                 pending_start_idx = i
 
-    # --- REPORTE ---
+    # --- REPORTE MEJORADO CON DRAWDOWN ---
     print("\n" + "="*40)
     print(f"📊 REPORTE FINAL: {symbol}")
     print("="*40)
+    
+    # Cálculo de Drawdown
+    equity_curve = []
+    running_balance = INITIAL_BALANCE
+    max_drawdown_pct = 0
+    peak_balance = INITIAL_BALANCE
+    
+    # Reconstruimos la curva de equidad trade por trade
+    for t in trades:
+        running_balance += t['pnl']
+        equity_curve.append(running_balance)
+        
+        # Actualizar pico
+        if running_balance > peak_balance:
+            peak_balance = running_balance
+        
+        # Calcular caída desde el pico
+        dd = (peak_balance - running_balance) / peak_balance * 100
+        if dd > max_drawdown_pct:
+            max_drawdown_pct = dd
+
     print(f"Balance Final:   ${balance:.2f}")
+    print(f"💰 Retorno Total: {((balance - INITIAL_BALANCE) / INITIAL_BALANCE) * 100:.2f}%")
+    print(f"📉 Max Drawdown:  {max_drawdown_pct:.2f}%  <-- DATO CLAVE")
+    print("-" * 40)
     
     total_trades = len(trades)
     winners = len([t for t in trades if t['pnl'] > 0])
@@ -218,10 +242,16 @@ def run_strategy(symbol):
     print(f"Win Rate:        {win_rate:.2f}%")
     
     if total_trades > 0:
-        total_return = ((balance - INITIAL_BALANCE) / INITIAL_BALANCE) * 100
-        print(f"Retorno Total:   {total_return:.2f}%")
         avg_pnl = sum([t['pnl'] for t in trades]) / total_trades
         print(f"Avg PnL per trade: ${avg_pnl:.2f}")
+        
+        # Ratio Promedio Ganancia/Pérdida
+        avg_win = np.mean([t['pnl'] for t in trades if t['pnl'] > 0])
+        avg_loss = np.mean([t['pnl'] for t in trades if t['pnl'] < 0])
+        if avg_loss != 0:
+            print(f"Risk/Reward Real: 1 : {abs(avg_win/avg_loss):.2f}")
+
+    return balance
 
 # ==========================================
 # 🏁 EJECUCIÓN
