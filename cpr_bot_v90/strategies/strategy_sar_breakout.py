@@ -12,7 +12,7 @@ except ImportError:
     print("⚠️ ADVERTENCIA: TA-Lib no encontrado. Usando cálculos nativos.")
 
 # ==========================================
-# ⚙️ CONFIGURACIÓN FINAL (V23)
+# ⚙️ CONFIGURACIÓN FINAL (V23!)
 # ==========================================
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
