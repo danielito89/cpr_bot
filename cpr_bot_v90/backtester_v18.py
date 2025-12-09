@@ -349,38 +349,58 @@ class BacktesterV18:
             self.move_sl_to_be()
 
     def load_data(self):
-        #filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}.csv"
-        filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}_2020-2021.csv"
-        filepath = os.path.join("data", filename)
-        if not os.path.exists(filepath):
-             print(f"⚠️ No encontré {filename}, buscando el normal...")
-             filename = f"mainnet_data_{TIMEFRAME}_{SYMBOL}.csv"
-             filepath = os.path.join("data", filename)
-             all_files = os.listdir("data")
-             csvs = [f for f in all_files if f.endswith(".csv")]
-             if csvs: filepath = os.path.join("data", csvs[0])
-             else: return None, None
+        # 1. Definir el nombre EXACTO que generó download_data2.py
+        filename_2020 = f"mainnet_data_{TIMEFRAME}_{SYMBOL}_2020-2021.csv"
         
-        print(f"📂 Cargando: {filepath}")
-        df = pd.read_csv(filepath)
-        df.columns = [col.lower() for col in df.columns]
-        col_fecha = 'open_time' if 'open_time' in df.columns else 'timestamp'
-        df[col_fecha] = pd.to_datetime(df[col_fecha])
-        df.set_index(col_fecha, inplace=True)
+        # 2. Rutas posibles (para que funcione desde root o desde la carpeta)
+        possible_paths = [
+            os.path.join("data", filename_2020),
+            os.path.join("cpr_bot_v90", "data", filename_2020)
+        ]
         
-        target_start = pd.to_datetime(TRADING_START_DATE)
-        start_buffer = target_start - timedelta(days=BUFFER_DAYS)
-        df = df[df.index >= start_buffer].copy()
+        filepath = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                filepath = p
+                break
         
-        df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
-        df['ema'] = df['close'].ewm(span=20).mean().shift(1)
-        tr = pd.concat([
-            df['high'] - df['low'],
-            (df['high'] - df['close'].shift(1)).abs(),
-            (df['low'] - df['close'].shift(1)).abs()
-        ], axis=1).max(axis=1)
-        df['atr'] = tr.rolling(14).mean().shift(1)
-        return df, target_start
+        # 3. Validación estricta: Si no está el del 2020, NO usar basura
+        if not filepath:
+            print(f"❌ ERROR CRÍTICO: No encuentro el archivo del Crash: {filename_2020}")
+            print(f"   Buscado en: {possible_paths}")
+            print("   Asegúrate de haber corrido download_data2.py primero.")
+            return None, None
+        
+        print(f"📂 Cargando archivo del CRASH: {filepath}")
+        
+        try:
+            df = pd.read_csv(filepath)
+            df.columns = [col.lower() for col in df.columns]
+            col_fecha = 'open_time' if 'open_time' in df.columns else 'timestamp'
+            df[col_fecha] = pd.to_datetime(df[col_fecha])
+            df.set_index(col_fecha, inplace=True)
+            
+            # Recortar desde la fecha de inicio del config (2020-01-01)
+            target_start = pd.to_datetime(TRADING_START_DATE)
+            start_buffer = target_start - timedelta(days=BUFFER_DAYS)
+            df = df[df.index >= start_buffer].copy()
+            
+            # Cálculo de indicadores
+            df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
+            df['ema'] = df['close'].ewm(span=20).mean().shift(1)
+            
+            # Cálculo de ATR Vectorizado rápido
+            h_l = df['high'] - df['low']
+            h_c = (df['high'] - df['close'].shift(1)).abs()
+            l_c = (df['low'] - df['close'].shift(1)).abs()
+            tr = pd.concat([h_l, h_c, l_c], axis=1).max(axis=1)
+            df['atr'] = tr.rolling(14).mean().shift(1)
+            
+            return df, target_start
+
+        except Exception as e:
+            print(f"❌ Error leyendo CSV: {e}")
+            return None, None
 
     async def run(self):
         df, target_start = self.load_data()
