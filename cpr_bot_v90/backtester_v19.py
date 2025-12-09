@@ -27,7 +27,7 @@ EXECUTION_MODE = "SMART"
 
 # --- IMPORTS DEL BOT CORE ---
 try:
-    from bot_core.risk import RiskManager
+    from bot_core.risk_pure import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
     from bot_core.utils import format_price, SIDE_BUY, SIDE_SELL
 except ImportError as e:
@@ -368,7 +368,7 @@ class BacktesterV19:
             
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             if self.state.is_in_position:
-                ts_check_price = row.high if self.state.current_position_info['side'] == SIDE_BUY else row.low
+                # ts_check_price = row.high if self.state.current_position_info['side'] == SIDE_BUY else row.low
                 await self.risk_manager._check_trailing_stop(ts_check_price, self.state.current_position_info['quantity'])
                 self.check_exits(row)
 
