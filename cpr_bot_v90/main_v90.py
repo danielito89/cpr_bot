@@ -33,7 +33,7 @@ INITIAL_SYMBOLS = ["BTCUSDT", "ETHUSDT", "1000PEPEUSDT"]
 # Configuración Ganadora + Nuevos Filtros
 DEFAULT_CONFIG = {
     "investment_pct": 0.05,
-    "leverage": 30,
+    "leverage": 15,
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,        # Punto Dulce (1.1)
     "take_profit_levels": 3,
@@ -65,16 +65,16 @@ SYMBOL_CONFIGS = {
     },
     # ETH: Adaptativo (Base 1.2) + Runner
     "ETHUSDT": {
-        "volume_factor": 1.2,               # Base
-        "strict_volume_factor": 15.0,       # Adaptativo
+        "volume_factor": 1.1,               # Base
+        "strict_volume_factor": 20.0,       # Adaptativo
         "breakout_tp_mult": 1.25,           # Runner
         "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0
     },
     # PEPE: Adaptativo (Base 1.2) + Runner
     "1000PEPEUSDT": {
-        "volume_factor": 1.2,               # Base
-        "strict_volume_factor": 15.0,       # Adaptativo
+        "volume_factor": 1.1,               # Base
+        "strict_volume_factor": 20.0,       # Adaptativo
         "breakout_tp_mult": 1.25,           # Runner
         "trailing_stop_trigger_atr": 1.25,  # Activo
         "trailing_stop_distance_atr": 1.0,

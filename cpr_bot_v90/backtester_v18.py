@@ -40,7 +40,7 @@ else: # ETH, BTC
 CONFIG_SIMULADA = {
     "symbol": SYMBOL,
     "investment_pct": 0.05,
-    "leverage": 30,
+    "leverage": 15,
     "cpr_width_threshold": 0.2,
     "volume_factor": 1.1,
     "strict_volume_factor": 20.0,
