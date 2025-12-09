@@ -12,7 +12,7 @@ except ImportError:
     print("⚠️ ADVERTENCIA: TA-Lib no encontrado. Usando cálculos nativos.")
 
 # ==========================================
-# ⚙️ CONFIGURACIÓN FINAL (V23!)
+# ⚙️ CONFIGURACIÓN V24 (TREND FILTER)
 # ==========================================
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
@@ -25,8 +25,13 @@ SAR_AF_MAX = 0.2
 EXPIRATION_HOURS = 5
 EXIT_HOURS = 9
 
+# --- FILTRO DE TENDENCIA (NUEVO) ---
+# Usamos EMA 4800 en 1H para simular la EMA 200 Diaria (200 * 24 = 4800)
+USE_TREND_FILTER = True
+TREND_EMA_PERIOD = 4800 
+
 # --- RIESGO Y MICROESTRUCTURA ---
-INITIAL_BALANCE = 10000.0   
+INITIAL_BALANCE = 1000.0   
 BASE_RISK_PCT = 0.02        
 COMMISSION_RATE = 0.0006    
 LATENCY_PENALTY = 0.0001    
@@ -35,7 +40,7 @@ DD_BRAKE_THRESHOLD = 0.10
 DD_BRAKE_FACTOR = 0.5       
 
 # ==========================================
-# 🛠️ CARGA Y LIMPIEZA BLINDADA
+# 🛠️ CARGA Y PROCESAMIENTO
 # ==========================================
 
 def load_data(symbol):
@@ -60,7 +65,6 @@ def load_data(symbol):
     if df is None: return None
 
     df.columns = [c.lower() for c in df.columns]
-    
     if 'open_time' in df.columns: df.rename(columns={'open_time': 'timestamp'}, inplace=True)
     elif 'date' in df.columns: df.rename(columns={'date': 'timestamp'}, inplace=True)
     
@@ -70,70 +74,49 @@ def load_data(symbol):
     df.sort_values('timestamp', inplace=True)
     df.drop_duplicates(subset='timestamp', keep='first', inplace=True)
     
-    # --- 🛡️ VALIDACIÓN DE GAPS INTRADÍA (TU APORTE CRÍTICO) ---
-    # Calculamos la diferencia en segundos entre velas consecutivas
+    # Gap Detection
     df['time_diff'] = df['timestamp'].diff().dt.total_seconds()
-    
-    # Umbral: Gap > 2 horas (7200s) es inaceptable para continuidad de indicadores
     GAP_THRESHOLD = 7200
-    bad_rows = df[df['time_diff'] > GAP_THRESHOLD]
+    df['gap_detected'] = df['time_diff'] > GAP_THRESHOLD
     
-    if len(bad_rows) > 0:
-        print(f"⚠️ ALERTA DE DATOS: Se detectaron {len(bad_rows)} gaps intradía graves (>2h).")
-        print("   -> Estos saltos rompen la continuidad del ATR y SAR.")
-        print("   -> Acción: Se invalidarán las señales inmediatamente posteriores a estos gaps.")
-        
-        # Marcamos una columna 'invalid_continuity' para no operar justo después del gap
-        # hasta que los indicadores se estabilicen (ej. 24 velas después)
-        df['gap_detected'] = df['time_diff'] > GAP_THRESHOLD
-    else:
-        df['gap_detected'] = False
+    if df['gap_detected'].sum() > 0:
+        print(f"⚠️ Gaps detectados: {df['gap_detected'].sum()} velas marcadas.")
         
     df.reset_index(drop=True, inplace=True)
     return df
 
 def calculate_indicators(df):
-    print("🧮 Calculando indicadores Bulletproof...")
+    print("🧮 Calculando indicadores con Trend Filter...")
     
-    # 1. ATR 
     if HAS_TALIB:
         df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=ATR_PERIOD)
+        df['sar'] = talib.SAR(df['high'], df['low'], acceleration=SAR_AF_START, maximum=SAR_AF_MAX)
+        # EMA de Tendencia
+        df['trend_ema'] = talib.EMA(df['close'], timeperiod=TREND_EMA_PERIOD)
     else:
+        # Fallback Nativo
         high = df['high']; low = df['low']; close = df['close'].shift(1)
         tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
         df['atr'] = tr.rolling(window=ATR_PERIOD).mean()
+        df['sar'] = df['close'].ewm(span=10).mean() # Fallback simple
+        df['trend_ema'] = df['close'].ewm(span=TREND_EMA_PERIOD).mean()
 
-    # 2. SAR
-    if HAS_TALIB:
-        df['sar'] = talib.SAR(df['high'], df['low'], acceleration=SAR_AF_START, maximum=SAR_AF_MAX)
-    else:
-        # Fallback simple (EWM)
-        df['sar'] = df['close'].ewm(span=10).mean()
-
-    # 3. PDH (Daily High)
-    print("   👉 Mapeando PDH seguro...")
+    # PDH Seguro
     df['date_only'] = df['timestamp'].dt.date
-    
-    # Contamos velas reales por día
     daily_counts = df.groupby('date_only')['timestamp'].count()
     daily_highs = df.groupby('date_only')['high'].max()
-    
-    # Filtro estricto: Días con menos de 23 velas NO generan PDH confiable
     valid_days = daily_counts[daily_counts >= 23].index
     safe_daily_highs = daily_highs.loc[valid_days]
-    
     safe_daily_highs_shifted = safe_daily_highs.copy()
     safe_daily_highs_shifted.index = safe_daily_highs_shifted.index + timedelta(days=1)
-    
     df['pdh'] = df['date_only'].map(safe_daily_highs_shifted)
     
-    # Limpieza final
-    df.dropna(subset=['atr', 'sar'], inplace=True)
+    df.dropna(subset=['atr', 'sar', 'trend_ema'], inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
 # ==========================================
-# 🚀 MOTOR DE SIMULACIÓN (V23)
+# 🚀 MOTOR DE SIMULACIÓN V24
 # ==========================================
 
 def run_simulation(symbol):
@@ -142,7 +125,7 @@ def run_simulation(symbol):
     try: df = calculate_indicators(df)
     except Exception as e: print(e); return
 
-    print(f"🚀 Iniciando Backtest V23 para {symbol}...")
+    print(f"🚀 Iniciando Backtest V24 (Trend Filter) para {symbol}...")
     
     balance = INITIAL_BALANCE
     equity_curve = [balance]
@@ -150,20 +133,17 @@ def run_simulation(symbol):
     trades = []
     
     position = None 
-    entry_price = 0.0
-    sl_price = 0.0
     entry_time = None
     position_size_contracts = 0.0 
-    
     entry_risk_amount_usd = 0.0 
     entry_comm_paid = 0.0       
+    entry_price = 0.0
+    sl_price = 0.0
     
     pending_active = False
     pending_trigger = 0.0
     pending_start_time = None
 
-    # Contador para enfriamiento post-gap
-    # Si hubo un gap, esperamos ATR_PERIOD velas para confiar en el ATR de nuevo
     cooldown_counter = 0
 
     for i in range(len(df)):
@@ -175,29 +155,22 @@ def run_simulation(symbol):
         pdh = df.at[i, 'pdh']
         atr = df.at[i, 'atr']
         sar = df.at[i, 'sar']
+        trend_ema = df.at[i, 'trend_ema']
         is_gap = df.at[i, 'gap_detected']
         
-        # --- LÓGICA DE COOLDOWN POR GAP ---
         if is_gap:
-            # Si detectamos gap en esta vela (respecto a la anterior), activamos cooldown
-            # Necesitamos recargar el buffer de indicadores (ej. 24h)
             cooldown_counter = 24 
-            # Si teníamos orden pendiente, la matamos por seguridad
-            if pending_active:
-                pending_active = False
-            # (Opcional: Si hubiera posición abierta, se gestiona con gap logic abajo, no se cierra forzado)
+            if pending_active: pending_active = False
         
         if cooldown_counter > 0:
             cooldown_counter -= 1
-            # Si estamos en enfriamiento, saltamos la búsqueda de nuevas señales
-            # pero DEBEMOS gestionar posiciones abiertas
         
         # Slippage Dinámico
         current_slippage_pct = SLIPPAGE_K * (atr / close) if close > 0 else 0.0005
         effective_slippage_in = current_slippage_pct + LATENCY_PENALTY
         effective_slippage_out = current_slippage_pct
 
-        # --- A. GESTIÓN SALIDA ---
+        # --- GESTIÓN SALIDA ---
         if position == 'long':
             exit_price = None
             exit_reason = ""
@@ -222,7 +195,8 @@ def run_simulation(symbol):
                 exit_value = position_size_contracts * exit_price
                 exit_comm = exit_value * COMMISSION_RATE
                 
-                entry_value_nominal = position_size_contracts * entry_price
+                # PnL Calc
+                entry_value_nominal = position_size_contracts * entry_price # Costo nominal
                 gross_pnl = exit_value - entry_value_nominal
                 net_pnl = gross_pnl - entry_comm_paid - exit_comm
                 
@@ -233,32 +207,32 @@ def run_simulation(symbol):
                 equity_curve.append(balance)
                 
                 trades.append({
-                    'entry_time': entry_time, 'exit_time': ts, 'year': ts.year,
-                    'type': exit_reason, 'net_pnl': net_pnl, 
-                    'risk_multiple': net_pnl / entry_risk_amount_usd if entry_risk_amount_usd else 0,
+                    'year': ts.year,
+                    'net_pnl': net_pnl, 
                     'commissions': entry_comm_paid + exit_comm,
-                    'slippage_pct_used': effective_slippage_in + effective_slippage_out
                 })
                 
                 position = None
                 pending_active = False
                 continue
 
-        # --- B. ORDEN PENDIENTE ---
+        # --- ORDEN PENDIENTE ---
         if position is None and pending_active:
             if (ts - pending_start_time).total_seconds() > EXPIRATION_HOURS * 3600:
                 pending_active = False
             
             elif high >= pending_trigger:
-                # Entrada Realista (Max de Open vs Trigger)
+                # FILTRO DE TENDENCIA (Check final antes de ejecutar)
+                # Si el precio cruzó la EMA hacia abajo violentamente, abortamos?
+                # O confiamos en que el filtro se aplicó al crear la señal.
+                # Lo aplicamos al CREAR la señal para ser más limpios.
+                
                 base_execution_price = max(open_p, pending_trigger)
                 real_entry = base_execution_price * (1 + effective_slippage_in)
-                
                 technical_sl = pending_trigger - (atr * ATR_SL_MULT)
                 risk_distance = real_entry - technical_sl
                 
                 if risk_distance > 0:
-                    # Drawdown Brake
                     current_dd = (peak_balance - balance) / peak_balance
                     adjusted_risk_pct = BASE_RISK_PCT * DD_BRAKE_FACTOR if current_dd > DD_BRAKE_THRESHOLD else BASE_RISK_PCT
                     
@@ -272,7 +246,6 @@ def run_simulation(symbol):
                     sl_price = technical_sl
                     position_size_contracts = qty_contracts
                     entry_time = ts
-                    
                     entry_risk_amount_usd = risk_amount_usd
                     entry_comm_paid = entry_comm
                     
@@ -281,39 +254,45 @@ def run_simulation(symbol):
                 else:
                     pending_active = False
 
-        # --- C. SEÑAL (Solo si no hay Cooldown) ---
+        # --- SEÑAL DE ENTRADA ---
         if position is None and not pending_active and cooldown_counter == 0:
             if not np.isnan(pdh):
-                if sar > close:
+                # CONDICIONES V24:
+                # 1. SAR configuración (SAR > Close) -> Esto es "SAR Bajista" en teoría, para Breakout? 
+                #    Revisando lógica original: "SAR en descenso" = Puntos Arriba del precio bajando.
+                #    Correcto. Apostamos a reversión/breakout del PDH.
+                
+                sar_condition = sar > close
+                
+                # 2. TREND FILTER (NUEVO)
+                # Solo tomamos Longs si estamos en Bull Market (Close > EMA 200 daily)
+                if USE_TREND_FILTER:
+                    trend_ok = close > trend_ema
+                else:
+                    trend_ok = True
+                
+                if sar_condition and trend_ok:
                     pending_active = True
                     pending_trigger = pdh
                     pending_start_time = ts
 
-    # ==========================================
-    # 📊 REPORTING
-    # ==========================================
+    # REPORTING SIMPLIFICADO
     trades_df = pd.DataFrame(trades)
     if trades_df.empty: print("⚠️ Sin trades."); return
 
-    trades_df.to_csv(f"trade_log_v23_{symbol}.csv", index=False)
-    
     total_ret = ((balance - INITIAL_BALANCE) / INITIAL_BALANCE) * 100
     eq_series = pd.Series(equity_curve)
     max_dd_pct = ((eq_series - eq_series.cummax()) / eq_series.cummax()).min() * 100
     
     print("\n" + "="*50)
-    print(f"📊 REPORTE FINAL V23 (Bulletproof): {symbol}")
+    print(f"📊 REPORTE FINAL V24 (Trend Filter): {symbol}")
     print("="*50)
     print(f"💰 Balance Final:    ${balance:.2f}")
     print(f"🚀 Retorno Total:    {total_ret:.2f}%")
     print(f"📉 Max Drawdown:     {max_dd_pct:.2f}%")
     print("-" * 50)
     
-    win_rate = (len(trades_df[trades_df['net_pnl']>0]) / len(trades_df)) * 100
-    print(f"✅ Win Rate:         {win_rate:.2f}%")
-    print(f"🔢 Trades Totales:   {len(trades_df)}")
-
-    print("\n📅 RENDIMIENTO POR AÑO:")
+    print("📅 RENDIMIENTO POR AÑO:")
     stats = trades_df.groupby('year')['net_pnl'].agg(['sum', 'count'])
     print(stats)
     print("="*50 + "\n")
