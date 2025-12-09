@@ -369,7 +369,8 @@ class BacktesterV19:
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             if self.state.is_in_position:
                 # ts_check_price = row.high if self.state.current_position_info['side'] == SIDE_BUY else row.low
-                await self.risk_manager._check_trailing_stop(ts_check_price, self.state.current_position_info['quantity'])
+                # await self.risk_manager._check_trailing_stop(ts_check_price, self.state.current_position_info['quantity'])
+                await self.risk_manager.check_position_state()
                 self.check_exits(row)
 
             self.state.cached_atr = row.atr
