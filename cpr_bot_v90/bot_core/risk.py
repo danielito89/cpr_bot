@@ -150,7 +150,7 @@ class RiskManager:
                         dist_ema = (ema - current_price) / current_price * 100
                         
                         # Solo comprar si el volumen acompaña y es vela verde
-                        if vol_ok_range and is_green and dist_ema < 3.0:
+                        if vol_ok_range and is_green and dist_ema < 2.0:
                              side, entry_type = SIDE_BUY, "Ranging Long"
                              sl = p["L4"] - atr * self.config.ranging_atr_multiplier
                              # ... resto de la lógica de TPs igual ...

@@ -117,11 +117,11 @@ class BacktesterV19:
             "investment_pct": 0.05,
             "leverage": 15,
             "cpr_width_threshold": 0.2,
-            "volume_factor": 1.1,
-            "strict_volume_factor": 5.0,
+            "volume_factor": 1.5,
+            "strict_volume_factor": 3.0,
             "take_profit_levels": 3,
             "breakout_atr_sl_multiplier": 1.0,
-            "breakout_tp_mult": 1.25,
+            "breakout_tp_mult": 2,
             "indicator_update_interval_minutes": 3,
             "ranging_atr_multiplier": 0.5,
             "range_tp_mult": 2.0,
@@ -369,29 +369,98 @@ class BacktesterV19:
             return
 
         df_t = pd.DataFrame(trades)
+        
+        # --- CÁLCULOS PROFESIONALES (Restaurados) ---
         winners = df_t[df_t['pnl_usd'] > 0]
         losers = df_t[df_t['pnl_usd'] <= 0]
+        
         gross_profit = winners['pnl_usd'].sum()
         gross_loss = abs(losers['pnl_usd'].sum())
+        
         net_pnl = df_t['pnl_usd'].sum()
+        total_legs = len(df_t)
         
+        win_rate = (len(winners) / total_legs) * 100
         profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else 999.0
-        equity = pd.Series(self.state.equity_curve)
-        max_dd = ((equity - equity.cummax()) / equity.cummax() * 100).min()
         
+        avg_win = winners['pnl_usd'].mean() if not winners.empty else 0
+        avg_loss = losers['pnl_usd'].mean() if not losers.empty else 0
+        payoff_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+        expectancy = (len(winners)/total_legs * avg_win) + (len(losers)/total_legs * avg_loss)
+
+        equity = pd.Series(self.state.equity_curve)
+        running_max = equity.cummax()
+        drawdown = (equity - running_max) / running_max * 100
+        max_dd = drawdown.min()
+        
+        # Slippage Promedio
+        avg_slippage = df_t['slippage_pct'].mean()
+        
+        # --- EXPORTACIÓN ---
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         
+        # --- IMPRESIÓN DEL REPORTE DETALLADO ---
         print("\n" + "="*60)
-        print(f"📊 REPORTE FINAL ({self.symbol}) - Desde {self.start_date}")
+        print(f"📊 REPORTE PROFESIONAL (V19) - {self.symbol}")
         print("="*60)
-        print(f"💰 Balance Final:   ${self.state.balance:,.2f}")
-        print(f"🚀 Retorno Total:   {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
-        print(f"📉 Max Drawdown:    {max_dd:.2f}%")
-        print(f"🏆 Profit Factor:   {profit_factor:.2f}")
-        print(f"✅ Trades:          {len(df_t)} ({len(winners)} wins / {len(losers)} losses)")
-        print(f"💾 CSV Generado:    {csv_filename}")
+        # Aquí recuperamos la visualización de la configuración usada
+        print(f"⚙️  CONFIGURACIÓN:")
+        print(f"   • Leverage:        x{self.config['leverage']}")
+        print(f"   • Vol Factor:      {self.config['volume_factor']} (Rango)")
+        print(f"   • Strict Factor:   {self.config['strict_volume_factor']} (Breakout/Tendencia)")
+        print(f"   • TP Multiplier:   {self.config['breakout_tp_mult']}x ATR")
+        print(f"   • Trailing Stop:   Trigger {self.config['trailing_stop_trigger_atr']} / Dist {self.config['trailing_stop_distance_atr']}")
+        print(f"   • Liquidez (Sim):  {self.participation_rate*100}% del Vol. Vela")
+        print("-" * 60)
+        print(f"💰 Balance Inicial:   ${CAPITAL_INICIAL:,.2f}")
+        print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
+        print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
+        print(f"📉 Max Drawdown:      {max_dd:.2f}%")
+        print("-" * 60)
+        print(f"🎲 Win Rate:          {win_rate:.2f}%")
+        print(f"🏆 Profit Factor:     {profit_factor:.2f}")
+        print(f"⚖️ Risk/Reward:       1 : {payoff_ratio:.2f}")
+        print(f"🧠 Expectancy:        ${expectancy:.2f} por trade")
+        print("-" * 60)
+        print(f"🔢 Total Trades:      {total_legs}")
+        print(f"✅ Ganadores:         {len(winners)} (Avg: ${avg_win:.2f})")
+        print(f"❌ Perdedores:        {len(losers)}  (Avg: ${avg_loss:.2f})")
+        print(f"💧 Slippage Prom:     {avg_slippage:.4f}%")
+        print(f"💾 CSV Detallado:     {csv_filename}")
         print("=" * 60)
+        
+        # --- GRÁFICOS (Restaurados) ---
+        try:
+            output_folder = "backtest_results"
+            if not os.path.exists(output_folder):
+                os.makedirs(output_folder)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{output_folder}/bt_{self.symbol}_{self.start_date}_{timestamp}.png"
+
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
+            
+            # Curva de Equity
+            ax1.plot(pd.to_datetime(df_t['date']), df_t['balance'], label='Equity', color='#00ff00', linewidth=1)
+            ax1.set_title(f"{self.symbol} | PF: {profit_factor:.2f} | DD: {max_dd:.2f}% | Net: ${net_pnl:,.0f}")
+            ax1.set_ylabel('Capital USDT (Log)')
+            ax1.set_yscale('log')
+            ax1.grid(True, alpha=0.2)
+            ax1.legend()
+            
+            # Drawdown
+            ax2.plot(drawdown.values, color='#ff0000', linewidth=1)
+            ax2.set_title("Drawdown %")
+            ax2.fill_between(range(len(drawdown)), drawdown, 0, color='#ff0000', alpha=0.3)
+            ax2.grid(True, alpha=0.2)
+            
+            plt.tight_layout()
+            plt.savefig(filename)
+            print(f"📈 Gráfico guardado: {filename}")
+            plt.close(fig)
+        except Exception as e:
+            print(f"⚠️ No se pudo generar el gráfico: {e}")
 
 # ==========================================
 # 3. ENTRY POINT CLI
