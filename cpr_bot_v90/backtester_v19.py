@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # backtester_v19_hybrid.py
 # NIVEL: HYBRID CLI / SMART LOAD
-# USO: python backtester_v18.py --start 2022-01-01 --symbol ETHUSDT
+# USO: python backtester_v19.py --start 2022-01-01 --symbol ETHUSDT
 
 import os
 import sys
@@ -118,7 +118,7 @@ class BacktesterV19:
             "leverage": 15,
             "cpr_width_threshold": 0.2,
             "volume_factor": 1.1,
-            "strict_volume_factor": 20.0,
+            "strict_volume_factor": 5.0,
             "take_profit_levels": 3,
             "breakout_atr_sl_multiplier": 1.0,
             "breakout_tp_mult": 1.25,
