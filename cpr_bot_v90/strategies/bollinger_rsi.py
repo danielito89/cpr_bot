@@ -9,46 +9,49 @@ try:
     HAS_TALIB = True
 except:
     HAS_TALIB = False
-    print("❌ TA-Lib no está instalado. Instálalo para usar V41.")
+    print("❌ TA-Lib no está instalado. Instálalo para usar V44.")
 
 # ======================================================
-#  🔥 CONFIG V41 – BLACK MAMBA
+#  🔥 CONFIG V44 – SMART SNIPER (PATCHED)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
 # ---- Estrategia Core ----
-BB_PERIOD = 20
-BB_STD = 2.0
-KC_MULT = 1.5
-MOM_PERIOD = 20
-
-SL_ATR_MULT = 1.5
-TRAIL_ATR_MULT = 2.5
-EXIT_HOURS = 96
+SAR_ACCEL = 0.01       
+SAR_MAX = 0.1          
+EMA_TREND_PERIOD = 200 
+ATR_PERIOD = 50        
 
 # ---- Filtros ----
-MAX_TRADES_MONTH = 15
-BAD_HOURS = [3,4,5]
-MIN_CLOSE_STRENGTH = 0.35
+MIN_VOLATILITY_RATIO = 0.7  
+ENTRY_BUFFER = 1.0003       
 
-# ---- Risk ----
+# ---- Salidas ----
+SL_ATR_MULT = 1.2      
+TP_ATR_MULT = 1.8      
+EXIT_HOURS = 48        
+
+# ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
 TARGET_VOL = 0.015
 BASE_VAR = 0.02
-COMMISSION = 0.0006
+COMMISSION = 0.0004         
+SPREAD_PCT = 0.0004         
+SLIPPAGE_PCT = 0.0006       
 BASE_LATENCY = 0.0001
+
+# FIX: Cantidad Mínima y Precisión (Binance standard para ETH)
+MIN_QTY = 0.01
+QTY_PRECISION = 3 
+
 DD_LIMIT = 0.15
 DD_FACTOR = 0.5
-MAX_LEVER = 30
+MAX_LEVER = 20              
 
-# ---- Microestructura ----
-SLIPPAGE_K = 0.05
-EXIT_SLIPP_MULT = 1.0
-SPREAD_MIN_USD = 0.10
-SPREAD_FACTOR = 0.002
-
+MAX_TRADES_MONTH = 15     
+BAD_HOURS = [3,4,5]
 
 # ======================================================
 #  🧩 DATA LOADING
@@ -56,14 +59,9 @@ SPREAD_FACTOR = 0.002
 
 def load_data(symbol):
     print(f"🔍 Cargando {symbol} ...")
-
-    candidates = [
-        f"mainnet_data_{TIMEFRAME_STR}_{symbol}.csv",
-        f"{symbol}_{TIMEFRAME_STR}.csv"
-    ]
-
+    candidates = [f"mainnet_data_{TIMEFRAME_STR}_{symbol}.csv", f"{symbol}_{TIMEFRAME_STR}.csv"]
     paths = ["data", ".", "cpr_bot_v90/data"]
-
+    
     df = None
     for name in candidates:
         for p in paths:
@@ -72,340 +70,309 @@ def load_data(symbol):
                 print(f"📁 Archivo encontrado: {path}")
                 df = pd.read_csv(path)
                 break
-        if df is not None:
-            break
+        if df is not None: break
 
     if df is None:
         print("❌ No se encontró archivo.")
         return None
 
     df.columns = [c.lower() for c in df.columns]
-
-    if 'timestamp' not in df.columns:
-        if 'open_time' in df.columns:
-            df.rename(columns={'open_time': 'timestamp'}, inplace=True)
-        else:
-            print("❌ No existe timestamp.")
-            return None
-
+    col_map = {'open_time': 'timestamp', 'date': 'timestamp'}
+    df.rename(columns=col_map, inplace=True)
+    
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     if df['timestamp'].dt.tz is None:
         df['timestamp'] = df['timestamp'].dt.tz_localize("UTC")
+    else:
+        df['timestamp'] = df['timestamp'].dt.tz_convert("UTC") 
 
     df.sort_values("timestamp", inplace=True)
     df['time_diff'] = df['timestamp'].diff().dt.total_seconds()
-
-    df['volume'] = df.get('volume', 1.0)
+    if 'volume' not in df.columns: df['volume'] = 1.0
 
     df.reset_index(drop=True, inplace=True)
     return df
-
 
 # ======================================================
 #  📐 INDICADORES
 # ======================================================
 
 def calc_indicators(df):
-    print("📐 Calculando indicadores...")
+    print("📐 Calculando indicadores V44...")
 
-    if not HAS_TALIB:
-        raise Exception("TA-Lib requerido.")
+    if not HAS_TALIB: raise Exception("TA-Lib requerido.")
 
-    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
+    # 1. ATR Lento
+    df['atr_raw'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=ATR_PERIOD)
+    df['atr'] = df['atr_raw'].ewm(span=20).mean() 
+    df['atr_prev'] = df['atr'].shift(1)
 
-    # Bollinger
-    up, mid, low = talib.BBANDS(df['close'], timeperiod=BB_PERIOD,
-                                nbdevup=BB_STD, nbdevdn=BB_STD)
+    # 2. SAR Lento
+    df['sar'] = talib.SAR(df['high'], df['low'], acceleration=SAR_ACCEL, maximum=SAR_MAX)
+    df['sar_prev'] = df['sar'].shift(1)
 
-    df['bb_u'] = up
-    df['bb_l'] = low
-    df['sma20'] = mid
+    # 3. EMA Tendencia
+    df['ema_trend'] = talib.EMA(df['close'], timeperiod=EMA_TREND_PERIOD)
 
-    # Keltner
-    df['kc_u'] = mid + df['atr'] * KC_MULT
-    df['kc_l'] = mid - df['atr'] * KC_MULT
-
-    # Squeeze ON
-    df['squeeze'] = (df['bb_u'] < df['kc_u']) & (df['bb_l'] > df['kc_l'])
-
-    # TTM Hist
-    df['hl2'] = (df['high'] + df['low']) / 2
-    mom = df['hl2'] - df['hl2'].shift(MOM_PERIOD)
-    df['ttm_hist'] = mom.ewm(span=3).mean() - mom.ewm(span=20).mean()
-
-    # Volumen relativo
-    df['vol_ma'] = df['volume'].rolling(100).mean()
-    df['vol_factor'] = df['volume'] / df['vol_ma']
-    df['vol_factor'].fillna(1.0, inplace=True)
+    # 4. Volatility Ratio
+    df['range'] = df['high'] - df['low']
+    df['avg_range'] = df['range'].rolling(window=20).mean()
+    # FIX: Guard contra división por cero
+    df['avg_range'] = df['avg_range'].replace(0, np.nan) 
+    df['vr'] = df['range'] / df['avg_range']
 
     # Gap Detection
     jump = abs(df['open'] - df['close'].shift(1))
-    atr_thr = df['atr'].shift(1) * 4
+    atr_thr = df['atr'].shift(1) * 3
     gap = (df['time_diff'] > 9000) | (jump > atr_thr)
     df['gap'] = gap
-
-    df['atr_prev'] = df['atr'].shift(1)
-    df['prev_low'] = df['low'].shift(1)
+    
+    df['prev_close'] = df['close'].shift(1)
 
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
-
 # ======================================================
-#  🚀 BACKTEST ENGINE – V41
+#  🚀 BACKTEST ENGINE – V44
 # ======================================================
 
 def run_backtest(symbol):
-
     df = load_data(symbol)
-    if df is None:
-        return
-
+    if df is None: return
     df = calc_indicators(df)
 
-    print(f"🚀 Iniciando Backtest V41 para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V44 (Patched) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     peak = balance
-    equity_curve = []
+    equity_curve = [balance]
 
     # Estado
     position = None
     entry = 0
     quantity = 0
     sl = 0
-    entry_comm = 0
+    tp = 0
     entry_time = None
-
-    month = -1
-    trades_month = 0
-    cooldown = 0
-    trigger = False
-
+    
+    # FIX: Variable persistente para comisión de entrada
+    position_comm_paid = 0.0 
+    
+    month = -1; trades_month = 0; cooldown = 0
+    
     trades = []
 
     for i in range(len(df)):
         row = df.iloc[i]
+        
+        trade_active_this_candle = False
 
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
         atr = row.atr
         atr_prev = row.atr_prev
+        sar = row.sar
+        sar_prev = row.sar_prev
+        
+        # Costos Fijos
+        total_friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
 
-        # ---------------------------
-        #  COSTOS
-        # ---------------------------
-
-        rel_vol = atr / c
-        slippage_pct = SLIPPAGE_K * rel_vol
-        spread_pct = max(SPREAD_MIN_USD, atr * SPREAD_FACTOR) / c
-        latency = BASE_LATENCY + rel_vol * 0.1
-        total_cost = slippage_pct + spread_pct + latency
-
-        # ---------------------------
-        #  GESTIÓN MENSUAL
-        # ---------------------------
-
+        # Gestión Mensual & Cooldown
         if ts.month != month:
             month = ts.month
             trades_month = 0
 
-        if row.gap:
-            cooldown = 24
-            trigger = False
-
-        if cooldown > 0:
-            cooldown -= 1
+        if row.gap: cooldown = 24
+        if cooldown > 0: cooldown -= 1
 
         # ============================================================
-        # 1) EJECUCIÓN DE ENTRADA (si trigger estuvo activado)
+        # 1) BÚSQUEDA DE ENTRADA
         # ============================================================
-        if trigger and position is None:
+        if position is None and cooldown == 0:
             if trades_month < MAX_TRADES_MONTH and ts.hour not in BAD_HOURS:
-                entry_price = o * (1 + total_cost)
+                
+                # Filtros
+                trend_ok = c > row.ema_trend
+                vol_ok = row.vr > MIN_VOLATILITY_RATIO
+                
+                if trend_ok and vol_ok:
+                    
+                    sar_was_bearish = sar_prev > row.prev_close 
+                    price_breaks_sar = h > sar_prev
+                    
+                    if sar_was_bearish and price_breaks_sar:
+                        
+                        # Trigger
+                        trigger_price = sar_prev * ENTRY_BUFFER
+                        entry_price = max(o, trigger_price)
+                        entry_price = entry_price * (1 + total_friction)
+                        
+                        # SL / TP
+                        sl_dist = atr_prev * SL_ATR_MULT
+                        tp_dist = atr_prev * TP_ATR_MULT
+                        sl_price = entry_price - sl_dist
+                        tp_price = entry_price + tp_dist
+                        
+                        risk_dist = entry_price - sl_price
 
-                sl_price = entry_price - atr_prev * SL_ATR_MULT
-                risk_dist = entry_price - sl_price
+                        if risk_dist > 0:
+                            # FIX: Safety Math para división por precio
+                            safe_c = c if c > 0 else 1e-6
+                            vol_smooth = atr_prev / safe_c
+                            
+                            var_factor = min(1.0, TARGET_VOL / max(vol_smooth, 1e-6))
+                            dd = (peak - balance) / peak
+                            dd_adj = DD_FACTOR if dd > DD_LIMIT else 1.0
+                            
+                            final_risk_pct = BASE_VAR * var_factor * dd_adj
+                            risk_usd = peak * final_risk_pct
 
-                if risk_dist > 0:
+                            max_contracts = (balance * MAX_LEVER) / entry_price
+                            qty = min(risk_usd / risk_dist, max_contracts)
+                            
+                            # FIX: Cantidad mínima y redondeo
+                            if qty < MIN_QTY:
+                                qty = 0 # No trade si no alcanza el mínimo
+                            else:
+                                qty = round(qty, QTY_PRECISION)
 
-                    vol_smooth = df.at[i, 'atr_prev'] / c
-                    var_factor = min(1.0, TARGET_VOL / vol_smooth)
+                            if qty > 0:
+                                entry_comm = qty * entry_price * COMMISSION
+                                balance -= entry_comm
 
-                    dd = (peak - balance) / peak
-                    dd_adj = DD_FACTOR if dd > DD_LIMIT else 1.0
+                                position = "long"
+                                entry = entry_price
+                                sl = sl_price
+                                tp = tp_price
+                                quantity = qty
+                                entry_time = ts
+                                
+                                # FIX: Persistir la comisión
+                                position_comm_paid = entry_comm
+                                
+                                trades_month += 1
+                                trade_active_this_candle = True
 
-                    final_risk_pct = BASE_VAR * var_factor * dd_adj
-                    risk_usd = balance * final_risk_pct
-
-                    max_contracts = (balance * MAX_LEVER) / entry_price
-                    qty = min(risk_usd / risk_dist, max_contracts)
-
-                    entry_comm = qty * entry_price * COMMISSION
-                    balance -= entry_comm
-
-                    position = "long"
-                    entry = entry_price
-                    sl = sl_price
-                    quantity = qty
-                    entry_time = ts
-                    trades_month += 1
-
-                    # Intra-candle SL
-                    if l <= sl:
-                        exit_price = sl * (1 - slippage_pct)
-                        pnl = (exit_price - entry) * qty
-                        fee = exit_price * qty * COMMISSION
-                        balance += pnl - fee
-
-                        trades.append({
-                            "year": ts.year,
-                            "month": ts.month,
-                            "pnl": pnl - entry_comm - fee,
-                            "type": "SL Intra"
-                        })
-
-                        position = None
-                        entry_comm = 0
-
-            trigger = False
+                                # INTRA-CANDLE CHECK
+                                if l <= sl:
+                                    exit_price = sl * (1 - SLIPPAGE_PCT)
+                                    pnl = (exit_price - entry) * qty
+                                    fee = exit_price * qty * COMMISSION
+                                    
+                                    balance += (pnl - fee)
+                                    
+                                    # FIX: Usar variable persistida
+                                    net_pnl = pnl - position_comm_paid - fee
+                                    
+                                    trades.append({
+                                        "year": ts.year, "month": ts.month,
+                                        "pnl": net_pnl, "type": "SL Intra"
+                                    })
+                                    position = None
+                                    position_comm_paid = 0.0 # Reset
+                                
+                                elif h >= tp: 
+                                    exit_price = tp * (1 - SLIPPAGE_PCT)
+                                    pnl = (exit_price - entry) * qty
+                                    fee = exit_price * qty * COMMISSION
+                                    
+                                    balance += (pnl - fee)
+                                    if balance > peak: peak = balance
+                                    
+                                    net_pnl = pnl - position_comm_paid - fee
+                                    
+                                    trades.append({
+                                        "year": ts.year, "month": ts.month,
+                                        "pnl": net_pnl, "type": "TP Intra"
+                                    })
+                                    position = None
+                                    position_comm_paid = 0.0 # Reset
 
         # ============================================================
         # 2) GESTIÓN DE POSICIÓN ABIERTA
         # ============================================================
-        if position == "long":
-
-            # Trailing
-            new_sl = min(h, c) - atr * TRAIL_ATR_MULT
-            if new_sl > sl:
-                sl = new_sl
-
-            # SL hit
+        if position == "long" and not trade_active_this_candle:
+            
             exit_price = None
             reason = None
 
+            # SL Check
             if l <= sl:
-                exit_raw = o if o < sl else sl
-                exit_price = exit_raw * (1 - slippage_pct)
+                exit_raw = o if o < sl else sl 
+                exit_price = exit_raw * (1 - SLIPPAGE_PCT)
                 reason = "SL Trail"
 
-            # Time exit
+            # TP Check (Faltaba en V43 fuera de intra-candle)
+            elif h >= tp:
+                exit_raw = o if o > tp else tp # Gap up favor
+                exit_price = exit_raw * (1 - SLIPPAGE_PCT)
+                reason = "TP Target"
+
+            # Time Exit
             elif (ts - entry_time).total_seconds() >= EXIT_HOURS * 3600:
-                exit_price = c * (1 - slippage_pct)
+                exit_price = c * (1 - SLIPPAGE_PCT)
                 reason = "Time"
 
             if exit_price:
                 pnl = (exit_price - entry) * quantity
                 exit_comm = exit_price * quantity * COMMISSION
-                balance += pnl - exit_comm
-
-                net = pnl - entry_comm - exit_comm
+                
+                balance += (pnl - exit_comm)
+                if balance > peak: peak = balance
+                
+                # FIX: Usar variable persistida
+                net = pnl - position_comm_paid - exit_comm
 
                 trades.append({
-                    "year": entry_time.year,
-                    "month": entry_time.month,
-                    "pnl": net,
-                    "type": reason
+                    "year": entry_time.year, "month": entry_time.month,
+                    "pnl": net, "type": reason
                 })
-
-                entry_comm = 0
+                
                 position = None
+                position_comm_paid = 0.0 # Reset
+                trade_active_this_candle = True
 
         # ============================================================
-        # 3) BÚSQUEDA DE ENTRADAS NUEVAS
+        # 3) EQUITY UPDATE
         # ============================================================
+        if not trade_active_this_candle:
+            curr_eq = balance
+            if position == "long":
+                unrealized = (c - entry) * quantity
+                curr_eq += unrealized
+            equity_curve.append(curr_eq)
+        else:
+            equity_curve.append(balance)
 
-        if position is None and cooldown == 0:
-
-            if trades_month < MAX_TRADES_MONTH and ts.hour not in BAD_HOURS:
-
-                squeeze_now = row.squeeze
-                squeeze_prev = df.at[i-1, 'squeeze'] if i > 0 else False
-                squeeze_ok = squeeze_now or squeeze_prev
-
-                trig_level = row.bb_u
-                breakout = (o < trig_level) and (h >= trig_level)
-
-                hist = row.ttm_hist
-                prev_hist = df.at[i-1, 'ttm_hist'] if i > 0 else 0
-                bull_mom = hist > 0 and hist > prev_hist
-
-                if squeeze_ok and breakout and bull_mom:
-
-                    rng = h - l
-                    if rng > 0:
-                        close_strength = (c - l) / rng
-                    else:
-                        close_strength = 0
-
-                    reject = close_strength < MIN_CLOSE_STRENGTH
-                    fake_gap = o < row.prev_low
-
-                    if not reject and not fake_gap:
-                        trigger = True
-
-        # ============================================================
-        # 4) EQUITY MARK-TO-MARKET
-        # ============================================================
-
-        eq = balance
-        if position == "long":
-            eq += (c - entry) * quantity
-
-        equity_curve.append(eq)
-        peak = max(peak, eq)
-
-    # ======================================================
-    #  REPORT
-    # ======================================================
-
+    # REPORT
     eq_series = pd.Series(equity_curve)
-    
-    # Prevenir error si equity_curve está vacía (raro, pero posible si data falla)
     if len(eq_series) > 0:
-        peak_series = eq_series.cummax()
-        dd = (eq_series - peak_series) / peak_series
+        dd = (eq_series - eq_series.cummax()) / eq_series.cummax()
         max_dd = dd.min() * 100
-    else:
-        max_dd = 0.0
+    else: max_dd = 0
 
     total_return = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
-
     trades_df = pd.DataFrame(trades)
 
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS FINALES V41 – BLACK MAMBA: {symbol}")
+    print(f"📊 RESULTADOS FINALES V44 – SMART SNIPER (PATCHED): {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
     print(f"📈 Retorno Total:   {total_return:.2f}%")
     print(f"📉 Max DD:          {max_dd:.2f}%\n")
 
     if not trades_df.empty:
-        # Corrección del typo .pn -> .pnl
-        win = (trades_df['pnl'] > 0).mean() * 100
+        win = (trades_df.pnl > 0).mean() * 100
         print(f"🏆 Win Rate:        {win:.2f}%")
         print(f"🧮 Total Trades:    {len(trades_df)}\n")
-        
-        print("📅 RENDIMIENTO POR AÑO:")
-        # Agrupación segura
         try:
+            print("📅 RENDIMIENTO POR AÑO:")
             print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
-        except Exception as e:
-            print(f"Error en reporte anual: {e}")
-            
+        except: pass
         print("="*55)
-        
-        # Guardar CSV para análisis post-mortem
-        trades_df.to_csv(f"logs_v41_{symbol}.csv", index=False)
-        print(f"💾 Logs guardados en logs_v41_{symbol}.csv")
-        
     else:
-        print("⚠️ No hubo trades. Revisa filtros o datos.")
-
-# ======================================================
-# RUN
-# ======================================================
+        print("⚠️ No hubo trades.")
 
 if __name__ == "__main__":
     run_backtest(SYMBOL)
