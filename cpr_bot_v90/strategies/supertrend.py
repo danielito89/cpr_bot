@@ -5,15 +5,15 @@ import os
 import talib
 
 # ======================================================
-#  🔥 CONFIG V61 – HYBRID HYDRA (COMBINED STRATEGY)
+#  🔥 CONFIG V62 – HYBRID HYDRA (REFINED)
 # ======================================================
 
-SYMBOL = "ETHUSDT" # <--- CAMBIA ESTO PARA PROBAR OTROS PARES
+SYMBOL = "ETHUSDT" 
 TIMEFRAME_STR = "1h"
 
 # ---- Asignación de Capital ----
-CAPITAL_ALLOCATION_A = 0.5  # 50% para Golden (Long Only)
-CAPITAL_ALLOCATION_B = 0.5  # 50% para Silver (Long & Short)
+CAPITAL_ALLOCATION_A = 0.5  # 50% Golden (Long Only)
+CAPITAL_ALLOCATION_B = 0.5  # 50% Silver (Long & Short)
 
 # ---- Estrategia A: GOLDEN CROSS (Long Only) ----
 EMA_A_FAST = 50
@@ -27,14 +27,16 @@ SL_ATR_B = 2.5
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.05   # Riesgo por trade (aplicado a la sub-cuenta asignada)
+FIXED_RISK_PCT = 0.05   
 MAX_LEVER = 5           
 
 COMMISSION = 0.0004         
 SPREAD_PCT = 0.0004         
 SLIPPAGE_PCT = 0.0006       
 BASE_LATENCY = 0.0001
-MIN_QTY = 0.01
+
+MIN_QTY = 0.01          # (Fix 5)
+QTY_PRECISION = 3       # (Fix 5)
 
 # ======================================================
 #  1. CARGA Y RESAMPLING
@@ -67,43 +69,46 @@ def load_and_resample(symbol):
     df.sort_values("timestamp", inplace=True)
     df.set_index('timestamp', inplace=True)
 
+    # (Fix 1: Asegurar Volumen antes de Resample)
+    if 'volume' not in df.columns:
+        df['volume'] = 1.0
+
     # --- RESAMPLING A 4H ---
     print("🔄 Resampleando a 4H...")
+    # (Fix 11: Usar agg en vez de apply con dict es más limpio)
     ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}
-    df_4h = df.resample('4h').apply(ohlc_dict).dropna()
+    df_4h = df.resample('4h').agg(ohlc_dict).dropna()
     
     # --- INDICADORES ---
-    # Para Estrategia A
+    # Estrategia A
     df_4h['ema_50'] = talib.EMA(df_4h['close'], timeperiod=EMA_A_FAST)
     df_4h['ema_200'] = talib.EMA(df_4h['close'], timeperiod=EMA_A_SLOW)
     
-    # Para Estrategia B
+    # Estrategia B
     df_4h['ema_21'] = talib.EMA(df_4h['close'], timeperiod=EMA_B_FAST)
     df_4h['ema_55'] = talib.EMA(df_4h['close'], timeperiod=EMA_B_SLOW)
     
     df_4h['atr'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
     
     # --- SEÑALES (A) ---
-    # 1 = Bull, -1 = Bear
     df_4h['trend_a'] = np.where(df_4h['ema_50'] > df_4h['ema_200'], 1, -1)
     df_4h['prev_trend_a'] = df_4h['trend_a'].shift(1)
-    # Solo compramos cruce alcista, vendemos cruce bajista (pero no shorteamos)
     df_4h['sig_a'] = np.where((df_4h['trend_a']==1) & (df_4h['prev_trend_a']==-1), 1, 
                               np.where((df_4h['trend_a']==-1) & (df_4h['prev_trend_a']==1), -1, 0))
 
     # --- SEÑALES (B) ---
     df_4h['trend_b'] = np.where(df_4h['ema_21'] > df_4h['ema_55'], 1, -1)
     df_4h['prev_trend_b'] = df_4h['trend_b'].shift(1)
-    # Aquí operamos ambos lados: 1 = Go Long, -1 = Go Short
     df_4h['sig_b'] = np.where((df_4h['trend_b']==1) & (df_4h['prev_trend_b']==-1), 1, 
                               np.where((df_4h['trend_b']==-1) & (df_4h['prev_trend_b']==1), -1, 0))
 
-    # SHIFT(1) Anti-Lookahead
-    df_4h_shifted = df_4h.shift(1)
+    # (Fix 2: Renombrar explícito antes del Join)
+    df_4h_shifted = df_4h.shift(1)[['atr', 'sig_a', 'sig_b']].rename(
+        columns={'atr': 'atr_4h', 'sig_a': 'sig_a_4h', 'sig_b': 'sig_b_4h'}
+    )
 
     print("🔄 Sincronizando con 1H...")
-    cols = ['atr', 'sig_a', 'sig_b']
-    df_1h = df.join(df_4h_shifted[cols], rsuffix='_4h')
+    df_1h = df.join(df_4h_shifted)
     df_1h.ffill(inplace=True)
     df_1h.dropna(inplace=True)
     df_1h.reset_index(inplace=True)
@@ -111,27 +116,29 @@ def load_and_resample(symbol):
     return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE V61 (HYBRID)
+#  🚀 BACKTEST ENGINE V62 (REFINED)
 # ======================================================
 
 def run_backtest(symbol):
     df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V61 (Hybrid Hydra) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V62 (Hybrid Hydra Refined) para {symbol}\n")
 
-    # Inicializamos dos "sub-cuentas" virtuales
+    # Sub-cuentas virtuales
     bal_a = INITIAL_BALANCE * CAPITAL_ALLOCATION_A
     bal_b = INITIAL_BALANCE * CAPITAL_ALLOCATION_B
     
     peak_a = bal_a
     peak_b = bal_b
     
-    # Estado Estrategia A (Golden - Long Only)
-    pos_a = None; entry_a = 0; qty_a = 0; sl_a = 0
+    # Estado A (Golden) - (Fix 4: Agregada persistencia de comision)
+    pos_a = None; entry_a = 0; qty_a = 0; sl_a = 0; entry_time_a = None
+    comm_a_paid = 0.0 
     
-    # Estado Estrategia B (Silver - Long/Short)
-    pos_b = None; entry_b = 0; qty_b = 0; sl_b = 0
+    # Estado B (Silver)
+    pos_b = None; entry_b = 0; qty_b = 0; sl_b = 0; entry_time_b = None
+    comm_b_paid = 0.0
     
     equity_curve = []
     trades = []
@@ -140,90 +147,140 @@ def run_backtest(symbol):
         row = df.iloc[i]
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
-        atr = row.atr
         
-        # Señales (-1, 0, 1)
-        sig_a = row.sig_a
-        sig_b = row.sig_b
+        # (Fix 2: Usar nombres explícitos de 4H)
+        atr = row.atr_4h
+        sig_a = row.sig_a_4h
+        sig_b = row.sig_b_4h
         
         friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
 
-        # =========================================================
+        # ---------------------------------------------------------
         #  ESTRATEGIA A: GOLDEN CROSS (LONG ONLY)
-        # =========================================================
-        # Salida
+        # ---------------------------------------------------------
         exit_p_a = None
+        reason_a = None
+        
+        # 1. GESTIÓN SALIDA A
         if pos_a == 'long':
-            # Death Cross o SL
-            if sig_a == -1: exit_p_a = o * (1 - SLIPPAGE_PCT); reason = "Death Cross (A)"
-            elif l <= sl_a: exit_p_a = sl_a * (1 - SLIPPAGE_PCT); reason = "SL (A)"
+            if sig_a == -1: 
+                exit_p_a = o * (1 - SLIPPAGE_PCT)
+                reason_a = "Death Cross (A)"
+            elif l <= sl_a: 
+                exit_raw = o if o < sl_a else sl_a # Gap protect
+                exit_p_a = exit_raw * (1 - SLIPPAGE_PCT)
+                reason_a = "SL (A)"
             
             if exit_p_a:
                 pnl = (exit_p_a - entry_a) * qty_a
                 comm = exit_p_a * qty_a * COMMISSION
                 bal_a += (pnl - comm)
                 if bal_a > peak_a: peak_a = bal_a
-                trades.append({'year': ts.year, 'pnl': pnl-comm, 'strat': 'A', 'type': reason})
+                
+                # (Fix 4 & 8: Reporte limpio)
+                net = pnl - comm_a_paid - comm
+                trades.append({
+                    'year': ts.year, 'strat': 'A', 'type': reason_a, 
+                    'entry_price': entry_a, 'exit_price': exit_p_a,
+                    'qty': qty_a, 'pnl': net
+                })
                 pos_a = None
+                comm_a_paid = 0.0
 
-        # Entrada
+        # 2. ENTRADA A
         if pos_a is None and sig_a == 1:
             real_entry = o * (1 + friction)
-            sl_price = real_entry - (atr * SL_ATR_A)
-            dist = real_entry - sl_price
-            if dist > 0:
-                risk_usd = peak_a * FIXED_RISK_PCT
-                qty = min(risk_usd/dist, (bal_a * MAX_LEVER)/real_entry)
-                if qty >= MIN_QTY:
-                    cost = qty * real_entry * COMMISSION
-                    bal_a -= cost
-                    pos_a = 'long'; entry_a = real_entry; qty_a = qty; sl_a = sl_price
-                    # Check intra-candle
-                    if l <= sl_a:
-                        pnl = (sl_a*(1-SLIPPAGE_PCT) - real_entry)*qty
-                        bal_a += pnl
-                        trades.append({'year': ts.year, 'pnl': pnl-cost, 'strat': 'A', 'type': 'SL Intra'})
-                        pos_a = None
-
-        # =========================================================
-        #  ESTRATEGIA B: SILVER BULLET (LONG & SHORT)
-        # =========================================================
-        # Salida / Reversal
-        exit_p_b = None
-        
-        if pos_b == 'long':
-            # Reverse signal (-1) o SL
-            if sig_b == -1: exit_p_b = o * (1 - SLIPPAGE_PCT); reason = "Flip Short (B)"
-            elif l <= sl_b: exit_p_b = sl_b * (1 - SLIPPAGE_PCT); reason = "SL Long (B)"
             
+            # (Fix 6: Check division)
+            if atr > 0:
+                sl_price = real_entry - (atr * SL_ATR_A)
+                dist = real_entry - sl_price
+                
+                if dist > 0:
+                    risk_usd = peak_a * FIXED_RISK_PCT
+                    raw_qty = min(risk_usd/dist, (bal_a * MAX_LEVER)/real_entry)
+                    
+                    # (Fix 5: Rounding & Min Qty)
+                    qty = np.floor(raw_qty * (10**QTY_PRECISION)) / (10**QTY_PRECISION)
+                    
+                    if qty >= MIN_QTY:
+                        cost = qty * real_entry * COMMISSION
+                        bal_a -= cost
+                        
+                        pos_a = 'long'; entry_a = real_entry; qty_a = qty
+                        sl_a = sl_price; entry_time_a = ts; comm_a_paid = cost
+                        
+                        # Intra-candle check
+                        if l <= sl_a:
+                            pnl = (sl_a*(1-SLIPPAGE_PCT) - real_entry)*qty
+                            # comm exit no pagada aun, se paga aqui
+                            comm_exit = sl_a * qty * COMMISSION 
+                            bal_a += (pnl - comm_exit)
+                            
+                            net = pnl - comm_a_paid - comm_exit
+                            trades.append({
+                                'year': ts.year, 'strat': 'A', 'type': 'SL Intra',
+                                'pnl': net, 'qty': qty
+                            })
+                            pos_a = None
+                            comm_a_paid = 0.0
+
+        # ---------------------------------------------------------
+        #  ESTRATEGIA B: SILVER BULLET (LONG & SHORT)
+        # ---------------------------------------------------------
+        exit_p_b = None
+        reason_b = None
+        
+        # 1. GESTIÓN SALIDA B
+        if pos_b == 'long':
+            if sig_b == -1: 
+                exit_p_b = o * (1 - SLIPPAGE_PCT); reason_b = "Flip Short (B)"
+            elif l <= sl_b: 
+                exit_raw = o if o < sl_b else sl_b
+                exit_p_b = exit_raw * (1 - SLIPPAGE_PCT); reason_b = "SL Long (B)"
+                
             if exit_p_b:
                 pnl = (exit_p_b - entry_b) * qty_b
                 comm = exit_p_b * qty_b * COMMISSION
                 bal_b += (pnl - comm)
                 if bal_b > peak_b: peak_b = bal_b
-                trades.append({'year': ts.year, 'pnl': pnl-comm, 'strat': 'B', 'type': reason})
-                pos_b = None # (Se abrirá short abajo si era flip)
+                
+                net = pnl - comm_b_paid - comm
+                trades.append({
+                    'year': ts.year, 'strat': 'B', 'type': reason_b,
+                    'pnl': net, 'qty': qty_b
+                })
+                pos_b = None # Se re-evalúa entrada abajo
+                comm_b_paid = 0.0
 
         elif pos_b == 'short':
-            # Reverse signal (1) o SL
-            if sig_b == 1: exit_p_b = o * (1 + SLIPPAGE_PCT); reason = "Flip Long (B)"
-            elif h >= sl_b: exit_p_b = sl_b * (1 + SLIPPAGE_PCT); reason = "SL Short (B)"
+            if sig_b == 1: 
+                exit_p_b = o * (1 + SLIPPAGE_PCT); reason_b = "Flip Long (B)"
+            elif h >= sl_b: 
+                exit_raw = o if o > sl_b else sl_b
+                exit_p_b = exit_raw * (1 + SLIPPAGE_PCT); reason_b = "SL Short (B)"
             
             if exit_p_b:
                 pnl = (entry_b - exit_p_b) * qty_b
                 comm = exit_p_b * qty_b * COMMISSION
                 bal_b += (pnl - comm)
                 if bal_b > peak_b: peak_b = bal_b
-                trades.append({'year': ts.year, 'pnl': pnl-comm, 'strat': 'B', 'type': reason})
+                
+                net = pnl - comm_b_paid - comm
+                trades.append({
+                    'year': ts.year, 'strat': 'B', 'type': reason_b,
+                    'pnl': net, 'qty': qty_b
+                })
                 pos_b = None
+                comm_b_paid = 0.0
 
-        # Entrada (Si no hay pos o acabamos de cerrar)
+        # 2. ENTRADA B (Si flat)
         if pos_b is None:
             new_side = None
             if sig_b == 1: new_side = 'long'
             elif sig_b == -1: new_side = 'short'
             
-            if new_side:
+            if new_side and atr > 0:
                 if new_side == 'long':
                     real_entry = o * (1 + friction)
                     sl_price = real_entry - (atr * SL_ATR_B)
@@ -234,12 +291,17 @@ def run_backtest(symbol):
                 dist = abs(real_entry - sl_price)
                 if dist > 0:
                     risk_usd = peak_b * FIXED_RISK_PCT
-                    qty = min(risk_usd/dist, (bal_b * MAX_LEVER)/real_entry)
+                    raw_qty = min(risk_usd/dist, (bal_b * MAX_LEVER)/real_entry)
+                    
+                    # (Fix 5: Rounding)
+                    qty = np.floor(raw_qty * (10**QTY_PRECISION)) / (10**QTY_PRECISION)
                     
                     if qty >= MIN_QTY:
                         cost = qty * real_entry * COMMISSION
                         bal_b -= cost
-                        pos_b = new_side; entry_b = real_entry; qty_b = qty; sl_b = sl_price
+                        
+                        pos_b = new_side; entry_b = real_entry; qty_b = qty
+                        sl_b = sl_price; comm_b_paid = cost
                         
                         # Intra-candle
                         crash = False
@@ -247,17 +309,26 @@ def run_backtest(symbol):
                         if new_side == 'short' and h >= sl_b: crash = True
                         
                         if crash:
-                            loss_p = sl_b * (1 - SLIPPAGE_PCT) if new_side=='long' else sl_b * (1 + SLIPPAGE_PCT)
-                            pnl = (loss_p - entry_b)*qty if new_side=='long' else (entry_b - loss_p)*qty
-                            bal_b += pnl
-                            trades.append({'year': ts.year, 'pnl': pnl-cost, 'strat': 'B', 'type': 'SL Intra'})
+                            exit_p = sl_b * (1 - SLIPPAGE_PCT) if new_side=='long' else sl_b * (1 + SLIPPAGE_PCT)
+                            pnl = (exit_p - entry_b)*qty if new_side=='long' else (entry_b - exit_p)*qty
+                            
+                            comm_exit = exit_p * qty * COMMISSION
+                            bal_b += (pnl - comm_exit)
+                            
+                            net = pnl - comm_b_paid - comm_exit
+                            trades.append({
+                                'year': ts.year, 'strat': 'B', 'type': 'SL Intra',
+                                'pnl': net, 'qty': qty
+                            })
                             pos_b = None
+                            comm_b_paid = 0.0
 
         # =========================================================
-        #  EQUITY TOTAL
+        #  EQUITY TOTAL MARK-TO-MARKET
         # =========================================================
         eq_a = bal_a
-        if pos_a == 'long': eq_a += (c - entry_a) * qty_a
+        if pos_a == 'long': 
+            eq_a += (c - entry_a) * qty_a
         
         eq_b = bal_b
         if pos_b == 'long': eq_b += (c - entry_b) * qty_b
@@ -272,7 +343,7 @@ def run_backtest(symbol):
     trades_df = pd.DataFrame(trades)
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V61 – HYBRID HYDRA (A+B): {symbol}")
+    print(f"📊 RESULTADOS V62 – HYBRID HYDRA (REFINED): {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${total_bal:.2f}")
     print(f"📈 Retorno Total:   {total_ret:.2f}%")
@@ -291,6 +362,8 @@ def run_backtest(symbol):
         print("\n🔎 DESGLOSE POR ESTRATEGIA:")
         print(trades_df.groupby("strat")["pnl"].agg(["sum","count", "mean"]))
         print("="*55)
+        
+        trades_df.to_csv(f"log_v62_{symbol}.csv", index=False)
     else:
         print("⚠️ No hubo trades.")
 
