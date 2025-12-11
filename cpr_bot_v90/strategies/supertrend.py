@@ -5,28 +5,23 @@ import os
 import talib
 
 # ======================================================
-#  🔥 CONFIG V51 – TREND SURFER (4H PULLBACKS)
+#  🔥 CONFIG V52 – TREND SURFER (REALITY CHECK)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
 # ---- Estrategia: SWING EN 4H ----
-# Tendencia Macro
 FAST_EMA = 50
 SLOW_EMA = 200
-# Gatillo de Pullback (EMA más rápida para detectar el dip)
 TRIGGER_EMA = 20        
 
 # ---- Salidas ----
-# Stop Loss Inicial (Debajo del swing)
 SL_ATR_MULT = 2.0       
-# Trailing Stop: Si cierra bajo la EMA 50 (Soporte dinámico)
 TRAILING_EMA_EXIT = True
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-# Arriesgamos un poco menos por trade porque haremos más operaciones
 FIXED_RISK_PCT = 0.03   
 MAX_LEVER = 10          
 
@@ -37,7 +32,7 @@ BASE_LATENCY = 0.0001
 MIN_QTY = 0.01
 
 # ======================================================
-#  1. CARGA Y RESAMPLING (4H)
+#  1. CARGA Y RESAMPLING (CORREGIDO)
 # ======================================================
 
 def load_and_resample(symbol):
@@ -73,47 +68,50 @@ def load_and_resample(symbol):
     df_4h = df.resample('4h').apply(ohlc_dict).dropna()
     
     # INDICADORES EN 4H
-    # Tendencia
     df_4h['ema_50'] = talib.EMA(df_4h['close'], timeperiod=FAST_EMA)
     df_4h['ema_200'] = talib.EMA(df_4h['close'], timeperiod=SLOW_EMA)
-    # Pullback zone
     df_4h['ema_20'] = talib.EMA(df_4h['close'], timeperiod=TRIGGER_EMA)
-    
     df_4h['atr'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
     
-    # LÓGICA DE SEÑAL (PULLBACK)
-    # 1. Tendencia Alcista: EMA 50 > EMA 200
-    # 2. Pullback: El precio (Low) tocó la EMA 20
-    # 3. Confirmación: La vela cerró verde (Close > Open) demostrando rechazo
-    
+    # SEÑALES (Calculadas sobre la vela CERRADA)
     trend_up = df_4h['ema_50'] > df_4h['ema_200']
     dip_touch = df_4h['low'] <= df_4h['ema_20']
     green_candle = df_4h['close'] > df_4h['open']
     
-    # Señal de Compra
     df_4h['signal_buy'] = np.where(trend_up & dip_touch & green_candle, 1, 0)
-    
-    # Señal de Salida por Tendencia (Cierre bajo EMA 50)
     df_4h['trend_broken'] = df_4h['close'] < df_4h['ema_50']
 
+    # --- FIX CRÍTICO: SHIFT(1) ---
+    # Movemos los datos de 4H un periodo hacia adelante.
+    # Así, a las 12:00 (1H), veremos los indicadores de la vela 4H que cerró a las 12:00
+    # (que en realidad se etiqueta a las 08:00).
+    # Pandas resample etiqueta al INICIO (Left).
+    # Vela 08:00 contiene datos hasta 12:00.
+    # Al hacer shift(1), la fila de las 12:00 tendrá los datos de la vela 08:00-12:00.
+    # ¡Ahora no vemos el futuro!
+    print("🛡️ Aplicando SHIFT(1) para evitar Lookahead Bias...")
+    df_4h_shifted = df_4h.shift(1)
+
     # Mapeo a 1H
-    print("🔄 Sincronizando señales con timeframe operativo (1H)...")
-    df_1h = df.join(df_4h[['ema_50', 'ema_200', 'atr', 'signal_buy', 'trend_broken']], rsuffix='_4h')
-    df_1h.fillna(method='ffill', inplace=True)
+    print("🔄 Sincronizando...")
+    df_1h = df.join(df_4h_shifted[['ema_50', 'ema_200', 'atr', 'signal_buy', 'trend_broken']], rsuffix='_4h')
+    
+    # Usamos ffill() método nuevo compatible
+    df_1h.ffill(inplace=True)
     df_1h.dropna(inplace=True)
     df_1h.reset_index(inplace=True)
     
     return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE V51
+#  🚀 BACKTEST ENGINE V52
 # ======================================================
 
 def run_backtest(symbol):
     df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V51 (4H Trend Surfer) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V52 (Real Trend Surfer) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     equity_curve = [balance]
@@ -125,16 +123,13 @@ def run_backtest(symbol):
     
     trades = []
     
-    # Control para no entrar en la misma señal 4 veces (ya que 1 vela 4H son 4 de 1H)
-    last_signal_time = None 
-
     for i in range(len(df)):
         row = df.iloc[i]
         
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
         
-        # Datos de 4H proyectados
+        # Datos de 4H (Ya vienen retrasados correctamente)
         atr_4h = row.atr
         signal_buy = row.signal_buy == 1
         trend_broken = row.trend_broken
@@ -145,27 +140,13 @@ def run_backtest(symbol):
         # ----------------------------------------------------
         # 1. ENTRADA (BUY THE DIP)
         # ----------------------------------------------------
-        # Verificamos si es una señal nueva (ha pasado al menos 4 horas desde la anterior usada)
-        # O simplemente si no tenemos posición.
-        
         if position is None and signal_buy:
-            
-            # Evitar re-entrar en la misma vela de 4H repetidamente
-            # Usamos una lógica simple: Si signal_buy está activa, entramos.
-            # Como signal_buy viene de una vela 4H CERRADA, es una señal estable por 4 horas.
-            # Tomamos la primera oportunidad.
             
             entry_price = o * (1 + friction)
             
-            # SL Técnico: Debajo de la EMA 50 (Soporte Estructural) o ATR
-            # Usamos EMA 50 - un margen, porque si rompe la 50, la tesis de "surf" se rompe
+            # SL Técnico
             technical_sl = ema_50_4h - (atr_4h * 0.5) 
-            
-            # SL de Volatilidad (Respaldo)
             atr_sl = entry_price - (atr_4h * SL_ATR_MULT)
-            
-            # Usamos el más lejano para dar espacio? No, el más lógico.
-            # Si estamos surfeando sobre la 20/50, romper la 50 es malo.
             sl_price = min(technical_sl, atr_sl)
             
             risk_dist = entry_price - sl_price
@@ -202,7 +183,6 @@ def run_backtest(symbol):
             reason = None
             
             # A) Salida Técnica: Cierre de 4H bajo la EMA 50
-            # trend_broken es True si Close_4H < EMA_50_4H
             if trend_broken:
                 exit_p = o * (1 - SLIPPAGE_PCT)
                 reason = "Trend Break (EMA 50)"
@@ -228,7 +208,7 @@ def run_backtest(symbol):
     total_ret = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V51 – TREND SURFER (4H): {symbol}")
+    print(f"📊 RESULTADOS V52 – TREND SURFER (REALITY CHECK): {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
     print(f"📈 Retorno Total:   {total_ret:.2f}%")
@@ -241,7 +221,7 @@ def run_backtest(symbol):
     if not trades_df.empty:
         win = (trades_df.pnl > 0).mean() * 100
         print(f"🏆 Win Rate:        {win:.2f}%")
-        print(f"🧮 Total Trades:    {len(trades_df)}")
+        print(f"🧮 Total Trades:    {len(trades_df)}\n")
         print("\n📅 Rendimiento Anual:")
         print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
     else:
