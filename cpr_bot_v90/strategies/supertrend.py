@@ -5,42 +5,41 @@ import os
 import talib
 
 # ======================================================
-#  🔥 CONFIG V63 – HYDRA POLISHED
+#  🔥 CONFIG V64 – IRONCLAD HYDRA
 # ======================================================
 
 SYMBOL = "ETHUSDT" 
 TIMEFRAME_STR = "1h"
 
 # ---- Asignación ----
-CAPITAL_ALLOCATION_A = 0.5  # Golden
-CAPITAL_ALLOCATION_B = 0.5  # Silver
+CAPITAL_ALLOCATION_A = 0.5  # Golden (Long Only)
+CAPITAL_ALLOCATION_B = 0.5  # Silver (Long & Short)
 
 # ---- Parametros Estrategia ----
-# Filtro Rango (Fix 2)
 MIN_ADX_4H = 20         
 
-# Salidas (Fix 1 & 5)
-SL_ATR_MULT = 2.0       # SL Inicial (Usando ATR 1H)
-TRAIL_ATR_MULT = 3.0    # Trailing Stop (Usando ATR 1H)
+# Salidas (Fix 3: Trailing con memoria)
+SL_ATR_MULT = 2.0       
+TRAIL_ATR_MULT = 3.0    
 
-# Cooldown (Fix 4)
-COOLDOWN_BARS = 4       # Horas de espera tras cierre en Strat B
+# Cooldown
+COOLDOWN_BARS = 4       
 
-# ---- Risk & Microestructura (Fix 6) ----
+# ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.04   # 4% Riesgo compuesto
+FIXED_RISK_PCT = 0.04   
 MAX_LEVER = 5           
 
 COMMISSION = 0.0004         
-SPREAD_PCT = 0.0002     # (Fix 6: Spread ajustado)    
-SLIPPAGE_PCT = 0.0004   # (Fix 6: Slippage ajustado)
-# BASE_LATENCY eliminada del precio
+SPREAD_PCT = 0.0002     
+SLIPPAGE_PCT = 0.0004   
+BASE_LATENCY = 0.0001
 
 MIN_QTY = 0.01          
 QTY_PRECISION = 3       
 
 # ======================================================
-#  1. CARGA Y PREPARACIÓN
+#  1. CARGA Y PREPARACIÓN (FIX 2 & 1)
 # ======================================================
 
 def load_and_resample(symbol):
@@ -72,29 +71,24 @@ def load_and_resample(symbol):
 
     if 'volume' not in df.columns: df['volume'] = 1.0
 
-    # --- 1. INDICADORES 1H (Microestructura) ---
-    # (Fix 1: ATR de 1H para Sizing/SL)
+    # --- 1. INDICADORES 1H (FIX 1: ATR SIN SHIFT) ---
+    # Calculamos ATR actual. En el loop usaremos row.atr_1h, que es el del cierre de la vela.
+    # Para evitar lookahead en el Sizing del Open siguiente, debemos acceder al previo en el loop.
     df['atr_1h'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-    # Shift 1H para no ver futuro inmediato
-    df['atr_1h'] = df['atr_1h'].shift(1) 
 
     # --- 2. RESAMPLING A 4H (Macroestructura) ---
     print("🔄 Resampleando a 4H...")
     ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}
     df_4h = df.resample('4h').agg(ohlc_dict).dropna()
     
-    # EMAs A (Golden)
+    # Indicadores 4H
     df_4h['ema_50'] = talib.EMA(df_4h['close'], timeperiod=50)
     df_4h['ema_200'] = talib.EMA(df_4h['close'], timeperiod=200)
-    
-    # EMAs B (Silver)
     df_4h['ema_21'] = talib.EMA(df_4h['close'], timeperiod=21)
     df_4h['ema_55'] = talib.EMA(df_4h['close'], timeperiod=55)
-    
-    # ADX 4H (Fix 2: Filtro Rango)
     df_4h['adx'] = talib.ADX(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
     
-    # Señales (Vela Cerrada)
+    # Señales (Calculadas al CIERRE de 4H)
     # A (Golden)
     trend_a = np.where(df_4h['ema_50'] > df_4h['ema_200'], 1, -1)
     df_4h['sig_a'] = np.where((trend_a==1) & (pd.Series(trend_a).shift(1)==-1), 1, 
@@ -105,46 +99,56 @@ def load_and_resample(symbol):
     df_4h['sig_b'] = np.where((trend_b==1) & (pd.Series(trend_b).shift(1)==-1), 1, 
                      np.where((trend_b==-1) & (pd.Series(trend_b).shift(1)==1), -1, 0))
 
-    # --- SHIFT 4H & MERGE ---
-    # Shift(1) para evitar lookahead. Al momento de operar (1H), vemos la vela 4H CERRADA anterior.
-    # También traemos High/Low previos para confirmación (Fix 3)
-    cols_to_bring = ['sig_a', 'sig_b', 'adx', 'high', 'low']
-    df_4h_shifted = df_4h.shift(1)[cols_to_bring].rename(columns={
+    # --- FIX 2: ALINEACIÓN PERFECTA ---
+    # Queremos que la vela de las 09:00 (1H) tenga los datos de la vela 4H que terminó a las 08:00.
+    # 1. Seleccionamos columnas
+    cols = ['sig_a', 'sig_b', 'adx', 'high', 'low']
+    df_4h_subset = df_4h[cols].copy()
+    
+    # 2. Reindexamos a 1H con ffill (Propagamos el valor de 08:00 a 09:00, 10:00, etc.)
+    # Importante: ffill propaga el valor de 08:00 INCLUYENDO a la fila de 08:00
+    df_4h_aligned = df_4h_subset.reindex(df.index, method='ffill')
+    
+    # 3. Hacemos SHIFT(1) AHORA.
+    # Así, a las 08:00 tenemos datos de 07:00 (viejo).
+    # A las 09:00 tenemos datos de 08:00 (¡Correcto! La vela cerrada).
+    df_4h_final = df_4h_aligned.shift(1).rename(columns={
         'sig_a': 'sig_a_4h', 
         'sig_b': 'sig_b_4h',
         'adx': 'adx_4h',
-        'high': 'prev_4h_high', # Para confirmación Long
-        'low': 'prev_4h_low'    # Para confirmación Short
+        'high': 'prev_4h_high', 
+        'low': 'prev_4h_low'
     })
 
     print("🔄 Sincronizando con 1H...")
-    df_1h = df.join(df_4h_shifted)
-    df_1h.ffill(inplace=True)
-    df_1h.dropna(inplace=True)
+    df_1h = df.join(df_4h_final)
+    df_1h.dropna(inplace=True) # Elimina los NaNs del inicio
     df_1h.reset_index(inplace=True)
     
     return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE V63
+#  🚀 BACKTEST ENGINE V64 (IRONCLAD)
 # ======================================================
 
 def run_backtest(symbol):
     df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V63 (Hydra Polished) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V64 (Ironclad Hydra) para {symbol}\n")
 
     bal_a = INITIAL_BALANCE * CAPITAL_ALLOCATION_A
     bal_b = INITIAL_BALANCE * CAPITAL_ALLOCATION_B
     peak_a = bal_a; peak_b = bal_b
     
-    # Estado A
+    # Estado A (Golden - Long Only)
     pos_a = None; entry_a = 0; qty_a = 0; sl_a = 0; comm_a = 0
+    highest_a = 0 # (Fix 3: Memoria para Trailing)
     
-    # Estado B
+    # Estado B (Silver - Long & Short)
     pos_b = None; entry_b = 0; qty_b = 0; sl_b = 0; comm_b = 0
-    cooldown_b = 0 # (Fix 4)
+    extreme_b = 0 # (Fix 3: Memoria: High para Long, Low para Short)
+    cooldown_b = 0 
     
     equity_curve = []
     trades = []
@@ -154,40 +158,45 @@ def run_backtest(symbol):
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
         
-        # Datos del contexto (vienen de 4H)
-        atr_1h = row.atr_1h # (Fix 1)
+        # Datos Contexto
+        # Usamos ATR previo para calculos de entrada (Sizing) para no ver futuro
+        atr_now = row.atr_1h
+        atr_prev = df.at[i-1, 'atr_1h'] if i > 0 else atr_now
+        
         adx_4h = row.adx_4h
         prev_4h_high = row.prev_4h_high
         prev_4h_low = row.prev_4h_low
         
-        # Señales Base
         raw_sig_a = row.sig_a_4h
         raw_sig_b = row.sig_b_4h
         
-        # Costos (Fix 6)
         friction = SLIPPAGE_PCT + SPREAD_PCT
 
-        # Validaciones Comunes
-        volatility_ok = adx_4h > MIN_ADX_4H # (Fix 2: Filtro Rango)
+        # Validaciones
+        volatility_ok = adx_4h > MIN_ADX_4H 
         
         # =========================================================
         #  ESTRATEGIA A: GOLDEN (LONG ONLY)
         # =========================================================
         
-        # 1. GESTIÓN DE POSICIÓN
+        # 1. GESTIÓN
         if pos_a == 'long':
             exit_p_a = None
             reason_a = None
             
-            # (Fix 5: Trailing Stop)
-            new_sl = c - (atr_1h * TRAIL_ATR_MULT)
+            # (Fix 3: Trailing Ratchet)
+            # Actualizamos el máximo alcanzado desde la entrada
+            if h > highest_a: highest_a = h
+            
+            # SL dinámico basado en el máximo histórico del trade
+            # El SL nunca baja, solo sube.
+            new_sl = highest_a - (atr_prev * TRAIL_ATR_MULT)
             if new_sl > sl_a: sl_a = new_sl
             
-            # Checks
             if raw_sig_a == -1: 
                 exit_p_a = o * (1 - SLIPPAGE_PCT); reason_a = "Death Cross (A)"
             elif l <= sl_a: 
-                exit_raw = o if o < sl_a else sl_a
+                exit_raw = o if o < sl_a else sl_a 
                 exit_p_a = exit_raw * (1 - SLIPPAGE_PCT); reason_a = "SL/Trail (A)"
             
             if exit_p_a:
@@ -198,39 +207,38 @@ def run_backtest(symbol):
                 
                 net = pnl - comm_a - c_exit
                 trades.append({'year': ts.year, 'strat': 'A', 'type': reason_a, 'pnl': net})
-                pos_a = None; comm_a = 0
+                pos_a = None; comm_a = 0; highest_a = 0
 
         # 2. ENTRADA
         elif pos_a is None and raw_sig_a == 1:
-            # (Fix 3: Confirmación de Ruptura)
-            # Solo entramos si el precio actual (o close previo) rompió el High de la señal
             confirmed = o > prev_4h_high
             
             if volatility_ok and confirmed:
                 real_entry = o * (1 + friction)
                 
-                # (Fix 1: SL usando ATR 1H)
-                sl_price = real_entry - (atr_1h * SL_ATR_MULT)
-                dist = real_entry - sl_price
-                
-                if dist > 0:
-                    risk_usd = peak_a * FIXED_RISK_PCT
-                    raw_qty = min(risk_usd/dist, (bal_a * MAX_LEVER)/real_entry)
-                    qty = np.floor(raw_qty * (10**QTY_PRECISION)) / (10**QTY_PRECISION)
+                if atr_prev > 0:
+                    sl_price = real_entry - (atr_prev * SL_ATR_MULT)
+                    dist = real_entry - sl_price
                     
-                    if qty >= MIN_QTY:
-                        cost = qty * real_entry * COMMISSION
-                        bal_a -= cost
-                        pos_a = 'long'; entry_a = real_entry; qty_a = qty; sl_a = sl_price
-                        comm_a = cost
+                    if dist > 0:
+                        risk_usd = peak_a * FIXED_RISK_PCT
+                        raw_qty = min(risk_usd/dist, (bal_a * MAX_LEVER)/real_entry)
+                        qty = np.floor(raw_qty * (10**QTY_PRECISION)) / (10**QTY_PRECISION)
                         
-                        # Intra-candle crash
-                        if l <= sl_a:
-                            pnl = (sl_a*(1-SLIPPAGE_PCT) - real_entry)*qty
-                            c_ex = sl_a * qty * COMMISSION
-                            bal_a += (pnl - c_ex)
-                            trades.append({'year': ts.year, 'strat': 'A', 'type': 'SL Intra', 'pnl': pnl-cost-c_ex})
-                            pos_a = None; comm_a = 0
+                        if qty >= MIN_QTY:
+                            cost = qty * real_entry * COMMISSION
+                            bal_a -= cost
+                            pos_a = 'long'; entry_a = real_entry; qty_a = qty
+                            sl_a = sl_price; comm_a = cost
+                            highest_a = real_entry # Init memoria
+                            
+                            # Intra-candle crash
+                            if l <= sl_a:
+                                pnl = (sl_a*(1-SLIPPAGE_PCT) - real_entry)*qty
+                                c_ex = sl_a * qty * COMMISSION
+                                bal_a += (pnl - c_ex)
+                                trades.append({'year': ts.year, 'strat': 'A', 'type': 'SL Intra', 'pnl': pnl-cost-c_ex})
+                                pos_a = None; comm_a = 0
 
         # =========================================================
         #  ESTRATEGIA B: SILVER (LONG & SHORT)
@@ -240,15 +248,17 @@ def run_backtest(symbol):
         # 1. GESTIÓN
         exit_p_b = None
         if pos_b is not None:
-            # Trailing Stop (Fix 5)
+            # (Fix 3: Trailing Ratchet para B)
             if pos_b == 'long':
-                new_sl = c - (atr_1h * TRAIL_ATR_MULT)
+                if h > extreme_b: extreme_b = h
+                new_sl = extreme_b - (atr_prev * TRAIL_ATR_MULT)
                 if new_sl > sl_b: sl_b = new_sl
             else: # Short
-                new_sl = c + (atr_1h * TRAIL_ATR_MULT)
+                if l < extreme_b: extreme_b = l
+                new_sl = extreme_b + (atr_prev * TRAIL_ATR_MULT)
                 if new_sl < sl_b: sl_b = new_sl
             
-            # Check Exit Conditions
+            # Check Exit
             if pos_b == 'long':
                 if raw_sig_b == -1: 
                     exit_p_b = o * (1 - SLIPPAGE_PCT); reason_b = "Flip Short (B)"
@@ -275,22 +285,31 @@ def run_backtest(symbol):
                 trades.append({'year': ts.year, 'strat': 'B', 'type': reason_b, 'pnl': net})
                 
                 pos_b = None; comm_b = 0
-                cooldown_b = COOLDOWN_BARS # (Fix 4: Activar cooldown)
+                cooldown_b = COOLDOWN_BARS
+                
+                # (Fix 4: Evitar re-entrada inmediata en la misma vela)
+                # Usamos 'continue' para saltar a la parte de equity update directamente
+                # Pero como Estrategia A ya corrió, solo saltamos el bloque de Entrada B
+                goto_equity = True 
+            else:
+                goto_equity = False
 
-        # 2. ENTRADA (Si flat y sin cooldown)
-        if pos_b is None and cooldown_b == 0:
+        else:
+            goto_equity = False
+
+        # 2. ENTRADA B (Si flat y sin cooldown)
+        if pos_b is None and cooldown_b == 0 and not goto_equity:
             new_side = None
-            # (Fix 3: Confirmación)
             if raw_sig_b == 1 and o > prev_4h_high: new_side = 'long'
             elif raw_sig_b == -1 and o < prev_4h_low: new_side = 'short'
             
-            if new_side and volatility_ok:
+            if new_side and volatility_ok and atr_prev > 0:
                 if new_side == 'long':
                     real_entry = o * (1 + friction)
-                    sl_price = real_entry - (atr_1h * SL_ATR_MULT)
+                    sl_price = real_entry - (atr_prev * SL_ATR_B)
                 else:
                     real_entry = o * (1 - friction)
-                    sl_price = real_entry + (atr_1h * SL_ATR_MULT)
+                    sl_price = real_entry + (atr_prev * SL_ATR_B)
                 
                 dist = abs(real_entry - sl_price)
                 if dist > 0:
@@ -301,10 +320,12 @@ def run_backtest(symbol):
                     if qty >= MIN_QTY:
                         cost = qty * real_entry * COMMISSION
                         bal_b -= cost
-                        pos_b = new_side; entry_b = real_entry; qty_b = qty; sl_b = sl_price
-                        comm_b = cost
                         
-                        # Intra-candle check
+                        pos_b = new_side; entry_b = real_entry; qty_b = qty
+                        sl_b = sl_price; comm_b = cost
+                        extreme_b = real_entry # Init memoria
+                        
+                        # Intra-candle
                         crash = False
                         if new_side == 'long' and l <= sl_b: crash = True
                         if new_side == 'short' and h >= sl_b: crash = True
@@ -337,7 +358,7 @@ def run_backtest(symbol):
     trades_df = pd.DataFrame(trades)
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V63 – HYDRA POLISHED: {symbol}")
+    print(f"📊 RESULTADOS V64 – IRONCLAD HYDRA: {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${total_bal:.2f}")
     print(f"📈 Retorno Total:   {total_ret:.2f}%")
@@ -350,13 +371,13 @@ def run_backtest(symbol):
     if not trades_df.empty:
         win = (trades_df.pnl > 0).mean() * 100
         print(f"🏆 Win Rate:        {win:.2f}%")
-        print(f"🧮 Total Trades:    {len(trades_df)}")
+        print(f"🧮 Total Trades:    {len(trades_df)}\n")
         print("\n📅 RENDIMIENTO POR AÑO:")
         print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
         print("\n🔎 DESGLOSE POR ESTRATEGIA:")
         print(trades_df.groupby("strat")["pnl"].agg(["sum","count", "mean"]))
         
-        trades_df.to_csv(f"log_v63_{symbol}.csv", index=False)
+        trades_df.to_csv(f"log_v64_{symbol}.csv", index=False)
     else:
         print("⚠️ No hubo trades.")
 
