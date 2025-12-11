@@ -2,36 +2,28 @@
 import pandas as pd
 import numpy as np
 import os
-
-# Gestión segura de TA-Lib
-try:
-    import talib
-    HAS_TALIB = True
-except ImportError:
-    HAS_TALIB = False
-    print("❌ TA-Lib no está instalado. El script fallará.")
+import talib
 
 # ======================================================
-#  🔥 CONFIG V54 – GOLDEN CROSS PLUS (4H)
+#  🔥 CONFIG V55 – GOLDEN COMPOUND (FINAL)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
-# ---- Estrategia: TENDENCIA 4H ----
+# ---- Estrategia: TENDENCIA PURA 4H ----
 FAST_EMA = 50
 SLOW_EMA = 200
 
-# ---- Salidas (La Mejora) ----
-# Usamos un Chandelier Exit / Supertrend como Trailing Stop
-# Si el precio cae X ATRs desde el máximo, salimos.
-TRAILING_ATR_PERIOD = 14
-TRAILING_ATR_MULT = 3.5   # Le damos espacio (3.5 ATR) para no salir en ruidos
+# ---- Salidas ----
+# Volvemos a la salida por "Death Cross" (Cruce bajista)
+# Es lenta, pero es la única que captura el 100% del bull run.
+SL_ATR_MULT = 3.0       # Solo stop de catástrofe
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.05     # 5% por trade (Agresivo porque hay pocos trades)
-MAX_LEVER = 5             # Apalancamiento Swing
+FIXED_RISK_PCT = 0.05   # 5% por trade (Agresivo porque confiamos en la tendencia 4H)
+MAX_LEVER = 5           
 
 COMMISSION = 0.0004         
 SPREAD_PCT = 0.0004         
@@ -70,31 +62,30 @@ def load_and_resample(symbol):
     df.sort_values("timestamp", inplace=True)
     df.set_index('timestamp', inplace=True)
 
-    # --- RESAMPLING A 4H (El filtro de oro) ---
-    print("🔄 Resampleando a 4H para eliminar ruido...")
+    # --- RESAMPLING A 4H ---
+    print("🔄 Resampleando a 4H...")
     ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}
     df_4h = df.resample('4h').apply(ohlc_dict).dropna()
     
-    if not HAS_TALIB: return None
-
     # INDICADORES EN 4H
     df_4h['ema_fast'] = talib.EMA(df_4h['close'], timeperiod=FAST_EMA)
     df_4h['ema_slow'] = talib.EMA(df_4h['close'], timeperiod=SLOW_EMA)
-    df_4h['atr'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=TRAILING_ATR_PERIOD)
+    df_4h['atr'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
     
-    # SEÑALES (Calculadas sobre vela CERRADA)
-    # 1. Tendencia Alcista
+    # SEÑALES (Sobre vela CERRADA)
+    # Trend = 1 si Fast > Slow
     df_4h['trend_up'] = np.where(df_4h['ema_fast'] > df_4h['ema_slow'], 1, 0)
     
-    # 2. Cruce (Golden Cross) - Shift(1) para comparar hoy vs ayer
-    df_4h['prev_trend_up'] = df_4h['trend_up'].shift(1)
-    df_4h['signal_buy'] = np.where((df_4h['trend_up'] == 1) & (df_4h['prev_trend_up'] == 0), 1, 0)
+    # Cruces (Shift 1 para comparar con vela anterior)
+    df_4h['prev_trend'] = df_4h['trend_up'].shift(1)
     
-    # 3. Salida Técnica (Death Cross)
-    df_4h['signal_sell'] = np.where((df_4h['trend_up'] == 0) & (df_4h['prev_trend_up'] == 1), 1, 0)
+    # Golden Cross: Hoy es 1, Ayer era 0
+    df_4h['signal_buy'] = np.where((df_4h['trend_up'] == 1) & (df_4h['prev_trend'] == 0), 1, 0)
+    
+    # Death Cross: Hoy es 0, Ayer era 1
+    df_4h['signal_sell'] = np.where((df_4h['trend_up'] == 0) & (df_4h['prev_trend'] == 1), 1, 0)
 
-    # --- FIX LOOKAHEAD: SHIFT(1) ---
-    # Movemos todo 1 vela 4H adelante para que a las 12:00 veamos la data de las 08:00
+    # SHIFT(1) para evitar Lookahead Bias (Ver futuro)
     df_4h_shifted = df_4h.shift(1)
 
     print("🔄 Sincronizando con 1H...")
@@ -107,14 +98,14 @@ def load_and_resample(symbol):
     return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE V54
+#  🚀 BACKTEST ENGINE V55
 # ======================================================
 
 def run_backtest(symbol):
     df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V54 (Golden Cross + Trailing) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V55 (Golden Compound) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     equity_curve = [balance]
@@ -146,14 +137,14 @@ def run_backtest(symbol):
             
             entry_price = o * (1 + friction)
             
-            # SL Inicial (Stop Loss de Volatilidad Amplio)
-            # Usamos 3.5 ATR para darle mucho aire al inicio
-            sl_price = entry_price - (atr_4h * TRAILING_ATR_MULT)
-            
+            # SL Inicial (Catastrófico)
+            sl_price = entry_price - (atr_4h * SL_ATR_MULT)
             risk_dist = entry_price - sl_price
             
             if risk_dist > 0:
-                # Sizing Compuesto (Risk on Peak)
+                # SIZING AGRESIVO (Compound on Peak)
+                # Usamos peak_balance para calcular el riesgo en USD.
+                # Esto acelera el crecimiento en rachas ganadoras.
                 risk_usd = peak_balance * FIXED_RISK_PCT
                 qty = risk_usd / risk_dist
                 
@@ -170,14 +161,14 @@ def run_backtest(symbol):
                     entry = entry_price
                     entry_comm_paid = entry_comm
                     
-                    # Intra-candle Check
+                    # Intra-candle Crash Check
                     if l <= sl:
                         exit_p = sl * (1 - SLIPPAGE_PCT)
                         pnl = (exit_p - entry_price) * qty
                         fee = exit_p * qty * COMMISSION
                         balance += (pnl - fee)
                         net = pnl - entry_comm - fee
-                        trades.append({'year': ts.year, 'pnl': net, 'type': 'SL Intra'})
+                        trades.append({'year': ts.year, 'pnl': net, 'type': 'SL Crash'})
                         position = None
 
         # ----------------------------------------------------
@@ -187,32 +178,23 @@ def run_backtest(symbol):
             exit_p = None
             reason = None
             
-            # A) TRAILING STOP (La Mejora) 
-            # Si el precio sube, subimos el SL. Nunca lo bajamos.
-            # El SL está a X ATRs del Máximo alcanzado (High - 3.5 ATR)
-            # Pero usamos ATR de 4H que es más estable.
-            new_sl = h - (atr_4h * TRAILING_ATR_MULT)
-            if new_sl > sl:
-                sl = new_sl
-            
-            # B) Stop Loss Hit (Trailing o Inicial)
-            if l <= sl:
-                # Gap protection
-                exit_raw = o if o < sl else sl
-                exit_p = exit_raw * (1 - SLIPPAGE_PCT)
-                reason = "Trailing Stop"
-            
-            # C) Salida Técnica (Death Cross)
-            # Si ocurre el cruce bajista ANTES de tocar el trailing
-            elif signal_sell:
+            # A) Salida Técnica: DEATH CROSS
+            # Esperamos pacientemente a que la tendencia cambie en 4H.
+            if signal_sell:
                 exit_p = o * (1 - SLIPPAGE_PCT)
                 reason = "Death Cross"
+            
+            # B) Stop Loss Hit (Emergencia)
+            elif l <= sl:
+                exit_p = sl * (1 - SLIPPAGE_PCT)
+                reason = "Stop Loss"
             
             if exit_p:
                 pnl = (exit_p - entry) * quantity
                 exit_comm = exit_p * quantity * COMMISSION
                 balance += (pnl - exit_comm)
                 
+                # Actualizamos Peak Balance solo si ganamos
                 if balance > peak_balance: peak_balance = balance
                 
                 net_pnl = pnl - entry_comm_paid - exit_comm
@@ -226,10 +208,10 @@ def run_backtest(symbol):
     total_ret = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V54 – GOLDEN CROSS PLUS (4H): {symbol}")
+    print(f"📊 RESULTADOS V55 – GOLDEN COMPOUND: {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
-    print(f"📈 Retorno Total:   {total_return:.2f}%")
+    print(f"📈 Retorno Total:   {total_ret:.2f}%")
     
     eq_series = pd.Series(equity_curve)
     if len(eq_series) > 0:
@@ -242,6 +224,11 @@ def run_backtest(symbol):
         print(f"🧮 Total Trades:    {len(trades_df)}\n")
         print("📅 RENDIMIENTO POR AÑO:")
         print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
+        print("="*55)
+        
+        # Guardar historial para análisis
+        trades_df.to_csv("golden_cross_log.csv", index=False)
+        print("💾 Log guardado en golden_cross_log.csv")
     else:
         print("⚠️ No hubo trades.")
 
