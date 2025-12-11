@@ -2,38 +2,30 @@
 import pandas as pd
 import numpy as np
 import os
-from datetime import timedelta
-
-try:
-    import talib
-    HAS_TALIB = True
-except:
-    HAS_TALIB = False
-    print("❌ TA-Lib no está instalado. Instálalo para usar V49.")
+import talib # Asumimos que ya está instalado
 
 # ======================================================
-#  🔥 CONFIG V49 – SUPERTREND (TREND FOLLOWING)
+#  🔥 CONFIG V49 – SUPERTREND (FIXED)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
-# ---- Estrategia Core (Supertrend Simulado) ----
-# Period 24 = 1 Día de datos. Factor 3.0 = Desviación estándar amplia.
+# ---- Estrategia Core ----
 ST_PERIOD = 24          
 ST_MULTIPLIER = 3.0     
 
 # ---- Filtros ----
-ADX_FILTER = 20         # Solo operar si hay fuerza (ADX > 20)
-BAD_HOURS = []          # En swing trading no importan las horas malas
+ADX_FILTER = 20         
+BAD_HOURS = []          
 
 # ---- Salidas ----
-EXIT_HOURS = 336        # 14 días (Swing Trading real)
+EXIT_HOURS = 336        
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.02   # 2% Riesgo por trade
-MAX_LEVER = 20          # <--- VARIABLE AGREGADA (Límite de apalancamiento)
+FIXED_RISK_PCT = 0.02   
+MAX_LEVER = 20          # Variable definida
 COMMISSION = 0.0004     
 SPREAD_PCT = 0.0004     
 SLIPPAGE_PCT = 0.0006   
@@ -79,17 +71,20 @@ def load_data(symbol):
     return df
 
 # ======================================================
-#  📐 INDICADORES (MANUAL SUPERTREND)
+#  📐 INDICADORES (CORREGIDO)
 # ======================================================
 
 def calc_indicators(df):
-    print("📐 Calculando Supertrend V49...")
-
-    if not HAS_TALIB: raise Exception("TA-Lib requerido.")
+    print("📐 Calculando Supertrend V49 (Fixed)...")
 
     # 1. ATR y ADX
     df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=ST_PERIOD)
     df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+    
+    # --- FIX CRÍTICO: LIMPIAR NaNs ANTES DEL BUCLE ---
+    # Eliminamos las primeras filas que tienen NaN por el cálculo de ATR/ADX
+    df.dropna(inplace=True)
+    df.reset_index(drop=True, inplace=True)
     
     # 2. CÁLCULO MANUAL SUPERTREND 
     high = df['high'].values
@@ -97,34 +92,47 @@ def calc_indicators(df):
     close = df['close'].values
     atr = df['atr'].values
     
-    upper_band = np.zeros(len(df))
-    lower_band = np.zeros(len(df))
-    supertrend = np.zeros(len(df))
-    trend = np.zeros(len(df)) # 1 up, -1 down
+    # Arrays
+    n = len(df)
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    supertrend = np.zeros(n)
+    trend = np.zeros(n) # 1 up, -1 down
     
+    # Init valores iniciales
     trend[0] = 1
+    upper_band[0] = (high[0] + low[0]) / 2 + (ST_MULTIPLIER * atr[0])
+    lower_band[0] = (high[0] + low[0]) / 2 - (ST_MULTIPLIER * atr[0])
+    supertrend[0] = lower_band[0]
     
-    for i in range(1, len(df)):
-        basic_upper = (high[i] + low[i]) / 2 + (ST_MULTIPLIER * atr[i])
-        basic_lower = (high[i] + low[i]) / 2 - (ST_MULTIPLIER * atr[i])
+    for i in range(1, n):
+        mid_price = (high[i] + low[i]) / 2
+        basic_upper = mid_price + (ST_MULTIPLIER * atr[i])
+        basic_lower = mid_price - (ST_MULTIPLIER * atr[i])
         
+        # Upper Band Logic (No baja en tendencia bajista)
         if (basic_upper < upper_band[i-1]) or (close[i-1] > upper_band[i-1]):
             upper_band[i] = basic_upper
         else:
             upper_band[i] = upper_band[i-1]
             
+        # Lower Band Logic (No sube en tendencia alcista)
         if (basic_lower > lower_band[i-1]) or (close[i-1] < lower_band[i-1]):
             lower_band[i] = basic_lower
         else:
             lower_band[i] = lower_band[i-1]
             
-        if trend[i-1] == -1 and close[i] > upper_band[i-1]:
+        # Trend Logic
+        prev_trend = trend[i-1]
+        
+        if prev_trend == -1 and close[i] > upper_band[i-1]:
             trend[i] = 1
-        elif trend[i-1] == 1 and close[i] < lower_band[i-1]:
+        elif prev_trend == 1 and close[i] < lower_band[i-1]:
             trend[i] = -1
         else:
-            trend[i] = trend[i-1]
+            trend[i] = prev_trend
             
+        # Supertrend Line
         if trend[i] == 1:
             supertrend[i] = lower_band[i]
         else:
@@ -133,8 +141,9 @@ def calc_indicators(df):
     df['supertrend'] = supertrend
     df['trend'] = trend 
     
-    df.dropna(inplace=True)
-    df.reset_index(drop=True, inplace=True)
+    # Diagnóstico
+    print(f"   👉 Estado Tendencia: {df['trend'].value_counts().to_dict()}")
+    
     return df
 
 # ======================================================
@@ -166,6 +175,8 @@ def run_backtest(symbol):
         
         current_trend = row.trend
         st_value = row.supertrend
+        
+        # Miramos el trend de la vela ANTERIOR para decidir entrada en esta
         prev_trend = df.at[i-1, 'trend'] if i > 0 else 0
         
         total_entry_cost = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
@@ -173,7 +184,7 @@ def run_backtest(symbol):
         # ============================================================
         # 1) BÚSQUEDA DE ENTRADA (LONG ONLY)
         # ============================================================
-        # Señal: Cierre anterior cruzó Supertrend a Bullish
+        # Si la tendencia ya es alcista (1)
         signal_buy = (prev_trend == 1) 
         adx_ok = row.adx > ADX_FILTER
         
@@ -181,7 +192,7 @@ def run_backtest(symbol):
             if signal_buy and adx_ok:
                 
                 entry_price = o * (1 + total_entry_cost)
-                sl_price = st_value # SL inicial es el Supertrend actual
+                sl_price = st_value 
                 
                 risk_dist = entry_price - sl_price
                 
@@ -189,7 +200,6 @@ def run_backtest(symbol):
                     risk_capital = balance * FIXED_RISK_PCT
                     qty = risk_capital / risk_dist 
                     
-                    # Cap de apalancamiento (Ahora sí funciona)
                     max_qty = (balance * MAX_LEVER) / entry_price
                     qty = min(qty, max_qty)
                     
@@ -223,13 +233,18 @@ def run_backtest(symbol):
             exit_price = None
             reason = None
             
-            # Trailing Stop: El Supertrend sube solo
+            # Trailing Stop del Supertrend
             if st_value > sl:
                 sl = st_value
 
-            # A) Cambio de Tendencia (Flip)
+            # A) Cambio de Tendencia (Flip a Bajista)
+            # Si la vela actual cerró y cambió el trend a -1, salimos (simulado al Open de esta vela o Close)
+            # En backtest loop 'i', usamos el estado actual. Si current_trend es -1,
+            # significa que en ESTA vela el precio cruzó.
+            # Salida de emergencia: Si current_trend == -1, salimos al Close (o Open next).
+            # Para ser conservadores, salimos al Close de esta vela que confirmó el cambio.
             if current_trend == -1:
-                exit_price = o * (1 - SLIPPAGE_PCT) 
+                exit_price = c * (1 - SLIPPAGE_PCT) 
                 reason = "Trend Flip"
             
             # B) Stop Loss Intradía
@@ -237,6 +252,11 @@ def run_backtest(symbol):
                 exit_raw = o if o < sl else sl 
                 exit_price = exit_raw * (1 - SLIPPAGE_PCT)
                 reason = "SL (Supertrend)"
+                
+            # C) Time Exit
+            elif (ts - entry_time).total_seconds() >= EXIT_HOURS * 3600:
+                exit_price = c * (1 - SLIPPAGE_PCT)
+                reason = "Time"
 
             if exit_price:
                 pnl = (exit_price - entry) * quantity
