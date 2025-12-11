@@ -5,41 +5,46 @@ import os
 import talib
 
 # ======================================================
-#  🔥 CONFIG V64 – IRONCLAD HYDRA
+#  🔥 CONFIG V65 – THE PRAGMATIC BREAKOUT
 # ======================================================
 
 SYMBOL = "ETHUSDT" 
 TIMEFRAME_STR = "1h"
 
-# ---- Asignación ----
-CAPITAL_ALLOCATION_A = 0.5  # Golden (Long Only)
-CAPITAL_ALLOCATION_B = 0.5  # Silver (Long & Short)
+# ---- Estrategia: TENDENCIA FRACTAL (4H + 1H) ----
+# Macro: EMA 50 > 200 en 4H (Dirección)
+# Micro: EMA 50 > 200 en 1H (Momento)
+EMA_FAST = 50
+EMA_SLOW = 200
 
-# ---- Parametros Estrategia ----
-MIN_ADX_4H = 20         
+# ---- Entrada (Fix 1: Validación) ----
+# Trigger = High_4H_Previo + (ATR_1H * BUFFER)
+BREAKOUT_BUFFER_ATR = 0.25  
 
-# Salidas (Fix 3: Trailing con memoria)
-SL_ATR_MULT = 2.0       
-TRAIL_ATR_MULT = 3.0    
+# ---- Salidas & Gestión (Fix 5 & 6) ----
+SL_ATR_1H_MULT = 2.0        # Parte A del SL Híbrido
+SL_ATR_4H_MULT = 0.5        # Parte B del SL Híbrido
+TRAIL_ATR_MULT = 3.0        # Trailing sobre Cierre
 
-# Cooldown
-COOLDOWN_BARS = 4       
+BE_TRIGGER_ATR = 0.8        # Mover a BE si ganamos 0.8 ATR
+STALL_EXIT_BARS = 3         # Si en 3 horas no arranca...
+STALL_MIN_PROFIT = 0.4      # ...y no ganamos al menos 0.4 ATR, cerrar.
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.04   
+FIXED_RISK_PCT = 0.03       # 3% (Conservador para probar la nueva mecánica)
 MAX_LEVER = 5           
 
 COMMISSION = 0.0004         
-SPREAD_PCT = 0.0002     
-SLIPPAGE_PCT = 0.0004   
-BASE_LATENCY = 0.0001
+SPREAD_PCT = 0.0002         
+SLIPPAGE_PCT = 0.0004       
+BASE_LATENCY = 0.0000       # (Fix: Latency fuera del precio)
 
 MIN_QTY = 0.01          
 QTY_PRECISION = 3       
 
 # ======================================================
-#  1. CARGA Y PREPARACIÓN (FIX 2 & 1)
+#  1. CARGA Y PREPARACIÓN
 # ======================================================
 
 def load_and_resample(symbol):
@@ -68,89 +73,76 @@ def load_and_resample(symbol):
     
     df.sort_values("timestamp", inplace=True)
     df.set_index('timestamp', inplace=True)
-
     if 'volume' not in df.columns: df['volume'] = 1.0
 
-    # --- 1. INDICADORES 1H (FIX 1: ATR SIN SHIFT) ---
-    # Calculamos ATR actual. En el loop usaremos row.atr_1h, que es el del cierre de la vela.
-    # Para evitar lookahead en el Sizing del Open siguiente, debemos acceder al previo en el loop.
+    # --- 1. INDICADORES 1H (Micro) ---
+    print("📐 Calculando Microestructura 1H...")
     df['atr_1h'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+    df['ema50_1h'] = talib.EMA(df['close'], timeperiod=50)
+    df['ema200_1h'] = talib.EMA(df['close'], timeperiod=200)
+    
+    # Tendencia Micro (Shift 1 para no ver futuro)
+    df['trend_1h'] = np.where(df['ema50_1h'] > df['ema200_1h'], 1, -1)
+    df['trend_1h'] = df['trend_1h'].shift(1)
+    
+    # Shift ATR 1H para cálculos de entrada (usamos volatilidad reciente conocida)
+    df['atr_1h_prev'] = df['atr_1h'].shift(1)
 
-    # --- 2. RESAMPLING A 4H (Macroestructura) ---
+    # --- 2. RESAMPLING A 4H (Macro) ---
     print("🔄 Resampleando a 4H...")
     ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}
     df_4h = df.resample('4h').agg(ohlc_dict).dropna()
     
     # Indicadores 4H
-    df_4h['ema_50'] = talib.EMA(df_4h['close'], timeperiod=50)
-    df_4h['ema_200'] = talib.EMA(df_4h['close'], timeperiod=200)
-    df_4h['ema_21'] = talib.EMA(df_4h['close'], timeperiod=21)
-    df_4h['ema_55'] = talib.EMA(df_4h['close'], timeperiod=55)
-    df_4h['adx'] = talib.ADX(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
+    df_4h['ema50_4h'] = talib.EMA(df_4h['close'], timeperiod=50)
+    df_4h['ema200_4h'] = talib.EMA(df_4h['close'], timeperiod=200)
+    df_4h['atr_4h'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
     
-    # Señales (Calculadas al CIERRE de 4H)
-    # A (Golden)
-    trend_a = np.where(df_4h['ema_50'] > df_4h['ema_200'], 1, -1)
-    df_4h['sig_a'] = np.where((trend_a==1) & (pd.Series(trend_a).shift(1)==-1), 1, 
-                     np.where((trend_a==-1) & (pd.Series(trend_a).shift(1)==1), -1, 0))
+    # Tendencia Macro (1 = Bull, -1 = Bear)
+    df_4h['trend_4h'] = np.where(df_4h['ema50_4h'] > df_4h['ema200_4h'], 1, -1)
     
-    # B (Silver)
-    trend_b = np.where(df_4h['ema_21'] > df_4h['ema_55'], 1, -1)
-    df_4h['sig_b'] = np.where((trend_b==1) & (pd.Series(trend_b).shift(1)==-1), 1, 
-                     np.where((trend_b==-1) & (pd.Series(trend_b).shift(1)==1), -1, 0))
-
-    # --- FIX 2: ALINEACIÓN PERFECTA ---
-    # Queremos que la vela de las 09:00 (1H) tenga los datos de la vela 4H que terminó a las 08:00.
-    # 1. Seleccionamos columnas
-    cols = ['sig_a', 'sig_b', 'adx', 'high', 'low']
-    df_4h_subset = df_4h[cols].copy()
-    
-    # 2. Reindexamos a 1H con ffill (Propagamos el valor de 08:00 a 09:00, 10:00, etc.)
-    # Importante: ffill propaga el valor de 08:00 INCLUYENDO a la fila de 08:00
-    df_4h_aligned = df_4h_subset.reindex(df.index, method='ffill')
-    
-    # 3. Hacemos SHIFT(1) AHORA.
-    # Así, a las 08:00 tenemos datos de 07:00 (viejo).
-    # A las 09:00 tenemos datos de 08:00 (¡Correcto! La vela cerrada).
-    df_4h_final = df_4h_aligned.shift(1).rename(columns={
-        'sig_a': 'sig_a_4h', 
-        'sig_b': 'sig_b_4h',
-        'adx': 'adx_4h',
-        'high': 'prev_4h_high', 
+    # --- ALINEACIÓN EXACTA (Fix Lookahead) ---
+    # Shift(1) en 4H: A las 09:00 vemos la vela cerrada de las 08:00
+    # Traemos el High/Low para definir el rango de ruptura
+    cols = ['trend_4h', 'high', 'low', 'atr_4h']
+    df_4h_shifted = df_4h.shift(1)[cols].rename(columns={
+        'high': 'prev_4h_high',
         'low': 'prev_4h_low'
     })
 
-    print("🔄 Sincronizando con 1H...")
-    df_1h = df.join(df_4h_final)
-    df_1h.dropna(inplace=True) # Elimina los NaNs del inicio
+    print("🔄 Sincronizando...")
+    df_1h = df.join(df_4h_shifted)
+    
+    # Propagamos la señal 4H a las velas de 1H correspondientes
+    df_1h.ffill(inplace=True)
+    df_1h.dropna(inplace=True)
     df_1h.reset_index(inplace=True)
     
     return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE V64 (IRONCLAD)
+#  🚀 BACKTEST ENGINE V65
 # ======================================================
 
 def run_backtest(symbol):
     df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V64 (Ironclad Hydra) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V65 (The Pragmatic Breakout) para {symbol}\n")
 
-    bal_a = INITIAL_BALANCE * CAPITAL_ALLOCATION_A
-    bal_b = INITIAL_BALANCE * CAPITAL_ALLOCATION_B
-    peak_a = bal_a; peak_b = bal_b
+    balance = INITIAL_BALANCE
+    equity_curve = [balance]
+    peak_balance = balance
     
-    # Estado A (Golden - Long Only)
-    pos_a = None; entry_a = 0; qty_a = 0; sl_a = 0; comm_a = 0
-    highest_a = 0 # (Fix 3: Memoria para Trailing)
+    position = None 
+    entry_price = 0; qty = 0; sl = 0
+    entry_comm = 0
     
-    # Estado B (Silver - Long & Short)
-    pos_b = None; entry_b = 0; qty_b = 0; sl_b = 0; comm_b = 0
-    extreme_b = 0 # (Fix 3: Memoria: High para Long, Low para Short)
-    cooldown_b = 0 
+    # Variables de Gestión V65
+    highest_close = 0       # (Fix 5: Trailing en Close)
+    bars_held = 0           # (Fix 6: Time Decay)
+    is_be = False           # Flag Breakeven
     
-    equity_curve = []
     trades = []
 
     for i in range(len(df)):
@@ -159,208 +151,145 @@ def run_backtest(symbol):
         o, h, l, c = row.open, row.high, row.low, row.close
         
         # Datos Contexto
-        # Usamos ATR previo para calculos de entrada (Sizing) para no ver futuro
-        atr_now = row.atr_1h
-        atr_prev = df.at[i-1, 'atr_1h'] if i > 0 else atr_now
+        atr_1h = row.atr_1h_prev
+        atr_4h = row.atr_4h
         
-        adx_4h = row.adx_4h
-        prev_4h_high = row.prev_4h_high
-        prev_4h_low = row.prev_4h_low
+        # Estructura
+        trend_macro = row.trend_4h == 1
+        trend_micro = row.trend_1h == 1
         
-        raw_sig_a = row.sig_a_4h
-        raw_sig_b = row.sig_b_4h
+        # Niveles Clave
+        breakout_level = row.prev_4h_high
         
         friction = SLIPPAGE_PCT + SPREAD_PCT
 
-        # Validaciones
-        volatility_ok = adx_4h > MIN_ADX_4H 
-        
         # =========================================================
-        #  ESTRATEGIA A: GOLDEN (LONG ONLY)
+        # 1. GESTIÓN DE POSICIÓN (LONG ONLY)
         # =========================================================
-        
-        # 1. GESTIÓN
-        if pos_a == 'long':
-            exit_p_a = None
-            reason_a = None
+        if position == 'long':
+            exit_p = None
+            reason = None
+            bars_held += 1
             
-            # (Fix 3: Trailing Ratchet)
-            # Actualizamos el máximo alcanzado desde la entrada
-            if h > highest_a: highest_a = h
+            # --- A. ACTULIZAR TRAILING (Fix 5: Close Based) ---
+            if c > highest_close: 
+                highest_close = c
             
-            # SL dinámico basado en el máximo histórico del trade
-            # El SL nunca baja, solo sube.
-            new_sl = highest_a - (atr_prev * TRAIL_ATR_MULT)
-            if new_sl > sl_a: sl_a = new_sl
+            # Calculamos nuevo trailing basado en el highest close
+            trail_sl = highest_close - (atr_4h * TRAIL_ATR_MULT) # Usamos ATR 4H para trailing largo
+            # El SL nunca baja
+            if trail_sl > sl: sl = trail_sl
             
-            if raw_sig_a == -1: 
-                exit_p_a = o * (1 - SLIPPAGE_PCT); reason_a = "Death Cross (A)"
-            elif l <= sl_a: 
-                exit_raw = o if o < sl_a else sl_a 
-                exit_p_a = exit_raw * (1 - SLIPPAGE_PCT); reason_a = "SL/Trail (A)"
+            # --- B. BREAKEVEN CHECK (Fix 6) ---
+            if not is_be:
+                current_profit = h - entry_price
+                if current_profit > (atr_1h * BE_TRIGGER_ATR):
+                    # Mover a Entrada + un poquito para cubrir fees
+                    be_price = entry_price * (1 + 0.001) 
+                    if be_price > sl: 
+                        sl = be_price
+                        is_be = True
             
-            if exit_p_a:
-                pnl = (exit_p_a - entry_a) * qty_a
-                c_exit = exit_p_a * qty_a * COMMISSION
-                bal_a += (pnl - c_exit)
-                if bal_a > peak_a: peak_a = bal_a
-                
-                net = pnl - comm_a - c_exit
-                trades.append({'year': ts.year, 'strat': 'A', 'type': reason_a, 'pnl': net})
-                pos_a = None; comm_a = 0; highest_a = 0
+            # --- C. TIME DECAY (Fix 6) ---
+            # Si pasaron 3 velas y no ganamos 0.4 ATR, cerrar.
+            if bars_held >= STALL_EXIT_BARS:
+                current_profit_close = c - entry_price
+                if current_profit_close < (atr_1h * STALL_MIN_PROFIT):
+                    exit_p = c * (1 - SLIPPAGE_PCT)
+                    reason = "Stall Exit (Time)"
 
-        # 2. ENTRADA
-        elif pos_a is None and raw_sig_a == 1:
-            confirmed = o > prev_4h_high
+            # --- D. STOP LOSS / TRAILING HIT ---
+            if exit_p is None and l <= sl:
+                exit_raw = o if o < sl else sl 
+                exit_p = exit_raw * (1 - SLIPPAGE_PCT)
+                reason = "Stop Loss/Trail" if not is_be else "Breakeven"
             
-            if volatility_ok and confirmed:
-                real_entry = o * (1 + friction)
+            # EJECUTAR SALIDA
+            if exit_p:
+                pnl = (exit_p - entry_price) * qty
+                comm_exit = exit_p * qty * COMMISSION
+                balance += (pnl - comm_exit)
                 
-                if atr_prev > 0:
-                    sl_price = real_entry - (atr_prev * SL_ATR_MULT)
-                    dist = real_entry - sl_price
+                if balance > peak_balance: peak_balance = balance
+                
+                net = pnl - entry_comm - comm_exit
+                trades.append({'year': ts.year, 'type': reason, 'pnl': net, 'bars': bars_held})
+                position = None
+                qty = 0
+
+        # =========================================================
+        # 2. ENTRADA (BREAKOUT VALIDADO)
+        # =========================================================
+        # Solo entramos si NO tenemos posición
+        if position is None:
+            
+            # FILTRO: Tendencia alineada (4H y 1H alcistas) (Fix 4 de tu lista)
+            if trend_macro and trend_micro:
+                
+                # TRIGGER: Precio actual supera (High 4H Previo + Buffer)
+                buffer = atr_1h * BREAKOUT_BUFFER_ATR
+                trigger_price = breakout_level + buffer
+                
+                # Chequeamos si en esta vela el precio rompió el nivel
+                # (Asumimos entrada stop en el trigger)
+                if h > trigger_price:
                     
-                    if dist > 0:
-                        risk_usd = peak_a * FIXED_RISK_PCT
-                        raw_qty = min(risk_usd/dist, (bal_a * MAX_LEVER)/real_entry)
-                        qty = np.floor(raw_qty * (10**QTY_PRECISION)) / (10**QTY_PRECISION)
+                    # Precio real de ejecución (Trigger o Open si gap)
+                    base_entry = max(o, trigger_price)
+                    real_entry = base_entry * (1 + friction)
+                    
+                    # SL HÍBRIDO (Fix 2: Tu fórmula exacta)
+                    sl_1 = 2 * atr_1h
+                    sl_2 = 0.5 * atr_4h
+                    sl_dist = max(sl_1, sl_2)
+                    
+                    sl_price = real_entry - sl_dist
+                    risk_dist = real_entry - sl_price
+                    
+                    if risk_dist > 0:
+                        # Sizing
+                        risk_usd = peak_balance * FIXED_RISK_PCT
+                        raw_qty = min(risk_usd/risk_dist, (balance * MAX_LEVER)/real_entry)
+                        qty_calc = np.floor(raw_qty * (10**QTY_PRECISION)) / (10**QTY_PRECISION)
                         
-                        if qty >= MIN_QTY:
-                            cost = qty * real_entry * COMMISSION
-                            bal_a -= cost
-                            pos_a = 'long'; entry_a = real_entry; qty_a = qty
-                            sl_a = sl_price; comm_a = cost
-                            highest_a = real_entry # Init memoria
+                        if qty_calc >= MIN_QTY:
+                            cost = qty_calc * real_entry * COMMISSION
+                            balance -= cost
                             
-                            # Intra-candle crash
-                            if l <= sl_a:
-                                pnl = (sl_a*(1-SLIPPAGE_PCT) - real_entry)*qty
-                                c_ex = sl_a * qty * COMMISSION
-                                bal_a += (pnl - c_ex)
-                                trades.append({'year': ts.year, 'strat': 'A', 'type': 'SL Intra', 'pnl': pnl-cost-c_ex})
-                                pos_a = None; comm_a = 0
+                            position = 'long'
+                            entry_price = real_entry
+                            qty = qty_calc
+                            sl = sl_price
+                            entry_comm = cost
+                            
+                            # Estado inicial gestión
+                            highest_close = c # Empezamos a trackear desde el cierre actual
+                            bars_held = 0
+                            is_be = False
+                            
+                            # Intra-candle check (Muerte súbita)
+                            if l <= sl:
+                                exit_p = sl * (1 - SLIPPAGE_PCT)
+                                pnl = (exit_p - real_entry) * qty_calc
+                                c_ex = exit_p * qty_calc * COMMISSION
+                                balance += (pnl - c_ex)
+                                trades.append({'year': ts.year, 'type': 'Instant SL', 'pnl': pnl-cost-c_ex})
+                                position = None
 
-        # =========================================================
-        #  ESTRATEGIA B: SILVER (LONG & SHORT)
-        # =========================================================
-        if cooldown_b > 0: cooldown_b -= 1
-        
-        # 1. GESTIÓN
-        exit_p_b = None
-        if pos_b is not None:
-            # (Fix 3: Trailing Ratchet para B)
-            if pos_b == 'long':
-                if h > extreme_b: extreme_b = h
-                new_sl = extreme_b - (atr_prev * TRAIL_ATR_MULT)
-                if new_sl > sl_b: sl_b = new_sl
-            else: # Short
-                if l < extreme_b: extreme_b = l
-                new_sl = extreme_b + (atr_prev * TRAIL_ATR_MULT)
-                if new_sl < sl_b: sl_b = new_sl
-            
-            # Check Exit
-            if pos_b == 'long':
-                if raw_sig_b == -1: 
-                    exit_p_b = o * (1 - SLIPPAGE_PCT); reason_b = "Flip Short (B)"
-                elif l <= sl_b:
-                    exit_raw = o if o < sl_b else sl_b
-                    exit_p_b = exit_raw * (1 - SLIPPAGE_PCT); reason_b = "SL Long (B)"
-            
-            elif pos_b == 'short':
-                if raw_sig_b == 1: 
-                    exit_p_b = o * (1 + SLIPPAGE_PCT); reason_b = "Flip Long (B)"
-                elif h >= sl_b:
-                    exit_raw = o if o > sl_b else sl_b
-                    exit_p_b = exit_raw * (1 + SLIPPAGE_PCT); reason_b = "SL Short (B)"
-            
-            if exit_p_b:
-                if pos_b == 'long': pnl = (exit_p_b - entry_b) * qty_b
-                else: pnl = (entry_b - exit_p_b) * qty_b
-                
-                c_ex = exit_p_b * qty_b * COMMISSION
-                bal_b += (pnl - c_ex)
-                if bal_b > peak_b: peak_b = bal_b
-                
-                net = pnl - comm_b - c_ex
-                trades.append({'year': ts.year, 'strat': 'B', 'type': reason_b, 'pnl': net})
-                
-                pos_b = None; comm_b = 0
-                cooldown_b = COOLDOWN_BARS
-                
-                # (Fix 4: Evitar re-entrada inmediata en la misma vela)
-                # Usamos 'continue' para saltar a la parte de equity update directamente
-                # Pero como Estrategia A ya corrió, solo saltamos el bloque de Entrada B
-                goto_equity = True 
-            else:
-                goto_equity = False
-
-        else:
-            goto_equity = False
-
-        # 2. ENTRADA B (Si flat y sin cooldown)
-        if pos_b is None and cooldown_b == 0 and not goto_equity:
-            new_side = None
-            if raw_sig_b == 1 and o > prev_4h_high: new_side = 'long'
-            elif raw_sig_b == -1 and o < prev_4h_low: new_side = 'short'
-            
-            if new_side and volatility_ok and atr_prev > 0:
-                if new_side == 'long':
-                    real_entry = o * (1 + friction)
-                    sl_price = real_entry - (atr_prev * SL_ATR_B)
-                else:
-                    real_entry = o * (1 - friction)
-                    sl_price = real_entry + (atr_prev * SL_ATR_B)
-                
-                dist = abs(real_entry - sl_price)
-                if dist > 0:
-                    risk_usd = peak_b * FIXED_RISK_PCT
-                    raw_qty = min(risk_usd/dist, (bal_b * MAX_LEVER)/real_entry)
-                    qty = np.floor(raw_qty * (10**QTY_PRECISION)) / (10**QTY_PRECISION)
-                    
-                    if qty >= MIN_QTY:
-                        cost = qty * real_entry * COMMISSION
-                        bal_b -= cost
-                        
-                        pos_b = new_side; entry_b = real_entry; qty_b = qty
-                        sl_b = sl_price; comm_b = cost
-                        extreme_b = real_entry # Init memoria
-                        
-                        # Intra-candle
-                        crash = False
-                        if new_side == 'long' and l <= sl_b: crash = True
-                        if new_side == 'short' and h >= sl_b: crash = True
-                        
-                        if crash:
-                            exit_p = sl_b * (1 - SLIPPAGE_PCT) if new_side=='long' else sl_b * (1 + SLIPPAGE_PCT)
-                            pnl = (exit_p - entry_b)*qty if new_side=='long' else (entry_b - exit_p)*qty
-                            c_ex = exit_p * qty * COMMISSION
-                            bal_b += (pnl - c_ex)
-                            trades.append({'year': ts.year, 'strat': 'B', 'type': 'SL Intra', 'pnl': pnl-cost-c_ex})
-                            pos_b = None; comm_b = 0
-                            cooldown_b = COOLDOWN_BARS
-
-        # =========================================================
-        #  EQUITY UPDATE
-        # =========================================================
-        eq_a = bal_a
-        if pos_a == 'long': eq_a += (c - entry_a) * qty_a
-        
-        eq_b = bal_b
-        if pos_b == 'long': eq_b += (c - entry_b) * qty_b
-        elif pos_b == 'short': eq_b += (entry_b - c) * qty_b
-        
-        equity_curve.append(eq_a + eq_b)
+        # Equity Update
+        curr_eq = balance
+        if position == 'long':
+            curr_eq += (c - entry_price) * qty
+        equity_curve.append(curr_eq)
 
     # REPORTING
-    total_bal = bal_a + bal_b
-    total_ret = (total_bal - INITIAL_BALANCE) / INITIAL_BALANCE * 100
-    
     trades_df = pd.DataFrame(trades)
+    total_ret = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V64 – IRONCLAD HYDRA: {symbol}")
+    print(f"📊 RESULTADOS V65 – THE PRAGMATIC BREAKOUT: {symbol}")
     print("="*55)
-    print(f"💰 Balance Final:   ${total_bal:.2f}")
+    print(f"💰 Balance Final:   ${balance:.2f}")
     print(f"📈 Retorno Total:   {total_ret:.2f}%")
     
     eq_series = pd.Series(equity_curve)
@@ -371,13 +300,11 @@ def run_backtest(symbol):
     if not trades_df.empty:
         win = (trades_df.pnl > 0).mean() * 100
         print(f"🏆 Win Rate:        {win:.2f}%")
-        print(f"🧮 Total Trades:    {len(trades_df)}\n")
+        print(f"🧮 Total Trades:    {len(trades_df)}")
         print("\n📅 RENDIMIENTO POR AÑO:")
         print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
-        print("\n🔎 DESGLOSE POR ESTRATEGIA:")
-        print(trades_df.groupby("strat")["pnl"].agg(["sum","count", "mean"]))
         
-        trades_df.to_csv(f"log_v64_{symbol}.csv", index=False)
+        trades_df.to_csv(f"log_v65_{symbol}.csv", index=False)
     else:
         print("⚠️ No hubo trades.")
 
