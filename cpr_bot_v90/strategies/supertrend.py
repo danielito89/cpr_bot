@@ -2,34 +2,36 @@
 import pandas as pd
 import numpy as np
 import os
-import talib
+
+# Gestión segura de TA-Lib
+try:
+    import talib
+    HAS_TALIB = True
+except ImportError:
+    HAS_TALIB = False
+    print("❌ TA-Lib no está instalado. El script fallará.")
 
 # ======================================================
-#  🔥 CONFIG V53 – DAILY ORB (OPENING RANGE BREAKOUT)
+#  🔥 CONFIG V54 – GOLDEN CROSS PLUS (4H)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
-# ---- Estrategia: ORB (Tiempo y Rango) ----
-# Definimos el rango inicial del día (UTC)
-RANGE_START_HOUR = 0
-RANGE_END_HOUR = 3      # Las primeras 4 horas (0, 1, 2, 3) definen el rango
+# ---- Estrategia: TENDENCIA 4H ----
+FAST_EMA = 50
+SLOW_EMA = 200
 
-# ---- Filtros ----
-# Solo tomamos el breakout si la tendencia macro acompaña
-EMA_TREND = 200         
-MIN_RANGE_ATR = 0.5     # El rango debe tener cierto tamaño (evitar días muertos)
-
-# ---- Salidas ----
-SL_PCT_OF_RANGE = 0.5   # Stop Loss en la mitad del rango (agresivo)
-TP_MULT = 3.0           # Buscamos un día expansivo (3 veces el riesgo)
-TIME_EXIT_HOUR = 23     # Cierre forzoso al final del día
+# ---- Salidas (La Mejora) ----
+# Usamos un Chandelier Exit / Supertrend como Trailing Stop
+# Si el precio cae X ATRs desde el máximo, salimos.
+TRAILING_ATR_PERIOD = 14
+TRAILING_ATR_MULT = 3.5   # Le damos espacio (3.5 ATR) para no salir en ruidos
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.02   # 2% por día
-MAX_LEVER = 10
+FIXED_RISK_PCT = 0.05     # 5% por trade (Agresivo porque hay pocos trades)
+MAX_LEVER = 5             # Apalancamiento Swing
 
 COMMISSION = 0.0004         
 SPREAD_PCT = 0.0004         
@@ -38,11 +40,11 @@ BASE_LATENCY = 0.0001
 MIN_QTY = 0.01
 
 # ======================================================
-#  1. CARGA DE DATOS
+#  1. CARGA Y RESAMPLING
 # ======================================================
 
-def load_data(symbol):
-    print(f"🔍 Cargando {symbol} ...")
+def load_and_resample(symbol):
+    print(f"🔍 Cargando datos 1H para {symbol}...")
     candidates = [f"mainnet_data_{TIMEFRAME_STR}_{symbol}.csv", f"{symbol}_{TIMEFRAME_STR}.csv"]
     paths = ["data", ".", "cpr_bot_v90/data"]
     
@@ -66,180 +68,157 @@ def load_data(symbol):
     else: df['timestamp'] = df['timestamp'].dt.tz_convert("UTC")
     
     df.sort_values("timestamp", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df
+    df.set_index('timestamp', inplace=True)
+
+    # --- RESAMPLING A 4H (El filtro de oro) ---
+    print("🔄 Resampleando a 4H para eliminar ruido...")
+    ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}
+    df_4h = df.resample('4h').apply(ohlc_dict).dropna()
+    
+    if not HAS_TALIB: return None
+
+    # INDICADORES EN 4H
+    df_4h['ema_fast'] = talib.EMA(df_4h['close'], timeperiod=FAST_EMA)
+    df_4h['ema_slow'] = talib.EMA(df_4h['close'], timeperiod=SLOW_EMA)
+    df_4h['atr'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=TRAILING_ATR_PERIOD)
+    
+    # SEÑALES (Calculadas sobre vela CERRADA)
+    # 1. Tendencia Alcista
+    df_4h['trend_up'] = np.where(df_4h['ema_fast'] > df_4h['ema_slow'], 1, 0)
+    
+    # 2. Cruce (Golden Cross) - Shift(1) para comparar hoy vs ayer
+    df_4h['prev_trend_up'] = df_4h['trend_up'].shift(1)
+    df_4h['signal_buy'] = np.where((df_4h['trend_up'] == 1) & (df_4h['prev_trend_up'] == 0), 1, 0)
+    
+    # 3. Salida Técnica (Death Cross)
+    df_4h['signal_sell'] = np.where((df_4h['trend_up'] == 0) & (df_4h['prev_trend_up'] == 1), 1, 0)
+
+    # --- FIX LOOKAHEAD: SHIFT(1) ---
+    # Movemos todo 1 vela 4H adelante para que a las 12:00 veamos la data de las 08:00
+    df_4h_shifted = df_4h.shift(1)
+
+    print("🔄 Sincronizando con 1H...")
+    df_1h = df.join(df_4h_shifted[['ema_fast', 'ema_slow', 'atr', 'signal_buy', 'signal_sell']], rsuffix='_4h')
+    
+    df_1h.ffill(inplace=True)
+    df_1h.dropna(inplace=True)
+    df_1h.reset_index(inplace=True)
+    
+    return df_1h
 
 # ======================================================
-#  2. INDICADORES (Solo para filtros)
-# ======================================================
-
-def calc_indicators(df):
-    if not HAS_TALIB: raise Exception("TA-Lib requerido.")
-    
-    # EMA Macro para filtro de tendencia (Solo largos si estamos arriba)
-    df['ema_trend'] = talib.EMA(df['close'], timeperiod=EMA_TREND)
-    
-    # ATR para medir si el rango inicial es digno
-    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-    
-    # Shift para no ver el futuro
-    df['ema_trend'] = df['ema_trend'].shift(1)
-    df['atr'] = df['atr'].shift(1)
-    
-    df.dropna(inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df
-
-# ======================================================
-#  🚀 BACKTEST ENGINE V53 (ORB)
+#  🚀 BACKTEST ENGINE V54
 # ======================================================
 
 def run_backtest(symbol):
-    df = load_data(symbol)
+    df = load_and_resample(symbol)
     if df is None: return
-    df = calc_indicators(df)
 
-    print(f"🚀 Iniciando Backtest V53 (Daily ORB) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V54 (Golden Cross + Trailing) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     equity_curve = [balance]
-    
+    peak_balance = balance 
+
     position = None 
-    entry_price = 0; quantity = 0; sl = 0; tp = 0
+    entry_price = 0; quantity = 0; sl = 0
     entry_comm = 0
     
-    # Variables del Día
-    day_high = -1
-    day_low = 999999
-    range_established = False
-    trades_today = 0
-    
-    current_day = -1
     trades = []
 
     for i in range(len(df)):
         row = df.iloc[i]
+        
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
         
-        # --- GESTIÓN DE NUEVO DÍA ---
-        if ts.day != current_day:
-            current_day = ts.day
-            day_high = -1
-            day_low = 999999
-            range_established = False
-            trades_today = 0 # Max 1 trade por día
-            
-            # Si teníamos posición overnight, la cerramos (Hard Close al open)
-            if position == "long":
-                exit_p = o * (1 - SLIPPAGE_PCT)
-                pnl = (exit_p - entry_price) * quantity
-                fee = exit_p * quantity * COMMISSION
-                balance += (pnl - fee)
-                trades.append({'year': ts.year, 'pnl': pnl - entry_comm - fee, 'type': 'Overnight Close'})
-                position = None
+        # Datos 4H
+        atr_4h = row.atr
+        signal_buy = row.signal_buy == 1
+        signal_sell = row.signal_sell == 1
+        
+        friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
 
-        # --- 1. CONSTRUCCIÓN DEL RANGO (00:00 - 03:00) ---
-        if ts.hour <= RANGE_END_HOUR:
-            day_high = max(day_high, h)
-            day_low = min(day_low, l)
+        # ----------------------------------------------------
+        # 1. ENTRADA (GOLDEN CROSS)
+        # ----------------------------------------------------
+        if position is None and signal_buy:
             
-            # Al final de la hora límite, el rango está listo
-            if ts.hour == RANGE_END_HOUR:
-                range_established = True
-                range_size = day_high - day_low
-                
-                # Filtro: ¿Es el rango demasiado pequeño (día muerto)?
-                min_size = row.atr * MIN_RANGE_ATR
-                if range_size < min_size:
-                    range_established = False # Rango inválido, no operamos hoy
-
-        # --- 2. BÚSQUEDA DE RUPTURA (04:00 - 23:00) ---
-        elif range_established and position is None and trades_today == 0:
+            entry_price = o * (1 + friction)
             
-            # Filtro Tendencia Macro
-            trend_ok = c > row.ema_trend
+            # SL Inicial (Stop Loss de Volatilidad Amplio)
+            # Usamos 3.5 ATR para darle mucho aire al inicio
+            sl_price = entry_price - (atr_4h * TRAILING_ATR_MULT)
             
-            # TRIGGER: El precio rompe el High del Rango establecido
-            # Usamos High > DayHigh para detectar, pero entramos con orden Stop
-            breakout = h > day_high
+            risk_dist = entry_price - sl_price
             
-            if breakout and trend_ok:
+            if risk_dist > 0:
+                # Sizing Compuesto (Risk on Peak)
+                risk_usd = peak_balance * FIXED_RISK_PCT
+                qty = risk_usd / risk_dist
                 
-                friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
+                max_qty = (balance * MAX_LEVER) / entry_price
+                qty = min(qty, max_qty)
                 
-                # Entramos al nivel de ruptura (o al open si hubo gap)
-                base_entry = max(o, day_high)
-                real_entry = base_entry * (1 + friction)
-                
-                # SL: En la mitad del rango (Si vuelve a entrar mucho, es fakeout)
-                range_height = day_high - day_low
-                stop_price = day_high - (range_height * SL_PCT_OF_RANGE)
-                
-                # TP: Expansión de 3 veces el riesgo
-                risk_per_share = real_entry - stop_price
-                target_price = real_entry + (risk_per_share * TP_MULT)
-                
-                if risk_per_share > 0:
-                    risk_usd = balance * FIXED_RISK_PCT
-                    qty = risk_usd / risk_per_share
-                    max_qty = (balance * MAX_LEVER) / real_entry
-                    qty = min(qty, max_qty)
+                if qty >= MIN_QTY:
+                    entry_comm = qty * entry_price * COMMISSION
+                    balance -= entry_comm
                     
-                    if qty >= MIN_QTY:
-                        entry_comm = qty * real_entry * COMMISSION
-                        balance -= entry_comm
-                        
-                        position = "long"
-                        entry_price = real_entry
-                        sl = stop_price
-                        tp = target_price
-                        quantity = qty
-                        entry_comm = entry_comm
-                        trades_today += 1
-                        
-                        # Intra-candle Check
-                        if l <= sl:
-                            exit_p = sl * (1 - SLIPPAGE_PCT)
-                            pnl = (exit_p - real_entry) * qty
-                            fee = exit_p * qty * COMMISSION
-                            balance += (pnl - fee)
-                            trades.append({'year': ts.year, 'pnl': pnl - entry_comm - fee, 'type': 'SL Intra'})
-                            position = None
-                        elif h >= tp:
-                            exit_p = tp * (1 - SLIPPAGE_PCT)
-                            pnl = (exit_p - real_entry) * qty
-                            fee = exit_p * qty * COMMISSION
-                            balance += (pnl - fee)
-                            trades.append({'year': ts.year, 'pnl': pnl - entry_comm - fee, 'type': 'TP Intra'})
-                            position = None
+                    position = "long"
+                    quantity = qty
+                    sl = sl_price
+                    entry = entry_price
+                    entry_comm_paid = entry_comm
+                    
+                    # Intra-candle Check
+                    if l <= sl:
+                        exit_p = sl * (1 - SLIPPAGE_PCT)
+                        pnl = (exit_p - entry_price) * qty
+                        fee = exit_p * qty * COMMISSION
+                        balance += (pnl - fee)
+                        net = pnl - entry_comm - fee
+                        trades.append({'year': ts.year, 'pnl': net, 'type': 'SL Intra'})
+                        position = None
 
-        # --- 3. GESTIÓN ---
+        # ----------------------------------------------------
+        # 2. GESTIÓN
+        # ----------------------------------------------------
         elif position == "long":
             exit_p = None
             reason = None
             
-            # SL
+            # A) TRAILING STOP (La Mejora) 
+            # Si el precio sube, subimos el SL. Nunca lo bajamos.
+            # El SL está a X ATRs del Máximo alcanzado (High - 3.5 ATR)
+            # Pero usamos ATR de 4H que es más estable.
+            new_sl = h - (atr_4h * TRAILING_ATR_MULT)
+            if new_sl > sl:
+                sl = new_sl
+            
+            # B) Stop Loss Hit (Trailing o Inicial)
             if l <= sl:
-                exit_p = sl * (1 - SLIPPAGE_PCT)
-                reason = "SL"
-            # TP
-            elif h >= tp:
-                exit_p = tp * (1 - SLIPPAGE_PCT)
-                reason = "TP"
-            # Time Exit (Fin del día)
-            elif ts.hour == TIME_EXIT_HOUR:
-                exit_p = c * (1 - SLIPPAGE_PCT)
-                reason = "EOD Exit"
+                # Gap protection
+                exit_raw = o if o < sl else sl
+                exit_p = exit_raw * (1 - SLIPPAGE_PCT)
+                reason = "Trailing Stop"
+            
+            # C) Salida Técnica (Death Cross)
+            # Si ocurre el cruce bajista ANTES de tocar el trailing
+            elif signal_sell:
+                exit_p = o * (1 - SLIPPAGE_PCT)
+                reason = "Death Cross"
             
             if exit_p:
-                pnl = (exit_p - entry_price) * quantity
-                fee = exit_p * quantity * COMMISSION
-                balance += (pnl - fee)
-                net = pnl - entry_comm - fee
-                trades.append({'year': ts.year, 'pnl': net, 'type': reason})
+                pnl = (exit_p - entry) * quantity
+                exit_comm = exit_p * quantity * COMMISSION
+                balance += (pnl - exit_comm)
+                
+                if balance > peak_balance: peak_balance = balance
+                
+                net_pnl = pnl - entry_comm_paid - exit_comm
+                trades.append({'year': ts.year, 'pnl': net_pnl, 'type': reason})
                 position = None
-
+        
         equity_curve.append(balance)
 
     # REPORTING
@@ -247,10 +226,10 @@ def run_backtest(symbol):
     total_ret = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V53 – DAILY ORB (NO INDICATORS): {symbol}")
+    print(f"📊 RESULTADOS V54 – GOLDEN CROSS PLUS (4H): {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
-    print(f"📈 Retorno Total:   {total_ret:.2f}%")
+    print(f"📈 Retorno Total:   {total_return:.2f}%")
     
     eq_series = pd.Series(equity_curve)
     if len(eq_series) > 0:
@@ -260,11 +239,9 @@ def run_backtest(symbol):
     if not trades_df.empty:
         win = (trades_df.pnl > 0).mean() * 100
         print(f"🏆 Win Rate:        {win:.2f}%")
-        print(f"🧮 Total Trades:    {len(trades_df)}")
-        try:
-            print("\n📅 Rendimiento Anual:")
-            print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
-        except: pass
+        print(f"🧮 Total Trades:    {len(trades_df)}\n")
+        print("📅 RENDIMIENTO POR AÑO:")
+        print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
     else:
         print("⚠️ No hubo trades.")
 
