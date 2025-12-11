@@ -5,27 +5,25 @@ import os
 import talib
 
 # ======================================================
-#  🔥 CONFIG V56 – TREND & DIP (HYBRID 4H/1H)
+#  🔥 CONFIG V57 – INSIDE BAR BREAKOUT (4H)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
-# ---- Filtro Macro (El Jefe - 4H) ----
-FAST_EMA_4H = 50
-SLOW_EMA_4H = 200
+# ---- Estrategia: PRICE ACTION 4H ----
+# Tendencia: Solo largos si Close > EMA 50
+EMA_TREND = 50 
 
-# ---- Gatillo Micro (El Obrero - 1H) ----
-RSI_PERIOD = 14
-RSI_OVERSOLD = 35       # Comprar el dip
-RSI_OVERBOUGHT = 75     # Vender la euforia (Take Profit dinámico)
+# ---- Salidas ----
+# Stop Loss Técnico: El mínimo de la Inside Bar (o un poco abajo)
+SL_BUFFER = 0.002       # 0.2% de aire bajo el patrón
+# Take Profit: No fijo. Usamos Trailing Stop para surfear la expansión.
+TRAILING_ATR_MULT = 3.0 
 
-# ---- Salidas de Emergencia ----
-SL_ATR_MULT = 2.5       # Stop Loss amplio (por si el dip sigue cayendo)
-
-# ---- Risk & Microestructura (Motor V55) ----
+# ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.04   # 4% (Un poco menos que V55 porque habrá más frecuencia)
+FIXED_RISK_PCT = 0.03   # 3% (Buscamos más frecuencia, bajamos riesgo)
 MAX_LEVER = 10          
 
 COMMISSION = 0.0004         
@@ -35,10 +33,10 @@ BASE_LATENCY = 0.0001
 MIN_QTY = 0.01
 
 # ======================================================
-#  1. CARGA Y PREPARACIÓN DE DATOS DUALES
+#  1. CARGA Y RESAMPLING
 # ======================================================
 
-def load_and_prepare(symbol):
+def load_and_resample(symbol):
     print(f"🔍 Cargando datos 1H para {symbol}...")
     candidates = [f"mainnet_data_{TIMEFRAME_STR}_{symbol}.csv", f"{symbol}_{TIMEFRAME_STR}.csv"]
     paths = ["data", ".", "cpr_bot_v90/data"]
@@ -65,52 +63,60 @@ def load_and_prepare(symbol):
     df.sort_values("timestamp", inplace=True)
     df.set_index('timestamp', inplace=True)
 
-    # --- A. INDICADORES EN 1H (Micro) ---
-    print("📐 Calculando indicadores 1H...")
-    df['rsi'] = talib.RSI(df['close'], timeperiod=RSI_PERIOD)
-    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-    # Pre-cálculos para evitar lookahead en 1H
-    df['rsi_prev'] = df['rsi'].shift(1)
-    df['atr_prev'] = df['atr'].shift(1)
-
-    # --- B. INDICADORES EN 4H (Macro) ---
-    print("🔄 Generando contexto 4H...")
-    ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last'}
+    # --- RESAMPLING A 4H ---
+    print("🔄 Resampleando a 4H...")
+    ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}
     df_4h = df.resample('4h').apply(ohlc_dict).dropna()
     
-    df_4h['ema_fast'] = talib.EMA(df_4h['close'], timeperiod=FAST_EMA_4H)
-    df_4h['ema_slow'] = talib.EMA(df_4h['close'], timeperiod=SLOW_EMA_4H)
+    # INDICADORES 4H
+    df_4h['ema_trend'] = talib.EMA(df_4h['close'], timeperiod=EMA_TREND)
+    df_4h['atr'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
     
-    # Definir Tendencia en 4H (1 = Alcista, 0 = Bajista/Neutro)
-    df_4h['trend_ok'] = np.where(df_4h['ema_fast'] > df_4h['ema_slow'], 1, 0)
+    # DETECCIÓN DE INSIDE BAR (IB)
+    # IB: High < Prev_High AND Low > Prev_Low
+    # Shift(1) para comparar actual con anterior dentro del marco 4H
+    prev_high = df_4h['high'].shift(1)
+    prev_low = df_4h['low'].shift(1)
     
-    # SHIFT(1) OBLIGATORIO:
-    # A las 13:00 (1H) solo conocemos la tendencia de la vela 4H que cerró a las 12:00.
+    df_4h['is_inside'] = (df_4h['high'] < prev_high) & (df_4h['low'] > prev_low)
+    
+    # --- LOGICA DE SEÑAL ---
+    # Si la vela que ACABA DE CERRAR fue una Inside Bar,
+    # y la tendencia es alcista...
+    # Ponemos una orden pendiente para las próximas 4 horas en el High de esa IB.
+    
+    # Trend Filter (Vela cerrada > EMA)
+    trend_ok = df_4h['close'] > df_4h['ema_trend']
+    
+    df_4h['setup_active'] = df_4h['is_inside'] & trend_ok
+    df_4h['trigger_price'] = df_4h['high'] # El trigger es el High de la IB
+    df_4h['stop_loss_level'] = df_4h['low'] # El Stop es el Low de la IB
+
+    # --- SHIFT CRÍTICO (Lookahead prevention) ---
+    # La señal se genera al CIERRE de la vela. Estará disponible en la siguiente.
     df_4h_shifted = df_4h.shift(1)
 
-    # --- C. FUSIÓN ---
-    print("🔗 Fusionando Timeframes...")
-    # Unimos la tendencia 4H a cada vela de 1H
-    df_final = df.join(df_4h_shifted[['trend_ok']], rsuffix='_4h')
+    print("🔄 Sincronizando con 1H...")
+    # Traemos las señales al timeframe de 1H
+    cols = ['setup_active', 'trigger_price', 'stop_loss_level', 'atr']
+    df_1h = df.join(df_4h_shifted[cols], rsuffix='_4h')
     
-    # Rellenamos los huecos (Forward Fill)
-    # Si a las 12:00 la tendencia era alcista, a las 13, 14 y 15 sigue siéndolo hasta nueva orden.
-    df_final['trend_ok'] = df_final['trend_ok'].ffill()
+    # Rellenamos: La señal de la vela 4H es válida durante las siguientes 4 velas de 1H
+    df_1h.ffill(inplace=True)
+    df_1h.dropna(inplace=True)
+    df_1h.reset_index(inplace=True)
     
-    df_final.dropna(inplace=True)
-    df_final.reset_index(inplace=True)
-    
-    return df_final
+    return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE V56
+#  🚀 BACKTEST ENGINE V57
 # ======================================================
 
 def run_backtest(symbol):
-    df = load_and_prepare(symbol)
+    df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V56 (Trend 4H + Dip 1H) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V57 (4H Inside Bar) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     equity_curve = [balance]
@@ -121,94 +127,101 @@ def run_backtest(symbol):
     entry_comm = 0
     
     trades = []
+    
+    # Para evitar entrar multiple veces en la misma vela de 4H
+    last_trade_4h_idx = -1 
 
     for i in range(len(df)):
         row = df.iloc[i]
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
         
-        # Datos Híbridos
-        trend_4h_bullish = row.trend_ok == 1.0  # Contexto Macro
-        rsi_val = row.rsi_prev                  # Trigger Micro (Vela cerrada anterior)
-        atr = row.atr_prev
+        # Datos del Setup (Vienen de la vela 4H anterior)
+        setup_active = row.setup_active == 1.0
+        trigger = row.trigger_price
+        sl_technical = row.stop_loss_level
+        atr_4h = row.atr
         
         friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
 
         # ----------------------------------------------------
-        # 1. ENTRADA (BUY THE DIP IN UPTREND)
+        # 1. ENTRADA (BREAKOUT)
         # ----------------------------------------------------
-        if position is None:
-            # Filtro 1: Tendencia 4H debe ser alcista
-            # Filtro 2: RSI 1H debe estar sobrevendido (Dip)
-            if trend_4h_bullish and (rsi_val < RSI_OVERSOLD):
+        # Si hay setup de Inside Bar activo...
+        if position is None and setup_active:
+            
+            # Verificamos si el precio rompió el Trigger (High de la IB)
+            # Usamos High > Trigger para detectar ruptura
+            # Pero Open para ver si abrimos con gap
+            breakout_occurred = h > trigger
+            
+            # Filtro adicional: Que el SL no esté pegado al entry (ruido)
+            valid_structure = (trigger - sl_technical) > (trigger * 0.002) # 0.2% min dist
+            
+            if breakout_occurred and valid_structure:
                 
-                entry_price = o * (1 + friction)
+                # Precio de ejecución: El nivel del trigger o el Open si hubo gap
+                base_entry = max(o, trigger)
+                real_entry = base_entry * (1 + friction)
                 
-                # SL de Emergencia (Basado en ATR 1H)
-                sl_price = entry_price - (atr * SL_ATR_MULT)
-                risk_dist = entry_price - sl_price
+                # Stop Loss: Low de la IB
+                sl_price = sl_technical * (1 - SL_BUFFER)
+                
+                # Riesgo
+                risk_dist = real_entry - sl_price
                 
                 if risk_dist > 0:
-                    # Sizing: Compound on Peak (La magia de la V55)
+                    # Risk on Peak
                     risk_usd = peak_balance * FIXED_RISK_PCT
                     qty = risk_usd / risk_dist
-                    
-                    max_qty = (balance * MAX_LEVER) / entry_price
+                    max_qty = (balance * MAX_LEVER) / real_entry
                     qty = min(qty, max_qty)
                     
                     if qty >= MIN_QTY:
-                        entry_comm = qty * entry_price * COMMISSION
+                        entry_comm = qty * real_entry * COMMISSION
                         balance -= entry_comm
                         
                         position = "long"
                         quantity = qty
                         sl = sl_price
-                        entry = entry_price
+                        entry = real_entry
                         entry_comm_paid = entry_comm
                         
                         # Intra-candle Check
                         if l <= sl:
                             exit_p = sl * (1 - SLIPPAGE_PCT)
-                            pnl = (exit_p - entry_price) * qty
+                            pnl = (exit_p - real_entry) * qty
                             fee = exit_p * qty * COMMISSION
                             balance += (pnl - fee)
-                            
                             net = pnl - entry_comm - fee
                             trades.append({'year': ts.year, 'pnl': net, 'type': 'SL Intra'})
                             position = None
 
         # ----------------------------------------------------
-        # 2. GESTIÓN (SALIDA POR RSI ALTO O STOP)
+        # 2. GESTIÓN
         # ----------------------------------------------------
         elif position == "long":
+            
             exit_p = None
             reason = None
             
-            # A) Take Profit Dinámico: RSI Sobrecomprado (Rebote completado)
-            # Usamos el RSI actual (calculado al cierre, pero simulamos salida al cierre)
-            # Para ser realistas en backtest, si RSI[i-1] > 75, salimos en Open[i].
-            # Aquí evaluamos rsi_val (que es rsi_prev). Si al abrir la vela, el RSI previo era alto -> Vender.
-            if rsi_val > RSI_OVERBOUGHT:
-                exit_p = o * (1 - SLIPPAGE_PCT)
-                reason = "TP (RSI High)"
+            # A) TRAILING STOP
+            # Protegemos ganancias usando volatilidad de 4H
+            new_sl = h - (atr_4h * TRAILING_ATR_MULT)
+            if new_sl > sl:
+                sl = new_sl
             
-            # B) Tendencia 4H rota (Failsafe)
-            # Si el jefe dice que la fiesta acabó, nos vamos.
-            elif not trend_4h_bullish:
-                exit_p = o * (1 - SLIPPAGE_PCT)
-                reason = "Trend 4H Broken"
-
-            # C) Stop Loss Hard
-            elif l <= sl:
-                exit_p = sl * (1 - SLIPPAGE_PCT)
-                reason = "Stop Loss"
+            # B) Stop Loss Hit
+            if l <= sl:
+                exit_raw = o if o < sl else sl 
+                exit_p = exit_raw * (1 - SLIPPAGE_PCT)
+                reason = "Trailing/SL"
             
             if exit_p:
                 pnl = (exit_p - entry) * quantity
                 exit_comm = exit_p * quantity * COMMISSION
                 balance += (pnl - exit_comm)
                 
-                # Compounding: Actualizar Peak solo si ganamos
                 if balance > peak_balance: peak_balance = balance
                 
                 net_pnl = pnl - entry_comm_paid - exit_comm
@@ -222,7 +235,7 @@ def run_backtest(symbol):
     total_ret = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V56 – TREND & DIP (HYBRID): {symbol}")
+    print(f"📊 RESULTADOS V57 – INSIDE BAR 4H: {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
     print(f"📈 Retorno Total:   {total_ret:.2f}%")
@@ -235,8 +248,8 @@ def run_backtest(symbol):
     if not trades_df.empty:
         win = (trades_df.pnl > 0).mean() * 100
         print(f"🏆 Win Rate:        {win:.2f}%")
-        print(f"🧮 Total Trades:    {len(trades_df)}")
-        print("\n📅 RENDIMIENTO POR AÑO:")
+        print(f"🧮 Total Trades:    {len(trades_df)}\n")
+        print("📅 RENDIMIENTO POR AÑO:")
         print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
     else:
         print("⚠️ No hubo trades.")
