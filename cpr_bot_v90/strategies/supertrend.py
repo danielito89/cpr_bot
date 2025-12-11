@@ -5,26 +5,28 @@ import os
 import talib
 
 # ======================================================
-#  🔥 CONFIG V59 – PORTFOLIO BUILDER (FINAL)
+#  🔥 CONFIG V60 – SILVER BULLET (4H FIBONACCI TREND)
 # ======================================================
 
-SYMBOL = "ETHUSDT"  # ¡PRUEBA CAMBIAR ESTO A 'BTCUSDT'!
+SYMBOL = "ETHUSDT" # ¡Cambia esto para probar otras monedas!
 TIMEFRAME_STR = "1h"
 
-# ---- Estrategia: TENDENCIA PURA 4H (LONG ONLY) ----
-FAST_EMA = 50
-SLOW_EMA = 200
+# ---- Estrategia: TENDENCIA MEDIA 4H (Silver Cross) ----
+# Usamos Fibonacci EMAs. Reaccionan más rápido que 50/200.
+FAST_EMA = 21
+SLOW_EMA = 55
 
 # ---- Salidas ----
-# Salida Principal: Death Cross (EMA 50 < 200)
+# Salida Principal: Death Cross (21 < 55)
 # Salida Emergencia: Stop Loss ATR
-SL_ATR_MULT = 3.0       
+# (Un poco más ajustado que V59 porque la entrada es más temprana)
+SL_ATR_MULT = 2.5       
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-# Gestión de Riesgo Compuesta (Risk on Peak Equity)
-FIXED_RISK_PCT = 0.05   
-MAX_LEVER = 5           # Apalancamiento Swing
+# Bajamos el riesgo unitario al 4% porque esperamos más trades que en V59
+FIXED_RISK_PCT = 0.04   
+MAX_LEVER = 10          
 
 COMMISSION = 0.0004         
 SPREAD_PCT = 0.0004         
@@ -80,7 +82,7 @@ def load_and_resample(symbol):
     # Cruces (Shift 1 para comparar con vela anterior)
     df_4h['prev_trend'] = df_4h['trend_up'].shift(1)
     
-    # Golden Cross: Hoy es 1, Ayer era 0
+    # Silver Cross: Hoy es 1, Ayer era 0
     df_4h['signal_buy'] = np.where((df_4h['trend_up'] == 1) & (df_4h['prev_trend'] == 0), 1, 0)
     
     # Death Cross: Hoy es 0, Ayer era 1
@@ -99,14 +101,14 @@ def load_and_resample(symbol):
     return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE V59
+#  🚀 BACKTEST ENGINE V60
 # ======================================================
 
 def run_backtest(symbol):
     df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V59 (Golden Cross Final) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V60 (Silver Bullet 21/55) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     equity_curve = [balance]
@@ -132,7 +134,7 @@ def run_backtest(symbol):
         friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
 
         # ----------------------------------------------------
-        # 1. ENTRADA (LONG ONLY)
+        # 1. ENTRADA (SILVER CROSS)
         # ----------------------------------------------------
         if position is None and signal_buy:
             
@@ -180,7 +182,7 @@ def run_backtest(symbol):
             # A) Salida Técnica: DEATH CROSS
             if signal_sell:
                 exit_p = o * (1 - SLIPPAGE_PCT)
-                reason = "Death Cross"
+                reason = "Silver Death Cross"
             
             # B) Stop Loss Hit (Emergencia)
             elif l <= sl:
@@ -206,10 +208,10 @@ def run_backtest(symbol):
     total_ret = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V59 – GOLDEN CROSS FINAL: {symbol}")
+    print(f"📊 RESULTADOS V60 – SILVER BULLET (4H): {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
-    print(f"📈 Retorno Total:   {total_ret:.2f}%") # Variable corregida aquí
+    print(f"📈 Retorno Total:   {total_ret:.2f}%")
     
     eq_series = pd.Series(equity_curve)
     if len(eq_series) > 0:
@@ -219,14 +221,13 @@ def run_backtest(symbol):
     if not trades_df.empty:
         win = (trades_df.pnl > 0).mean() * 100
         print(f"🏆 Win Rate:        {win:.2f}%")
-        print(f"🧮 Total Trades:    {len(trades_df)}")
+        print(f"🧮 Total Trades:    {len(trades_df)}\n")
         print("\n📅 RENDIMIENTO POR AÑO:")
         print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
         print("="*55)
         
-        csv_name = f"log_v59_{symbol}.csv"
+        csv_name = f"log_v60_{symbol}.csv"
         trades_df.to_csv(csv_name, index=False)
-        print(f"💾 Log guardado en {csv_name}")
     else:
         print("⚠️ No hubo trades.")
 
