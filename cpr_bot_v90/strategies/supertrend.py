@@ -5,26 +5,30 @@ import os
 import talib
 
 # ======================================================
-#  🔥 CONFIG V50 – CLEAN SLATE (GOLDEN CROSS 4H)
+#  🔥 CONFIG V51 – TREND SURFER (4H PULLBACKS)
 # ======================================================
 
 SYMBOL = "ETHUSDT"
 TIMEFRAME_STR = "1h"
 
-# ---- Estrategia: TENDENCIA PURA EN 4H ----
-# No operamos ruido de 1H. Operamos estructura de 4H.
+# ---- Estrategia: SWING EN 4H ----
+# Tendencia Macro
 FAST_EMA = 50
 SLOW_EMA = 200
+# Gatillo de Pullback (EMA más rápida para detectar el dip)
+TRIGGER_EMA = 20        
 
 # ---- Salidas ----
-# No hay TP. Dejamos correr hasta que la tendencia se invierta (Cruce a la baja).
-# SL de emergencia por si el cruce fue falso.
-SL_ATR_MULT = 3.0       
+# Stop Loss Inicial (Debajo del swing)
+SL_ATR_MULT = 2.0       
+# Trailing Stop: Si cierra bajo la EMA 50 (Soporte dinámico)
+TRAILING_EMA_EXIT = True
 
 # ---- Risk & Microestructura ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.05   # 5% por trade (Pocos trades = Mayor convicción)
-MAX_LEVER = 5           # Apalancamiento suave (Swing Trading)
+# Arriesgamos un poco menos por trade porque haremos más operaciones
+FIXED_RISK_PCT = 0.03   
+MAX_LEVER = 10          
 
 COMMISSION = 0.0004         
 SPREAD_PCT = 0.0004         
@@ -33,12 +37,11 @@ BASE_LATENCY = 0.0001
 MIN_QTY = 0.01
 
 # ======================================================
-#  1. CARGA Y RESAMPLING (EL SECRETO)
+#  1. CARGA Y RESAMPLING (4H)
 # ======================================================
 
 def load_and_resample(symbol):
     print(f"🔍 Cargando datos 1H para {symbol}...")
-    # Rutas estándar
     candidates = [f"mainnet_data_{TIMEFRAME_STR}_{symbol}.csv", f"{symbol}_{TIMEFRAME_STR}.csv"]
     paths = ["data", ".", "cpr_bot_v90/data"]
     
@@ -51,9 +54,8 @@ def load_and_resample(symbol):
                 break
         if df is not None: break
 
-    if df is None: return None, None
+    if df is None: return None
 
-    # Limpieza
     df.columns = [c.lower() for c in df.columns]
     col_map = {'open_time': 'timestamp', 'date': 'timestamp'}
     df.rename(columns=col_map, inplace=True)
@@ -65,41 +67,38 @@ def load_and_resample(symbol):
     df.sort_values("timestamp", inplace=True)
     df.set_index('timestamp', inplace=True)
 
-    # --- MAGIC TRICK: RESAMPLING A 4H ---
-    # Convertimos el ruido de 1H en velas sólidas de 4H
-    print("🔄 Convirtiendo datos: 1H -> 4H para eliminar ruido...")
-    
-    ohlc_dict = {
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }
-    
+    # --- RESAMPLING A 4H ---
+    print("🔄 Generando estructura de 4H...")
+    ohlc_dict = {'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}
     df_4h = df.resample('4h').apply(ohlc_dict).dropna()
     
-    # Calculamos indicadores sobre datos de 4H (Mucho más fiables)
-    df_4h['ema_fast'] = talib.EMA(df_4h['close'], timeperiod=FAST_EMA)
-    df_4h['ema_slow'] = talib.EMA(df_4h['close'], timeperiod=SLOW_EMA)
+    # INDICADORES EN 4H
+    # Tendencia
+    df_4h['ema_50'] = talib.EMA(df_4h['close'], timeperiod=FAST_EMA)
+    df_4h['ema_200'] = talib.EMA(df_4h['close'], timeperiod=SLOW_EMA)
+    # Pullback zone
+    df_4h['ema_20'] = talib.EMA(df_4h['close'], timeperiod=TRIGGER_EMA)
+    
     df_4h['atr'] = talib.ATR(df_4h['high'], df_4h['low'], df_4h['close'], timeperiod=14)
     
-    # Señal de Cruce (Golden Cross)
-    # 1 = Alcista (Fast > Slow), -1 = Bajista
-    df_4h['trend'] = np.where(df_4h['ema_fast'] > df_4h['ema_slow'], 1, -1)
+    # LÓGICA DE SEÑAL (PULLBACK)
+    # 1. Tendencia Alcista: EMA 50 > EMA 200
+    # 2. Pullback: El precio (Low) tocó la EMA 20
+    # 3. Confirmación: La vela cerró verde (Close > Open) demostrando rechazo
     
-    # Detectar el momento exacto del cruce (Shift 1 para no mirar futuro)
-    # Si ayer era -1 y hoy es 1 -> COMPRA
-    df_4h['prev_trend'] = df_4h['trend'].shift(1)
-    df_4h['signal'] = np.where((df_4h['trend'] == 1) & (df_4h['prev_trend'] == -1), 1, 0)
+    trend_up = df_4h['ema_50'] > df_4h['ema_200']
+    dip_touch = df_4h['low'] <= df_4h['ema_20']
+    green_candle = df_4h['close'] > df_4h['open']
     
-    # Salida: Cruce de la muerte (Fast < Slow)
-    df_4h['exit_signal'] = np.where((df_4h['trend'] == -1) & (df_4h['prev_trend'] == 1), 1, 0)
+    # Señal de Compra
+    df_4h['signal_buy'] = np.where(trend_up & dip_touch & green_candle, 1, 0)
+    
+    # Señal de Salida por Tendencia (Cierre bajo EMA 50)
+    df_4h['trend_broken'] = df_4h['close'] < df_4h['ema_50']
 
-    # Volvemos a mapear esto a las velas de 1H para simular la ejecución precisa
-    # (Usamos forward fill para que la señal de 4H persista en las velas de 1H correspondientes)
-    print("🔄 Mapeando señales 4H de vuelta a 1H para ejecución precisa...")
-    df_1h = df.join(df_4h[['ema_fast', 'ema_slow', 'atr', 'trend', 'signal', 'exit_signal']], rsuffix='_4h')
+    # Mapeo a 1H
+    print("🔄 Sincronizando señales con timeframe operativo (1H)...")
+    df_1h = df.join(df_4h[['ema_50', 'ema_200', 'atr', 'signal_buy', 'trend_broken']], rsuffix='_4h')
     df_1h.fillna(method='ffill', inplace=True)
     df_1h.dropna(inplace=True)
     df_1h.reset_index(inplace=True)
@@ -107,59 +106,73 @@ def load_and_resample(symbol):
     return df_1h
 
 # ======================================================
-#  🚀 BACKTEST ENGINE (SIMPLIFICADO & ROBUSTO)
+#  🚀 BACKTEST ENGINE V51
 # ======================================================
 
 def run_backtest(symbol):
     df = load_and_resample(symbol)
     if df is None: return
 
-    print(f"🚀 Iniciando Backtest V50 (Golden Cross 4H) para {symbol}\n")
+    print(f"🚀 Iniciando Backtest V51 (4H Trend Surfer) para {symbol}\n")
 
     balance = INITIAL_BALANCE
     equity_curve = [balance]
-    peak_balance = balance # Para cálculo de Drawdown
+    peak_balance = balance
 
     position = None 
     entry_price = 0; quantity = 0; sl = 0
     entry_comm = 0
     
     trades = []
+    
+    # Control para no entrar en la misma señal 4 veces (ya que 1 vela 4H son 4 de 1H)
+    last_signal_time = None 
 
     for i in range(len(df)):
         row = df.iloc[i]
         
-        # Datos (Vienen de 1H, pero los indicadores son de 4H)
         ts = row.timestamp
         o, h, l, c = row.open, row.high, row.low, row.close
+        
+        # Datos de 4H proyectados
         atr_4h = row.atr
+        signal_buy = row.signal_buy == 1
+        trend_broken = row.trend_broken
+        ema_50_4h = row.ema_50
         
-        # Señales (Calculadas en 4H)
-        signal_buy = row.signal == 1
-        signal_sell = row.exit_signal == 1 # Cruce bajista
-        
-        # Costos
         friction = SLIPPAGE_PCT + SPREAD_PCT + BASE_LATENCY
 
         # ----------------------------------------------------
-        # 1. ENTRADA (Solo si hay Golden Cross confirmado en 4H)
+        # 1. ENTRADA (BUY THE DIP)
         # ----------------------------------------------------
-        # Nota: Al usar ffill, la señal '1' se repite 4 veces. 
-        # position is None evita entrar multiples veces.
+        # Verificamos si es una señal nueva (ha pasado al menos 4 horas desde la anterior usada)
+        # O simplemente si no tenemos posición.
+        
         if position is None and signal_buy:
+            
+            # Evitar re-entrar en la misma vela de 4H repetidamente
+            # Usamos una lógica simple: Si signal_buy está activa, entramos.
+            # Como signal_buy viene de una vela 4H CERRADA, es una señal estable por 4 horas.
+            # Tomamos la primera oportunidad.
             
             entry_price = o * (1 + friction)
             
-            # SL Amplio (Basado en ATR de 4H)
-            sl_price = entry_price - (atr_4h * SL_ATR_MULT)
+            # SL Técnico: Debajo de la EMA 50 (Soporte Estructural) o ATR
+            # Usamos EMA 50 - un margen, porque si rompe la 50, la tesis de "surf" se rompe
+            technical_sl = ema_50_4h - (atr_4h * 0.5) 
+            
+            # SL de Volatilidad (Respaldo)
+            atr_sl = entry_price - (atr_4h * SL_ATR_MULT)
+            
+            # Usamos el más lejano para dar espacio? No, el más lógico.
+            # Si estamos surfeando sobre la 20/50, romper la 50 es malo.
+            sl_price = min(technical_sl, atr_sl)
+            
             risk_dist = entry_price - sl_price
             
             if risk_dist > 0:
-                # Sizing Conservador
                 risk_usd = balance * FIXED_RISK_PCT
                 qty = risk_usd / risk_dist
-                
-                # Cap de Leverage
                 max_qty = (balance * MAX_LEVER) / entry_price
                 qty = min(qty, max_qty)
                 
@@ -170,41 +183,42 @@ def run_backtest(symbol):
                     position = "long"
                     quantity = qty
                     sl = sl_price
-                    entry = entry_price # Guardar para calculo PnL
+                    entry = entry_price
                     
-                    # Check Intra-candle crash
+                    # Intra-candle
                     if l <= sl:
                         exit_p = sl * (1 - SLIPPAGE_PCT)
                         pnl = (exit_p - entry_price) * qty
                         fee = exit_p * qty * COMMISSION
                         balance += (pnl - fee)
-                        trades.append({'year': ts.year, 'pnl': pnl - entry_comm - fee})
+                        trades.append({'year': ts.year, 'pnl': pnl - entry_comm - fee, 'type': 'SL Intra'})
                         position = None
 
         # ----------------------------------------------------
-        # 2. GESTIÓN (HOLD hasta Death Cross)
+        # 2. GESTIÓN
         # ----------------------------------------------------
         elif position == "long":
             exit_p = None
             reason = None
             
-            # A) Stop Loss de Emergencia
-            if l <= sl:
+            # A) Salida Técnica: Cierre de 4H bajo la EMA 50
+            # trend_broken es True si Close_4H < EMA_50_4H
+            if trend_broken:
+                exit_p = o * (1 - SLIPPAGE_PCT)
+                reason = "Trend Break (EMA 50)"
+            
+            # B) Stop Loss Hard
+            elif l <= sl:
                 exit_p = sl * (1 - SLIPPAGE_PCT)
                 reason = "Stop Loss"
-            
-            # B) Salida Técnica: Cruce de la Muerte (EMA 50 < 200 en 4H)
-            elif signal_sell:
-                exit_p = o * (1 - SLIPPAGE_PCT) # Salimos al Open de la vela que confirma el cruce
-                reason = "Death Cross"
             
             if exit_p:
                 pnl = (exit_p - entry) * quantity
                 exit_comm = exit_p * quantity * COMMISSION
                 balance += (pnl - exit_comm)
                 
-                net_pnl = pnl - entry_comm - exit_comm # entry_comm aprox
-                trades.append({'year': ts.year, 'pnl': net_pnl})
+                net_pnl = pnl - entry_comm - exit_comm
+                trades.append({'year': ts.year, 'pnl': net_pnl, 'type': reason})
                 position = None
         
         equity_curve.append(balance)
@@ -214,7 +228,7 @@ def run_backtest(symbol):
     total_ret = (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100
     
     print("\n" + "="*55)
-    print(f"📊 RESULTADOS V50 – CLEAN SLATE (4H TREND): {symbol}")
+    print(f"📊 RESULTADOS V51 – TREND SURFER (4H): {symbol}")
     print("="*55)
     print(f"💰 Balance Final:   ${balance:.2f}")
     print(f"📈 Retorno Total:   {total_ret:.2f}%")
@@ -231,7 +245,7 @@ def run_backtest(symbol):
         print("\n📅 Rendimiento Anual:")
         print(trades_df.groupby("year")["pnl"].agg(["sum","count"]))
     else:
-        print("⚠️ No hubo trades (Mercado muy lateral o falta de datos).")
+        print("⚠️ No hubo trades.")
 
 if __name__ == "__main__":
     run_backtest(SYMBOL)
