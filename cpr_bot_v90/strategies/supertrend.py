@@ -17,11 +17,11 @@ FAST_EMA = 50
 SLOW_EMA = 200
 
 # ---- MEJORA 1: Filtro de Fuerza (ADX) ----
-USE_ADX_FILTER = True
+USE_ADX_FILTER = False
 ADX_THRESHOLD = 25      # Solo operar si la tendencia es fuerte
 
 # ---- MEJORA 4: Filtro Diario (The Tide) ----
-USE_DAILY_FILTER = True
+USE_DAILY_FILTER = False
 DAILY_EMA_PERIOD = 200  # Solo Longs si Precio > EMA 200 Diaria
 
 # ---- Salidas ----
