@@ -24,7 +24,15 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Parámetros de Estrategia
-SYMBOLS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "DOGE/USDT:USDT", "1000PEPE/USDT:USDT", "ADA/USDT:USDT"]
+SYMBOLS = [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "BNB/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "ADA/USDT:USDT",
+    "1000PEPE/USDT:USDT" 
+]
 TIMEFRAME = "1h"       # Bajamos velas de 1H
 RESAMPLE_TF = "4h"     # Operamos estructura de 4H
 FAST_EMA = 50
@@ -127,15 +135,33 @@ def execute_logic(exchange, data):
     symbol = data['symbol']
     price = data['price']
     
-    # Chequear posición actual
-    positions = exchange.fetch_positions([symbol])
-    pos = [p for p in positions if p['symbol'] == symbol][0]
-    pos_amt = float(pos['contracts']) if pos['contracts'] else 0.0
-    pos_side = pos['side'] # 'long' o 'short' (aunque en hedge mode es distinto, simplificamos)
-    
-    # En One-Way Mode, side suele ser implicito por el signo de contracts, pero ccxt lo normaliza.
-    # Asumimos One-Way Mode para simplicidad V1.
-    
+    # --- FIX ROBUSTO DE POSICIÓN ---
+    try:
+        # Buscamos posiciones para este símbolo
+        positions = exchange.fetch_positions([symbol])
+        
+        # Buscamos la posición específica en la lista devuelta
+        # (A veces devuelve varias o ninguna)
+        target_pos = None
+        for p in positions:
+            if p['symbol'] == symbol:
+                target_pos = p
+                break
+        
+        if target_pos:
+            pos_amt = float(target_pos['contracts']) if target_pos['contracts'] else 0.0
+            pos_side = target_pos['side'] # 'long' o 'short'
+        else:
+            # Si la lista está vacía o no se encuentra el símbolo, asumimos 0
+            pos_amt = 0.0
+            pos_side = 'flat'
+            
+    except Exception as e:
+        print(f"⚠️ Error leyendo posición para {symbol}: {e}")
+        # En caso de error de red, asumimos 0 para no bloquear, 
+        # pero es arriesgado. Mejor saltar esta vuelta.
+        return 
+
     print(f"   Posición actual: {pos_amt} contratos ({pos_side})")
 
     # --- LÓGICA DE ENTRADA (LONG) ---
@@ -145,45 +171,60 @@ def execute_logic(exchange, data):
         send_telegram(msg)
         
         if not DRY_RUN:
-            # Calcular tamaño
-            balance = exchange.fetch_balance()['USDT']['free']
-            risk_amt = balance * RISK_PER_TRADE
-            
-            # SL Distancia
-            sl_dist = data['atr'] * SL_ATR_MULT
-            sl_price = price - sl_dist
-            
-            # Tamaño posición: Risk / Distancia al SL
-            # (Ajustado por leverage si es necesario, pero priorizamos riesgo fijo)
-            qty_usdt = (risk_amt / sl_dist) * price
-            
-            # Cap de apalancamiento
-            max_pos = balance * LEVERAGE
-            qty_usdt = min(qty_usdt, max_pos)
-            
-            # Convertir a contratos
-            qty_contracts = qty_usdt / price
-            
-            # Ajustar precisión
-            market = exchange.market(symbol)
-            qty_contracts = exchange.amount_to_precision(symbol, qty_contracts)
-            
             try:
+                # Calcular balance disponible
+                balance = exchange.fetch_balance()['USDT']['free']
+                risk_amt = balance * RISK_PER_TRADE
+                
+                # SL Distancia
+                sl_dist = data['atr'] * SL_ATR_MULT
+                sl_price = price - sl_dist
+                
+                # Evitar división por cero
+                if sl_dist == 0: sl_dist = price * 0.01
+
+                # Tamaño posición: Risk / Distancia al SL
+                qty_usdt = (risk_amt / sl_dist) * price
+                
+                # Cap de apalancamiento
+                max_pos = balance * LEVERAGE
+                qty_usdt = min(qty_usdt, max_pos)
+                
+                # Convertir a contratos
+                qty_contracts = qty_usdt / price
+                
+                # Ajustar precisión (CRÍTICO PARA 1000PEPE)
+                market = exchange.market(symbol)
+                qty_contracts = exchange.amount_to_precision(symbol, qty_contracts)
+                
+                # Verificación mínima de notional (Binance suele pedir min 5 USDT)
+                if (float(qty_contracts) * price) < 6:
+                    print(f"⚠️ Orden muy pequeña para {symbol}, saltando.")
+                    return
+
                 # 1. Poner Leverage
-                exchange.set_leverage(LEVERAGE, symbol)
+                try:
+                    exchange.set_leverage(LEVERAGE, symbol)
+                except: pass # A veces falla si ya está puesto, ignoramos
                 
                 # 2. Orden de Mercado
+                print(f"   Enviando Buy Market: {qty_contracts}")
                 order = exchange.create_market_buy_order(symbol, qty_contracts)
                 entry_price = float(order['average']) if order['average'] else price
                 
                 # 3. Poner Stop Loss
                 sl_price = entry_price - sl_dist
+                
+                # Ajustar precisión del precio SL
+                sl_price = float(exchange.price_to_precision(symbol, sl_price))
+
                 exchange.create_order(symbol, 'stop_market', 'sell', qty_contracts, None, {'stopPrice': sl_price, 'reduceOnly': True})
                 
                 send_telegram(f"✅ Orden Ejecutada: Long {symbol} @ {entry_price}\nSL: {sl_price}")
                 
             except Exception as e:
-                send_telegram(f"❌ Error ejecutando orden: {e}")
+                print(f"❌ Error ejecutando orden: {e}")
+                send_telegram(f"❌ Error ejecutando orden {symbol}: {e}")
 
     # --- LÓGICA DE SALIDA (DEATH CROSS) ---
     elif data['signal_sell'] and pos_amt > 0:
@@ -199,7 +240,8 @@ def execute_logic(exchange, data):
                 exchange.cancel_all_orders(symbol)
                 send_telegram(f"✅ Posición cerrada exitosamente.")
             except Exception as e:
-                send_telegram(f"❌ Error cerrando posición: {e}")
+                print(f"❌ Error cerrando: {e}")
+                send_telegram(f"❌ Error cerrando posición {symbol}: {e}")
 
     else:
         print(f"   💤 Nada que hacer. Tendencia: {data['trend']}")
