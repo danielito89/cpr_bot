@@ -5,52 +5,44 @@ import os
 import talib
 
 # ======================================================
-#  🌪️ CONFIG V73 – BLACK SWAN HUNTER (FIXED)
+#  🌪️ CONFIG V75 – THE SURGEON (FINAL SHORT)
 # ======================================================
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "1000PEPEUSDT"]
-# Prioridad de ejecución (UPGRADE 3)
-PRIORITY_MAP = {
-    "BTCUSDT": 1, 
-    "ETHUSDT": 2, 
-    "SOLUSDT": 3, 
-    "BNBUSDT": 4, 
-    "ADAUSDT": 5, 
-    "1000PEPEUSDT": 6
-}
+PRIORITY_MAP = {"BTCUSDT": 1, "ETHUSDT": 2, "SOLUSDT": 3, "BNBUSDT": 4, "ADAUSDT": 5, "1000PEPEUSDT": 6}
 TIMEFRAME_STR = "1h"
 
-# ---- UPGRADE 1: CRASH + ACELERACIÓN ----
+# ---- TRIGGER (CRASH + ACCEL) ----
 CRASH_WINDOW_24H = 24
-DROP_THRESHOLD_24H = 0.10   # -10% en 24h
+DROP_THRESHOLD_24H = 0.08   # 8% (Sensible)
 CRASH_WINDOW_6H = 6
-ACCEL_THRESHOLD_6H = 0.05   # -5% en las últimas 6h (Velocidad)
+ACCEL_THRESHOLD_6H = 0.05   # 5% (Rápido)
 
-# ---- UPGRADE 2: FILTRO DE RÉGIMEN ----
-USE_REGIME_FILTER = True    # Solo operar si EMA50 Daily < EMA200 Daily
+# ---- FILTROS ----
+USE_REGIME_FILTER = True    # EMA50 < EMA200 Daily
+MAX_ACTIVE_TRADES = 1       # Sniper (1 bala)
+COOLDOWN_HOURS = 48         
 
-# ---- UPGRADE 3: CONCENTRACIÓN ----
-MAX_ACTIVE_TRADES = 1       # Solo 1 bala a la vez
-COOLDOWN_HOURS = 48         # Si operamos, esperar 48h para volver a buscar
-
-# ---- UPGRADE 4: TP ESCALONADO ----
-TP1_PCT = 0.05              # Take Profit 1 (+5%)
-TP1_SIZE = 0.30             # Cerrar 30%
-TP2_PCT = 0.10              # Take Profit 2 (+10%)
+# ---- GESTIÓN DE SALIDA (SCALING OUT) ----
+TP1_PCT = 0.06              # TP1: +6%
+TP1_SIZE = 0.40             # Cerrar 40%
+TP2_PCT = 0.12              # TP2: +12%
 TP2_SIZE = 0.30             # Cerrar 30%
-# El 40% restante queda con Trailing Stop
+# 30% restante: Trailing Stop
 
-TRAILING_START_PCT = 0.02   # Activar trailing si ganamos 2%
-TRAILING_DIST_PCT = 0.03    # Distancia del trailing
+# ---- PULIDO 4: TRAILING INTELIGENTE ----
+TRAILING_START_PCT = 0.03   # Activar si ganamos 3%
+TRAILING_DIST_PCT = 0.03    # Distancia 3%
 
-# ---- GESTIÓN DE RIESGO ----
+# ---- PULIDO 2: SL DINÁMICO ----
+SL_ATR_MULT = 2.0           # SL = Entry + 2*ATR
+
+# ---- RIESGO ----
 INITIAL_BALANCE = 10000
-FIXED_RISK_PCT = 0.01       # 1% Riesgo base
-SL_FIXED_PCT = 0.05         # Stop Loss de Emergencia (5%)
-
+FIXED_RISK_PCT = 0.025      # 2.5% Riesgo por evento
 # Costos
 COMMISSION = 0.0004
-SLIPPAGE = 0.001            
+SLIPPAGE = 0.001 
 
 # ======================================================
 #  1. PREPARACIÓN DE DATOS
@@ -73,34 +65,35 @@ def prepare_data(symbol):
     df.rename(columns=col_map, inplace=True)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     
-    # --- FIX DE ZONA HORARIA ---
-    if df['timestamp'].dt.tz is None: 
-        df['timestamp'] = df['timestamp'].dt.tz_localize("UTC")
-    else: 
-        df['timestamp'] = df['timestamp'].dt.tz_convert("UTC")
+    # Timezone fix
+    if df['timestamp'].dt.tz is None: df['timestamp'] = df['timestamp'].dt.tz_localize("UTC")
+    else: df['timestamp'] = df['timestamp'].dt.tz_convert("UTC")
         
     df.sort_values("timestamp", inplace=True)
     df.set_index('timestamp', inplace=True)
 
-    # --- UPGRADE 2: RÉGIMEN DIARIO ---
+    # Indicadores
+    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
+    
+    # PULIDO 1: Necesitamos el Low previo para el Breakout
+    df['prev_low'] = df['low'].shift(1)
+
+    # Regime
     ohlc_1d = {'open':'first', 'high':'max', 'low':'min', 'close':'last'}
     df_1d = df.resample('1D').apply(ohlc_1d).dropna()
     df_1d['ema50_d'] = talib.EMA(df_1d['close'], 50)
     df_1d['ema200_d'] = talib.EMA(df_1d['close'], 200)
     df_1d['bear_regime'] = np.where(df_1d['ema50_d'] < df_1d['ema200_d'], 1, 0)
     
-    # --- UPGRADE 1: SEÑAL HORARIA (CRASH + ACCEL) ---
-    df['price_24h'] = df['close'].shift(CRASH_WINDOW_24H)
-    df['drop_24h'] = (df['close'] - df['price_24h']) / df['price_24h']
-    
-    df['price_6h'] = df['close'].shift(CRASH_WINDOW_6H)
-    df['drop_6h'] = (df['close'] - df['price_6h']) / df['price_6h']
+    # Trigger Crash
+    df['drop_24h'] = (df['close'] - df['close'].shift(CRASH_WINDOW_24H)) / df['close'].shift(CRASH_WINDOW_24H)
+    df['drop_6h'] = (df['close'] - df['close'].shift(CRASH_WINDOW_6H)) / df['close'].shift(CRASH_WINDOW_6H)
     
     is_crash = (df['drop_24h'] < -DROP_THRESHOLD_24H)
     is_accel = (df['drop_6h'] < -ACCEL_THRESHOLD_6H)
     df['signal_raw'] = np.where(is_crash & is_accel, 1, 0)
 
-    # --- MERGE ---
+    # Merge
     df_merged = df.join(df_1d.shift(1)[['bear_regime']], rsuffix='_d')
     df_merged['bear_regime'] = df_merged['bear_regime'].fillna(0)
     
@@ -115,12 +108,12 @@ def prepare_data(symbol):
     return df_merged.dropna()
 
 # ======================================================
-#  2. MOTOR DE BACKTEST (EVENT DRIVEN + PORTFOLIO)
+#  2. MOTOR DE BACKTEST V75 (SURGEON)
 # ======================================================
 def run_backtest():
-    print(f"\n🌪️ INICIANDO BACKTEST V73 (FINAL - TIMEZONE FIXED)")
-    print(f"   Trigger: Drop > {DROP_THRESHOLD_24H*100}% (24h) AND > {ACCEL_THRESHOLD_6H*100}% (6h)")
-    print(f"   Regime Filter: {'ACTIVADO' if USE_REGIME_FILTER else 'DESACTIVADO'}")
+    print(f"\n🌪️ INICIANDO BACKTEST V75 (THE SURGEON)")
+    print(f"   Entry: Breakout Prev Low | SL: {SL_ATR_MULT}x ATR")
+    print(f"   Trailing: Smart (New Lows Only)")
     print("="*60)
 
     all_data = []
@@ -135,13 +128,11 @@ def run_backtest():
     balance = INITIAL_BALANCE
     positions = [] 
     trades_log = []
-    
-    # --- FIX CRÍTICO: INICIALIZAR EN UTC ---
     last_trade_time = pd.Timestamp("2000-01-01", tz="UTC") 
 
     for ts, group in timeline:
         
-        # 1. GESTIÓN DE POSICIONES
+        # --- 1. GESTIÓN DE POSICIONES ---
         active_pos = []
         for pos in positions:
             sym = pos['symbol']
@@ -153,34 +144,40 @@ def run_backtest():
             h, l, c = row['high'], row['low'], row['close']
             entry = pos['entry']
             
-            # --- SL ---
+            # Chequear SL
             if h >= pos['sl']:
                 exit_p = pos['sl'] * (1 + SLIPPAGE)
+                # Ajuste por gap (si abre por encima del SL)
+                if row['open'] > pos['sl']: exit_p = row['open'] * (1 + SLIPPAGE)
+                
                 remaining_qty = pos['current_qty']
                 pnl = (entry - exit_p) * remaining_qty
                 cost = exit_p * remaining_qty * COMMISSION
                 balance += (pnl - cost + (entry * remaining_qty * COMMISSION))
-                trades_log.append({'ts': ts, 'symbol': sym, 'pnl': pnl-cost, 'type': 'SL/Trail', 'year': ts.year})
+                trades_log.append({'ts': ts, 'symbol': sym, 'pnl': pnl-cost, 'type': 'SL', 'year': ts.year})
                 continue 
-                
-            # --- TPs ESCALONADOS ---
+
+            # Chequear TPs
             profit_pct = (entry - l) / entry
             
-            # TP1
             if not pos['tp1_done'] and profit_pct >= TP1_PCT:
                 qty_close = pos['total_qty'] * TP1_SIZE
                 exit_p = entry * (1 - TP1_PCT)
+                # Si hubo gap a favor, tomamos precio mejor
+                if row['open'] < exit_p: exit_p = row['open']
+                
                 pnl = (entry - exit_p) * qty_close
                 cost = exit_p * qty_close * COMMISSION
                 balance += (pnl - cost + (entry * qty_close * COMMISSION))
                 pos['current_qty'] -= qty_close
                 pos['tp1_done'] = True
                 trades_log.append({'ts': ts, 'symbol': sym, 'pnl': pnl-cost, 'type': 'TP1', 'year': ts.year})
-            
-            # TP2
+
             if not pos['tp2_done'] and profit_pct >= TP2_PCT:
                 qty_close = pos['total_qty'] * TP2_SIZE
                 exit_p = entry * (1 - TP2_PCT)
+                if row['open'] < exit_p: exit_p = row['open']
+                
                 pnl = (entry - exit_p) * qty_close
                 cost = exit_p * qty_close * COMMISSION
                 balance += (pnl - cost + (entry * qty_close * COMMISSION))
@@ -188,21 +185,22 @@ def run_backtest():
                 pos['tp2_done'] = True
                 trades_log.append({'ts': ts, 'symbol': sym, 'pnl': pnl-cost, 'type': 'TP2', 'year': ts.year})
 
-            # --- TRAILING ---
+            # PULIDO 4: TRAILING SMART
+            # Solo actualizamos el trailing si el precio hace un NUEVO LOW
             if profit_pct >= TRAILING_START_PCT:
-                new_sl = l * (1 + TRAILING_DIST_PCT)
-                if new_sl < pos['sl']:
-                    pos['sl'] = new_sl
+                if l < pos['lowest_price']:
+                    pos['lowest_price'] = l
+                    new_sl = l * (1 + TRAILING_DIST_PCT)
+                    if new_sl < pos['sl']: # Short SL solo baja
+                        pos['sl'] = new_sl
             
             if pos['current_qty'] > 0:
                 active_pos.append(pos)
         
         positions = active_pos
 
-        # 2. ENTRADAS
+        # --- 2. ENTRADAS (BREAKOUT) ---
         if len(positions) >= MAX_ACTIVE_TRADES: continue
-        
-        # Cooldown check
         if ts < last_trade_time + pd.Timedelta(hours=COOLDOWN_HOURS): continue
 
         candidates = group[group['signal_final'] == 1]
@@ -211,30 +209,49 @@ def run_backtest():
             candidates = candidates.sort_values('priority')
             best_pick = candidates.iloc[0]
             
-            sym = best_pick['symbol']
-            price = best_pick['open'] * (1 - SLIPPAGE)
+            # PULIDO 1: ENTRY LOGIC (BREAKOUT PREV LOW)
+            # La señal se generó al cierre de la vela anterior.
+            # Estamos en la vela actual.
+            # Queremos entrar solo si Low_Actual < Low_Previo
             
-            sl_price = price * (1 + SL_FIXED_PCT)
-            dist = sl_price - price
-            risk_amt = balance * FIXED_RISK_PCT
+            prev_low = best_pick['prev_low']
+            curr_low = best_pick['low']
             
-            qty = risk_amt / dist
-            if (qty * price) > balance: qty = balance / price
+            if curr_low < prev_low:
+                # Ejecutamos al precio de ruptura (Stop Sell)
+                entry_price = prev_low * (1 - SLIPPAGE)
+                # Si el open ya abrió abajo (Gap Down), entramos al Open
+                if best_pick['open'] < prev_low:
+                    entry_price = best_pick['open'] * (1 - SLIPPAGE)
 
-            cost = qty * price * COMMISSION
-            balance -= cost
-            
-            positions.append({
-                'symbol': sym,
-                'entry': price,
-                'total_qty': qty,
-                'current_qty': qty,
-                'sl': sl_price,
-                'tp1_done': False,
-                'tp2_done': False
-            })
-            
-            last_trade_time = ts
+                sym = best_pick['symbol']
+                atr = best_pick['atr']
+                
+                # PULIDO 2: SL por ATR
+                sl_price = entry_price + (atr * SL_ATR_MULT)
+                dist = sl_price - entry_price
+                
+                # Sizing
+                risk_amt = balance * FIXED_RISK_PCT
+                qty = risk_amt / dist
+                if (qty * entry_price) > balance: qty = balance / entry_price # No leverage > 1x
+
+                cost = qty * entry_price * COMMISSION
+                balance -= cost
+                
+                positions.append({
+                    'symbol': sym,
+                    'entry': entry_price,
+                    'total_qty': qty,
+                    'current_qty': qty,
+                    'sl': sl_price,
+                    'lowest_price': entry_price, # Para trailing
+                    'tp1_done': False,
+                    'tp2_done': False
+                })
+                
+                last_trade_time = ts
+                # print(f"💉 [{ts}] SURGEON ENTRY: {sym} @ {entry_price:.2f}")
 
     # --- REPORTE ---
     print("\n" + "="*60)
@@ -244,7 +261,7 @@ def run_backtest():
     
     if trades_log:
         df_t = pd.DataFrame(trades_log)
-        print("\n📅 RENDIMIENTO ANUAL (CRASH BOT V73):")
+        print("\n📅 RENDIMIENTO ANUAL (V75):")
         annual = df_t.groupby('year')['pnl'].sum()
         count = df_t.groupby('year')['pnl'].count()
         print(pd.concat([annual, count], axis=1, keys=['PnL', 'Events']))
