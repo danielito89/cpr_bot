@@ -97,6 +97,10 @@ def calculate_metrics(df):
     # V4 UPGRADE: ADX + Slope
     df['adx'] = talib.ADX(df['high_B'], df['low_B'], df['close_B'], timeperiod=14)
     df['adx_slope'] = df['adx'].diff() # Pendiente del ADX
+
+    # Tendencia del Ratio (SMA 200 horas ~ 8 dias)
+    df['ratio_sma'] = (df['close_A'] / df['close_B']).rolling(window=200).mean()
+    df['ratio_current'] = df['close_A'] / df['close_B']
     
     return df.dropna()
 
@@ -218,19 +222,32 @@ def run_backtest():
                 target_val_b *= ratio
 
             # Entry
+            ratio_trend_up = row['ratio_current'] > row['ratio_sma']
+
+            # Entry Short Ratio (Solo si tendencia es BAJISTA o NEUTRA, o si permitimos contratendencia)
+            # MEJORA: Solo operamos A FAVOR de la media del ratio
+            
             if z > Z_ENTRY: 
-                pos_dir = -1
-                qty_a = target_val_a / price_a; entry_val_a = target_val_a
-                qty_b = target_val_b / price_b; entry_val_b = target_val_b
-                balance -= (target_val_a + target_val_b) * friction
-                entry_ts = ts
+                # La señal dice "Short Ratio" (A está caro).
+                # Si la tendencia del ratio es BAJISTA (ratio < sma), esto es un trade a favor de tendencia. ¡FUEGO!
+                if not ratio_trend_up: 
+                    pos_dir = -1
+                    # ... (logica de short igual) ...
+                    qty_a = target_val_a / price_a; entry_val_a = target_val_a
+                    qty_b = target_val_b / price_b; entry_val_b = target_val_b
+                    balance -= (target_val_a + target_val_b) * friction
+                    entry_ts = ts
 
             elif z < -Z_ENTRY: 
-                pos_dir = 1
-                qty_a = target_val_a / price_a; entry_val_a = target_val_a
-                qty_b = target_val_b / price_b; entry_val_b = target_val_b
-                balance -= (target_val_a + target_val_b) * friction
-                entry_ts = ts
+                # La señal dice "Long Ratio" (A está barato).
+                # Solo entramos si la tendencia general del ratio es ALCISTA.
+                if ratio_trend_up:
+                    pos_dir = 1
+                    # ... (logica de long igual) ...
+                    qty_a = target_val_a / price_a; entry_val_a = target_val_a
+                    qty_b = target_val_b / price_b; entry_val_b = target_val_b
+                    balance -= (target_val_a + target_val_b) * friction
+                    entry_ts = ts
 
     # --- REPORTE ---
     print("\n" + "="*60)
