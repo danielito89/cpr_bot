@@ -7,9 +7,10 @@ app = Flask(__name__)
 
 # ---------------- CONFIGURACIÓN ----------------
 # Comandos para leer los logs reales
-CMD_LOG_V76 = "journalctl -u cpr_crash.service -n 20 --no-pager"
-CMD_LOG_V66 = "journalctl -u cpr_bot.service -n 20 --no-pager"
-CMD_LOG_CARRY = "journalctl -u cpr_carry.service -n 20 --no-pager"
+CMD_LOG_V76 = "journalctl -u cpr_crash.service -n 15 --no-pager"
+CMD_LOG_V66 = "journalctl -u cpr_bot.service -n 15 --no-pager"
+# Log del nuevo bot de Renta Fija
+CMD_LOG_CARRY = "journalctl -u cpr_carry.service -n 15 --no-pager"
 
 # ---------------- HTML TEMPLATE ----------------
 HTML = """
@@ -37,12 +38,11 @@ HTML = """
         .label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
         
         .val-green { color: #3fb950; }
-        .val-yellow { color: #d29922; }
         .footer { text-align: center; font-size: 0.8rem; color: #484f58; margin-top: 30px; }
     </style>
 </head>
 <body>
-    <h1>🏥 CPR COMMAND CENTER <span style="font-size:0.5em; color:#555;">V5.2</span></h1>
+    <h1>🏥 CPR COMMAND CENTER <span style="font-size:0.5em; color:#555;">V5.3 (CORE)</span></h1>
 
     <div class="card">
         <h2><span class="status-dot blue-dot"></span> RENTA FIJA (APR ESTIMADO)</h2>
@@ -54,10 +54,6 @@ HTML = """
             <div class="stat-box">
                 <div class="label">ETH APR</div>
                 <div class="stat-value val-green">{{ eth_apr }}</div>
-            </div>
-             <div class="stat-box">
-                <div class="label">BNB APR</div>
-                <div class="stat-value val-yellow">{{ bnb_apr }}</div>
             </div>
         </div>
     </div>
@@ -89,49 +85,48 @@ HTML = """
 def get_funding_rates():
     try:
         exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-        # Agregamos BNB a la consulta de tasas
-        targets = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
+        targets = ['BTC/USDT', 'ETH/USDT']
         results = {}
 
         for symbol in targets:
             try:
                 funding_info = exchange.fetch_funding_rate(symbol)
                 rate = float(funding_info['fundingRate'])
+                # Calculo APR anualizado simple
                 apr_val = rate * 3 * 365 * 100
                 results[symbol] = f"{apr_val:.2f}%"
             except:
                 results[symbol] = "---"
         
-        return results.get('BTC/USDT'), results.get('ETH/USDT'), results.get('BNB/USDT')
+        return results.get('BTC/USDT'), results.get('ETH/USDT')
 
     except Exception as e:
-        return "Err", "Err", "Err"
+        return "Err", "Err"
 
 def get_logs(cmd):
     try:
-        # Agregamos timeout para que no se cuelgue leyendo logs largos
-        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=5)
+        # Timeout de 3s para lectura rápida
+        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=3)
         return output.decode('utf-8').strip()
     except subprocess.TimeoutExpired:
-        return "⚠️ Timeout leyendo logs"
-    except subprocess.CalledProcessError as e:
-        return f"⚠️ Servicio detenido o sin logs recientes."
+        return "⚠️ Timeout leyendo logs (Sistema ocupado)"
+    except subprocess.CalledProcessError:
+        return f"⚠️ No hay logs recientes o servicio detenido."
     except Exception as e:
         return f"⚠️ Error: {str(e)}"
 
 @app.route('/')
 def index():
-    btc, eth, bnb = get_funding_rates()
+    btc, eth = get_funding_rates()
     v76_log = get_logs(CMD_LOG_V76)
     v66_log = get_logs(CMD_LOG_V66)
-    carry_log = get_logs(CMD_LOG_CARRY) # Leemos el nuevo log
+    carry_log = get_logs(CMD_LOG_CARRY)
     
     now = time.strftime("%H:%M:%S")
     
     return render_template_string(HTML, 
                                   btc_apr=btc, 
                                   eth_apr=eth, 
-                                  bnb_apr=bnb,
                                   log_v76=v76_log, 
                                   log_v66=v66_log, 
                                   log_carry=carry_log,
