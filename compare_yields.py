@@ -7,10 +7,9 @@ from datetime import timedelta
 #  🏦 CONFIG V4.1 - ANTI-FRAGILE INSTITUTIONAL
 # ======================================================
 FILES = {
+    "BNB":  {"path": "data/funding_BNBUSDT.csv",      "type": "CORE", "dd_limit": -0.15},
     "BTC":  {"path": "data/funding_BTCUSDT.csv",      "type": "CORE", "dd_limit": -0.15}, 
-    "ETH":  {"path": "data/funding_ETHUSDT.csv",      "type": "CORE", "dd_limit": -0.15}, 
-    "PEPE": {"path": "data/funding_1000PEPEUSDT.csv", "type": "SATELLITE", "dd_limit": -0.07}, 
-    "SOL":  {"path": "data/funding_SOLUSDT.csv",      "type": "SATELLITE", "dd_limit": -0.07}  
+    "ETH":  {"path": "data/funding_ETHUSDT.csv",      "type": "CORE", "dd_limit": -0.15}  
 }
 
 INITIAL_CAPITAL = 10000
