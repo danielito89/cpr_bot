@@ -5,8 +5,8 @@ import os
 from datetime import datetime, timezone
 
 # 📋 LISTA DE ACTIVOS
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "1000PEPE/USDT"] 
-SINCE_STR = "2023-01-01 00:00:00"
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT"] 
+SINCE_STR = "2022-01-01 00:00:00"
 
 def fetch_symbol(symbol):
     print(f"\n📡 DESCARGANDO: {symbol} (Futuros)...")
