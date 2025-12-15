@@ -10,7 +10,7 @@ app = Flask(__name__)
 CMD_LOG_V76 = "journalctl -u cpr_crash.service -n 15 --no-pager"
 CMD_LOG_V66 = "journalctl -u cpr_bot.service -n 15 --no-pager"
 # Log del nuevo bot de Renta Fija
-CMD_LOG_CARRY = "journalctl -u cpr_carry.service -n 15 --no-pager"
+CMD_LOG_CARRY = "tail -n 15 /home/ubuntu/bot_cpr/logs/carry.log"
 
 # ---------------- HTML TEMPLATE ----------------
 HTML = """

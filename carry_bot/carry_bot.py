@@ -15,7 +15,7 @@ TARGETS = {
 }
 
 # --- PARAMETROS DE ENTRADA/SALIDA (Histéresis) ---
-ENTRY_THRESHOLD = 0.0001  # Entrar si Tasa > 0.01%
+ENTRY_THRESHOLD = 0.00001  # Entrar si Tasa > 0.01%
 EXIT_THRESHOLD  = -0.0002 # Salir si Tasa < -0.02% (Tolera ruido negativo leve)
 
 # --- LOGGING SETUP ---
