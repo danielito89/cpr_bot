@@ -6,10 +6,10 @@ import time
 app = Flask(__name__)
 
 # ---------------- CONFIGURACIÓN ----------------
-# Comandos para leer los logs reales. 
-# '-n 20' trae las últimas 20 líneas.
-CMD_LOG_V76 = "journalctl -u cpr_crash.service -n 15 --no-pager"
-CMD_LOG_V66 = "journalctl -u cpr_bot.service -n 15 --no-pager"
+# Comandos para leer los logs reales
+CMD_LOG_V76 = "journalctl -u cpr_crash.service -n 20 --no-pager"
+CMD_LOG_V66 = "journalctl -u cpr_bot.service -n 20 --no-pager"
+CMD_LOG_CARRY = "journalctl -u cpr_carry.service -n 20 --no-pager"
 
 # ---------------- HTML TEMPLATE ----------------
 HTML = """
@@ -27,6 +27,7 @@ HTML = """
         .green-dot { background-color: #2ea043; box-shadow: 0 0 5px #2ea043; }
         .red-dot { background-color: #da3633; box-shadow: 0 0 5px #da3633; }
         .blue-dot { background-color: #1f6feb; box-shadow: 0 0 5px #1f6feb; }
+        .purple-dot { background-color: #8957e5; box-shadow: 0 0 5px #8957e5; }
         
         pre { background: #0d1117; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 11px; color: #8b949e; border: 1px solid #30363d; white-space: pre-wrap; word-wrap: break-word; }
         
@@ -41,10 +42,10 @@ HTML = """
     </style>
 </head>
 <body>
-    <h1>🏥 CPR COMMAND CENTER <span style="font-size:0.5em; color:#555;">V5.1</span></h1>
+    <h1>🏥 CPR COMMAND CENTER <span style="font-size:0.5em; color:#555;">V5.2</span></h1>
 
     <div class="card">
-        <h2><span class="status-dot blue-dot"></span> RENTA FIJA (CARRY - APR ANUAL)</h2>
+        <h2><span class="status-dot blue-dot"></span> RENTA FIJA (APR ESTIMADO)</h2>
         <div class="grid-container">
             <div class="stat-box">
                 <div class="label">BTC APR</div>
@@ -54,20 +55,25 @@ HTML = """
                 <div class="label">ETH APR</div>
                 <div class="stat-value val-green">{{ eth_apr }}</div>
             </div>
-            <div class="stat-box">
-                <div class="label">PEPE APR</div>
-                <div class="stat-value val-yellow">{{ pepe_apr }}</div>
+             <div class="stat-box">
+                <div class="label">BNB APR</div>
+                <div class="stat-value val-yellow">{{ bnb_apr }}</div>
             </div>
         </div>
     </div>
 
     <div class="card">
-        <h2><span class="status-dot red-dot"></span> CRASH BOT (LOGS)</h2>
+        <h2><span class="status-dot purple-dot"></span> CARRY BOT (RENTA FIJA)</h2>
+        <pre>{{ log_carry }}</pre>
+    </div>
+
+    <div class="card">
+        <h2><span class="status-dot red-dot"></span> CRASH BOT</h2>
         <pre>{{ log_v76 }}</pre>
     </div>
 
     <div class="card">
-        <h2><span class="status-dot green-dot"></span> GOLDEN CROSS BOT (LOGS)</h2>
+        <h2><span class="status-dot green-dot"></span> GOLDEN CROSS BOT</h2>
         <pre>{{ log_v66 }}</pre>
     </div>
     
@@ -81,67 +87,55 @@ HTML = """
 # ---------------- LÓGICA BACKEND ----------------
 
 def get_funding_rates():
-    """Conecta a Binance Futures y calcula el APR anualizado del Funding Rate"""
     try:
-        # Configurar Binance Futures
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'future'}
-        })
-        
-        # Lista de pares a consultar
-        # Nota: 1000PEPE es el ticker estándar en Binance Futures
-        targets = ['BTC/USDT', 'ETH/USDT', '1000PEPE/USDT']
+        exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+        # Agregamos BNB a la consulta de tasas
+        targets = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
         results = {}
 
         for symbol in targets:
             try:
-                # Obtenemos la info del funding rate actual
                 funding_info = exchange.fetch_funding_rate(symbol)
                 rate = float(funding_info['fundingRate'])
-                
-                # CÁLCULO APR: Tasa * 3 (veces al día) * 365 (días) * 100 (para %)
                 apr_val = rate * 3 * 365 * 100
                 results[symbol] = f"{apr_val:.2f}%"
-            except Exception as e:
-                print(f"Error fetching {symbol}: {e}")
-                results[symbol] = "Err%"
+            except:
+                results[symbol] = "---"
         
-        return results.get('BTC/USDT'), results.get('ETH/USDT'), results.get('1000PEPE/USDT')
+        return results.get('BTC/USDT'), results.get('ETH/USDT'), results.get('BNB/USDT')
 
     except Exception as e:
-        print(f"Error general CCXT: {e}")
-        return "Err%", "Err%", "Err%"
+        return "Err", "Err", "Err"
 
 def get_logs(cmd):
-    """Ejecuta comando de sistema y devuelve la salida"""
     try:
-        # stderr=subprocess.STDOUT captura errores de permisos para mostrarlos
-        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+        # Agregamos timeout para que no se cuelgue leyendo logs largos
+        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=5)
         return output.decode('utf-8').strip()
+    except subprocess.TimeoutExpired:
+        return "⚠️ Timeout leyendo logs"
     except subprocess.CalledProcessError as e:
-        # Si el comando falla (ej: servicio no encontrado)
-        return f"⚠️ Error ejecutando comando:\n{e.output.decode('utf-8')}"
+        return f"⚠️ Servicio detenido o sin logs recientes."
     except Exception as e:
-        return f"⚠️ Error inesperado: {str(e)}"
+        return f"⚠️ Error: {str(e)}"
 
 @app.route('/')
 def index():
-    # Obtener datos
-    btc, eth, pepe = get_funding_rates()
+    btc, eth, bnb = get_funding_rates()
     v76_log = get_logs(CMD_LOG_V76)
     v66_log = get_logs(CMD_LOG_V66)
+    carry_log = get_logs(CMD_LOG_CARRY) # Leemos el nuevo log
+    
     now = time.strftime("%H:%M:%S")
     
-    # Renderizar
     return render_template_string(HTML, 
                                   btc_apr=btc, 
                                   eth_apr=eth, 
-                                  pepe_apr=pepe,
+                                  bnb_apr=bnb,
                                   log_v76=v76_log, 
                                   log_v66=v66_log, 
+                                  log_carry=carry_log,
                                   last_update=now)
 
 if __name__ == '__main__':
-    # host='0.0.0.0' permite acceso desde fuera del servidor
     app.run(host='0.0.0.0', port=5000)

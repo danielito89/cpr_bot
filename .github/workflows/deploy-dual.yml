@@ -35,7 +35,7 @@ jobs:
             sudo systemctl restart cpr_bot.service
             sudo systemctl restart cpr_crash.service
             sudo systemctl restart cpr_dashboard.service
-
+            sudo systemctl restart cpr_carry.service
             echo "✅ Producción actualizada y reiniciada."
 
       # ---------------------------------------------------
