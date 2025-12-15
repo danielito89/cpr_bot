@@ -25,14 +25,17 @@ jobs:
             cd /home/ubuntu/bot_cpr
             
             # Bajar cambios
-            git pull origin main
+            git fetch --all
+            git reset --hard origin/main
             
             # Actualizar librerías (por si agregamos algo nuevo)
             source venv/bin/activate
-            pip install -r requirements.txt
             
             # Reiniciar el bot para aplicar cambios
             sudo systemctl restart cpr_bot.service
+            sudo systemctl restart cpr_crash.service
+            sudo systemctl restart cpr_dashboard.service
+
             echo "✅ Producción actualizada y reiniciada."
 
       # ---------------------------------------------------
