@@ -2,27 +2,26 @@ import pandas as pd
 import numpy as np
 import os
 
-import pandas as pd
-import numpy as np
-import os
-
 # ======================================================
-#  🏦 CONFIG V3 - SORTINO & DRAWDOWN ANALYSIS
+#  🏦 CONFIG V4 - INSTITUTIONAL RISK OFFICER
 # ======================================================
 FILES = {
-    "BTC": "data/funding_BTCUSDT.csv",
-    "ETH": "data/funding_ETHUSDT.csv",
-    "SOL": "data/funding_SOLUSDT.csv",
-    "PEPE": "data/funding_1000PEPEUSDT.csv"
+    "BTC":  {"path": "data/funding_BTCUSDT.csv",      "threshold": 0.0000, "dd_limit": -0.10}, # Siempre activo (Threshold 0), Stop laxo
+    "ETH":  {"path": "data/funding_ETHUSDT.csv",      "threshold": 0.0000, "dd_limit": -0.10}, # Siempre activo
+    "PEPE": {"path": "data/funding_1000PEPEUSDT.csv", "threshold": 0.0005, "dd_limit": -0.05}, # Solo si paga > 0.05%/8h, Stop estricto
+    "SOL":  {"path": "data/funding_SOLUSDT.csv",      "threshold": 0.0002, "dd_limit": -0.05}  # Filtro medio
 }
 
 INITIAL_CAPITAL = 10000
-NEGATIVE_PENALTY = 2.0  
-ENTRY_EXIT_COST = 0.004 # 0.4% Roundtrip
+NEGATIVE_PENALTY = 1.5   # Si pagamos funding, duele x1.5
+ENTRY_EXIT_COST = 0.002  # 0.2% cada vez que entramos/salimos (Spot+Fut)
 
-def analyze_asset(symbol, filepath):
+def analyze_asset_v4(symbol, config):
+    filepath = config['path']
+    activate_threshold = config['threshold']
+    max_dd_limit = config['dd_limit']
+
     if not os.path.exists(filepath):
-        print(f"⚠️ Falta archivo para {symbol}")
         return None
 
     df = pd.read_csv(filepath)
@@ -30,90 +29,93 @@ def analyze_asset(symbol, filepath):
     df.set_index('datetime', inplace=True)
     df = df[df.index >= '2023-01-01']
     
-    # 1. Ajuste de Tasas (Penalización)
-    df['adjusted_payout'] = np.where(
-        df['fundingRate'] < 0,
-        df['fundingRate'] * NEGATIVE_PENALTY, 
-        df['fundingRate']
-    )
+    balance = INITIAL_CAPITAL
+    equity_curve = []
+    in_market = False
+    stop_loss_triggered = False
     
-    # 2. Equity Curve & Drawdown
-    balance = INITIAL_CAPITAL * (1 - ENTRY_EXIT_COST)
-    equity = []
+    trades_count = 0
     
-    for payout_pct in df['adjusted_payout']:
-        balance += (balance * payout_pct)
-        equity.append(balance)
+    # Simulación Vela a Vela (State Machine)
+    for ts, row in df.iterrows():
+        rate = row['fundingRate']
         
-    # Costo de salida final
-    final_balance = balance * (1 - ENTRY_EXIT_COST)
-    equity[-1] = final_balance
-    
-    # Cálculo de Drawdown sobre la curva de equity
-    equity_series = pd.Series(equity)
-    rolling_max = equity_series.cummax()
-    drawdown = (equity_series - rolling_max) / rolling_max
-    max_dd_pct = drawdown.min() * 100  # Será un número negativo
-    
+        # 1. Chequeo de Risk Officer (Hard Stop previo)
+        if stop_loss_triggered:
+            equity_curve.append(balance) # Nos quedamos en cash forever
+            continue
+
+        # 2. Lógica de Activación (Sniper)
+        should_be_in = rate > activate_threshold
+        
+        # Transiciones
+        if should_be_in and not in_market:
+            # ENTRAR
+            balance *= (1 - ENTRY_EXIT_COST)
+            in_market = True
+            trades_count += 1
+        elif not should_be_in and in_market:
+            # SALIR
+            balance *= (1 - ENTRY_EXIT_COST)
+            in_market = False
+        
+        # 3. Pago / Cobro
+        if in_market:
+            # Aplicar Penalty si es negativo
+            actual_payout_pct = rate * NEGATIVE_PENALTY if rate < 0 else rate
+            payout = balance * actual_payout_pct
+            balance += payout
+            
+        equity_curve.append(balance)
+        
+        # 4. Chequeo de Drawdown Dinámico
+        # Calculamos DD sobre la marcha
+        current_peak = max(equity_curve)
+        current_dd = (balance - current_peak) / current_peak
+        
+        if in_market and current_dd < max_dd_limit:
+            # STOP LOSS DE EMERGENCIA
+            balance *= (1 - ENTRY_EXIT_COST) # Salida forzosa
+            in_market = False
+            stop_loss_triggered = True
+            # print(f"🚨 {symbol} STOPPED OUT at {ts} (DD: {current_dd*100:.2f}%)")
+
+    # Resultados Finales
+    final_balance = equity_curve[-1]
     total_ret = (final_balance - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
     
-    # 3. Métricas Avanzadas (Sortino Style)
-    # Convertimos a tasas anualizadas para el cálculo estadístico
-    annualized_rates = df['fundingRate'] * 3 * 365 * 100
-    mean_apr = annualized_rates.mean()
-    
-    # Downside Deviation: Solo nos importa la volatilidad de los días malos (o neutrales)
-    # Definimos "Malo" como cualquier funding < 0 (pagar)
-    # Si todo es positivo, usamos un epsilon pequeño para no dividir por cero
-    negative_rates = annualized_rates[annualized_rates < 0]
-    
-    if len(negative_rates) > 0:
-        downside_std = negative_rates.std()
-    else:
-        # Si nunca fue negativo, usamos la std general pero muy baja
-        downside_std = annualized_rates.std() * 0.1 
-        
-    if pd.isna(downside_std) or downside_std == 0: downside_std = 1.0 # Safety
-        
-    # Efficiency Score V3 (Sortino Proxy)
-    efficiency = mean_apr / downside_std
+    # Calcular métricas solo de los periodos activos
+    active_rates = df[df['fundingRate'] > activate_threshold]['fundingRate']
+    avg_apr = active_rates.mean() * 3 * 365 * 100 if not active_rates.empty else 0
     
     return {
         "Symbol": symbol,
-        "Efficiency": efficiency,
-        "Total Ret %": total_ret,
-        "Avg APR %": mean_apr,
-        "Downside Vol": downside_std,
-        "Max DD %": max_dd_pct,
-        "Neg Days": (df['fundingRate'] < 0).sum()
+        "Net Return %": total_ret,
+        "Stopped Out?": "YES 💀" if stop_loss_triggered else "NO ✅",
+        "Trades": trades_count,
+        "Active Days": len(active_rates) / 3, # Aprox (8h periods)
+        "Avg Active APR": avg_apr
     }
 
 def main():
-    print(f"📊 ANALISIS DE YIELD V3 (SORTINO & DRAWDOWN)")
-    print("="*95)
+    print(f"🛡️ ANALISIS V4: INSTITUTIONAL RISK OFFICER")
+    print(f"   Config: Filtros Dinámicos + Hard Stop por DD + Costos de Rotación")
+    print("="*85)
     
     results = []
-    for sym, path in FILES.items():
-        res = analyze_asset(sym, path)
+    for sym, conf in FILES.items():
+        res = analyze_asset_v4(sym, conf)
         if res: results.append(res)
         
     df_res = pd.DataFrame(results)
-    df_res = df_res.sort_values("Efficiency", ascending=False)
+    df_res = df_res.sort_values("Net Return %", ascending=False)
     
     pd.options.display.float_format = '{:.2f}'.format
-    cols = ["Symbol", "Efficiency", "Total Ret %", "Max DD %", "Avg APR %", "Downside Vol", "Neg Days"]
+    print(df_res.to_string(index=False))
     
-    print(df_res[cols].to_string(index=False))
-    
-    print("\n💡 INTERPRETACIÓN:")
-    print("   Efficiency = Retorno por unidad de Riesgo de Tasa Negativa.")
-    print("   Max DD = La peor caída acumulada en tu cuenta de 'Renta Fija'.")
-
-    # Allocator Sugerido (Muy simple basado en eficiencia relativa)
-    print("\n⚖️ ALLOCATION SUGERIDO (Basado en Efficiency Score):")
-    total_score = df_res['Efficiency'].sum()
-    df_res['Alloc %'] = (df_res['Efficiency'] / total_score) * 100
-    print(df_res[["Symbol", "Alloc %"]].to_string(index=False))
+    print("\n💡 LECCIÓN:")
+    print("   Si PEPE tiene muchos 'Trades' (entra/sale), los fees se comen la ganancia.")
+    print("   El objetivo es encontrar el equilibrio donde el filtro elimina el riesgo pero no genera overtrading.")
 
 if __name__ == "__main__":
     main()
