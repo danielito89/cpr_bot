@@ -8,8 +8,8 @@ app = Flask(__name__)
 # ---------------- CONFIGURACIÓN ----------------
 # Comandos para leer los logs reales. 
 # '-n 20' trae las últimas 20 líneas.
-CMD_LOG_V76 = "journalctl -u cpr_crash.service -n 20 --no-pager"
-CMD_LOG_V66 = "journalctl -u cpr_bot.service -n 20 --no-pager"
+CMD_LOG_V76 = "journalctl -u cpr_crash.service -n 15 --no-pager"
+CMD_LOG_V66 = "journalctl -u cpr_bot.service -n 15 --no-pager"
 
 # ---------------- HTML TEMPLATE ----------------
 HTML = """
@@ -62,12 +62,12 @@ HTML = """
     </div>
 
     <div class="card">
-        <h2><span class="status-dot red-dot"></span> V76 THE SURGEON (LOGS)</h2>
+        <h2><span class="status-dot red-dot"></span> CRASH BOT (LOGS)</h2>
         <pre>{{ log_v76 }}</pre>
     </div>
 
     <div class="card">
-        <h2><span class="status-dot green-dot"></span> V66 GOLDEN CROSS (LOGS)</h2>
+        <h2><span class="status-dot green-dot"></span> GOLDEN CROSS BOT (LOGS)</h2>
         <pre>{{ log_v66 }}</pre>
     </div>
     
