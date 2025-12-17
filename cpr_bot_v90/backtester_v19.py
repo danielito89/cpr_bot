@@ -255,31 +255,42 @@ class BacktesterV19:
             print(f"📂 Usando archivo personalizado: {self.custom_file}")
             possible_files = [self.custom_file]
         else:
-            # 2. Búsqueda inteligente: Buscar archivo 2020-2021 o normal
             print(f"🔍 Buscando datos para {self.symbol}...")
-            # Prioridad: Archivo específico de crash si la fecha coincide, sino el normal
-            file_crash = f"mainnet_data_{TIMEFRAME}_{self.symbol}_2020-2021.csv"
-            file_normal = f"mainnet_data_{TIMEFRAME}_{self.symbol}.csv"
             
-            # Buscar en carpetas típicas
-            search_paths = ["data", "../data", "cpr_bot_v90/data", "."]
+            # --- CORRECCIÓN: BUSCAR POR PATRÓN FLEXIBLE ---
+            # Buscamos en la carpeta segura
+            folder_paths = [
+                "/home/orangepi/bot_cpr/data", # <--- Ruta donde sabemos que está
+                "data",
+                "cpr_bot_v90/data", 
+                "."
+            ]
+            
+            # El patrón es: "mainnet_data_15m_ETHUSDT" (sin importar lo que siga)
+            prefix = f"mainnet_data_{TIMEFRAME}_{self.symbol}"
+            
             possible_files = []
             
-            for folder in search_paths:
-                f_crash = os.path.join(folder, file_crash)
-                f_norm = os.path.join(folder, file_normal)
-                
-                # Si pedimos fecha vieja (2020), priorizar el archivo del crash
-                if "2020" in self.start_date or "2021" in self.start_date:
-                    if os.path.exists(f_crash): possible_files.append(f_crash)
-                
-                # Siempre añadir el normal como backup
-                if os.path.exists(f_norm): possible_files.append(f_norm)
+            for folder in folder_paths:
+                if os.path.exists(folder):
+                    # Listar todos los archivos de la carpeta
+                    try:
+                        files_in_dir = os.listdir(folder)
+                        for f in files_in_dir:
+                            # Si empieza con el prefijo y termina en .csv, sirve
+                            if f.startswith(prefix) and f.endswith(".csv"):
+                                full_path = os.path.join(folder, f)
+                                possible_files.append(full_path)
+                    except Exception:
+                        continue
 
         if not possible_files:
             print(f"❌ No se encontraron datos CSV para {self.symbol}")
+            print(f"   (Buscaba archivos empezando por: '{prefix}' en /home/orangepi/bot_cpr/data)")
             return None, None
 
+        # Tomamos el primero que encontremos (o el último alfabéticamente si hay varios)
+        possible_files.sort(reverse=True) 
         filepath = possible_files[0]
         print(f"📂 Cargando: {filepath}")
         
@@ -308,7 +319,8 @@ class BacktesterV19:
                 df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
-            #ADX
+            
+            # ADX
             adx_period = 14
             df['up_move'] = df['high'] - df['high'].shift(1)
             df['down_move'] = df['low'].shift(1) - df['low']
@@ -316,9 +328,8 @@ class BacktesterV19:
             df['plus_dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
             df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
             
-            df['tr'] = df['atr'] # Ya calculado antes (aproximado)
+            df['tr'] = df['atr'] 
             
-            # Suavizado (EWM alpha=1/period es similar a Wilder)
             df['tr_smooth'] = df['tr'].ewm(alpha=1/adx_period, adjust=False).mean()
             df['plus_dm_smooth'] = df['plus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
             df['minus_dm_smooth'] = df['minus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
