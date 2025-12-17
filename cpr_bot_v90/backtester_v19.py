@@ -19,8 +19,8 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # Valores por defecto (si no usas argumentos)
 DEFAULT_SYMBOL = "ETHUSDT"
-DEFAULT_START_DATE = "2023-01-01"
-TIMEFRAME = '1m'
+DEFAULT_START_DATE = "2022-01-01"
+TIMEFRAME = '15m'
 BUFFER_DAYS = 25
 CAPITAL_INICIAL = 1000
 EXECUTION_MODE = "SMART"
@@ -116,20 +116,20 @@ class BacktesterV19:
         self.config = {
             "symbol": symbol,
             "investment_pct": 0.05,
-            "leverage": 15,
+            "leverage": 10,
             "cpr_width_threshold": 0.2,
             "volume_factor": 1.1,
-            "strict_volume_factor": 10.0,
+            "strict_volume_factor": 2.0,
             "take_profit_levels": 3,
             "breakout_atr_sl_multiplier": 1.0,  
-            "breakout_tp_mult": 8,
-            "indicator_update_interval_minutes": 3,
+            "breakout_tp_mult": 3.0,
+            "indicator_update_interval_minutes": 15,
             "ranging_atr_multiplier": 0.5,
             "range_tp_mult": 4.0,
             "daily_loss_limit_pct": 15.0,
             "min_volatility_atr_pct": 0.3,
-            "trailing_stop_trigger_atr": 3.0,
-            "trailing_stop_distance_atr": 2.5,
+            "trailing_stop_trigger_atr": 1.5,
+            "trailing_stop_distance_atr": 1.5,
             "tick_size": self.tick_size,
             "step_size": self.step_size,
             "MAX_TRADE_SIZE_USDT": 20000 if is_pepe else 50000, 
