@@ -56,7 +56,7 @@ class RiskManager:
         
         atr = self.state.cached_atr
         ema_trend = self.state.cached_ema 
-        rsi = getattr(self.state, 'cached_rsi', 50) # Leer RSI
+        rsi = getattr(self.state, 'cached_rsi', 50)
         median_vol = self.state.cached_median_vol
         
         if not atr or not ema_trend or not median_vol: return
@@ -68,19 +68,17 @@ class RiskManager:
                 open_price = float(kline["o"])
                 current_vol = float(kline["q"])
                 
-                # --- FILTRO 1: ESTRUCTURA DE TENDENCIA (EMA 200) ---
+                # --- CONTEXTO DEL MERCADO ---
                 is_uptrend = current_price > ema_trend
                 is_downtrend = current_price < ema_trend
                 
                 cpr_width = p.get("width", 0)
-                if cpr_width > 0.5: return # Mercado muerto
+                # MEJORA 1: Permitir rangos más amplios (hasta 0.8% o 1.0%)
+                if cpr_width > 0.8: return 
 
                 is_narrow_cpr = cpr_width < 0.20
                 
-                # --- FILTRO 2: VOLUMEN (Más estricto) ---
-                # Exigimos 2.5x el volumen promedio para Breakouts
                 vol_ratio = current_vol / median_vol if median_vol > 0 else 0
-                has_breakout_vol = vol_ratio > 2.5 
                 
                 side = None
                 entry_type = None
@@ -91,58 +89,76 @@ class RiskManager:
                 is_green = current_price > open_price
                 is_red = current_price < open_price
 
-                # --- LÓGICA DE ENTRADA (ONE SHOT + RSI FILTER) ---
-
+                # ==========================================
+                # ESTRATEGIA A: BREAKOUTS (Tendencia Pura)
+                # ==========================================
+                # Regla: SIEMPRE a favor de la EMA 200.
                 if is_narrow_cpr:
+                    has_breakout_vol = vol_ratio > 2.0 
+                    
                     # Long Breakout H4
-                    # RSI < 70 (No comprar techo) y Volumen fuerte
                     if is_uptrend and current_price > p["H4"] and is_green:
                         if rsi < 70 and has_breakout_vol:
                             level_id = "BREAK_H4"
                             if level_id not in self.levels_traded_today:
                                 side = SIDE_BUY
                                 entry_type = "Boss Breakout Long"
-                                sl = current_price - (atr * 1.2) # Ajustamos SL un poco
+                                sl = current_price - (atr * 1.0) # SL Ajustado
                                 tp_prices = [current_price + (atr * 4.0)]
 
                     # Short Breakout L4
-                    # RSI > 30 (No vender piso) y Volumen fuerte
                     elif is_downtrend and current_price < p["L4"] and is_red:
                         if rsi > 30 and has_breakout_vol:
                             level_id = "BREAK_L4"
                             if level_id not in self.levels_traded_today:
                                 side = SIDE_SELL
                                 entry_type = "Boss Breakout Short"
-                                sl = current_price + (atr * 1.2)
+                                sl = current_price + (atr * 1.0)
                                 tp_prices = [current_price - (atr * 4.0)]
 
+                # ==========================================
+                # ESTRATEGIA B: REVERSIONES (Mean Reversion)
+                # ==========================================
+                # Regla: Se permite Contra-Tendencia SI hay extremos de RSI.
+                # Ya no exigimos estar arriba/abajo de EMA 200, sino RSI Extremo.
                 else:
-                    # Reversion L3 (Pullback)
-                    # RSI < 45 (Buscamos que esté algo sobrevendido en la corrección)
-                    if is_uptrend and p["L4"] < current_price <= p["L3"] and is_green:
-                        if rsi < 55: # Filtro suave de RSI para pullback
+                    # Reversion Long (Comprar L3)
+                    # Ocurre si: Toca L3 Y (Es Uptrend O RSI está sobrevendido < 35)
+                    can_long_reversal = (p["L4"] < current_price <= p["L3"]) and is_green
+                    if can_long_reversal:
+                        # Filtro RSI: Comprar solo si no estamos caros (RSI < 55)
+                        # Si es contra-tendencia (Downtrend), exigir RSI < 35 (Sobrevendido)
+                        rsi_threshold = 55 if is_uptrend else 35
+                        
+                        if rsi < rsi_threshold:
                             level_id = "REV_L3"
                             if level_id not in self.levels_traded_today:
                                 side = SIDE_BUY
-                                entry_type = "Trend Pullback Long"
+                                entry_type = "Reversal Long (L3)"
                                 sl = p["L4"] - (atr * 0.5)
-                                tp_prices = [p["H3"]]
+                                tp_prices = [p["H3"]] # Target al otro lado del rango
 
-                    # Reversion H3 (Pullback)
-                    elif is_downtrend and p["H3"] <= current_price < p["H4"] and is_red:
-                        if rsi > 45: 
+                    # Reversion Short (Vender H3)
+                    can_short_reversal = (p["H3"] <= current_price < p["H4"]) and is_red
+                    if can_short_reversal:
+                        # Filtro RSI: Vender solo si no estamos baratos (RSI > 45)
+                        # Si es contra-tendencia (Uptrend), exigir RSI > 65 (Sobrecompra)
+                        rsi_threshold = 45 if is_downtrend else 65
+                        
+                        if rsi > rsi_threshold:
                             level_id = "REV_H3"
                             if level_id not in self.levels_traded_today:
                                 side = SIDE_SELL
-                                entry_type = "Trend Pullback Short"
+                                entry_type = "Reversal Short (H3)"
                                 sl = p["H4"] + (atr * 0.5)
                                 tp_prices = [p["L3"]]
 
-                # --- FILTRO R/R Y EJECUCIÓN ---
+                # --- EJECUCIÓN ---
                 if side and level_id:
+                    # R/R Check
                     risk = abs(current_price - sl)
                     reward = abs(tp_prices[0] - current_price)
-                    if (reward / risk) < 1.5: return # R/R 1.5 Mínimo
+                    if risk > 0 and (reward / risk) < 1.5: return
 
                     balance = await self.bot._get_account_balance()
                     if not balance: return
@@ -155,13 +171,13 @@ class RiskManager:
                     tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
                     
                     self.levels_traded_today.add(level_id)
-                    logging.info(f"!!! SEÑAL V203 !!! {entry_type} | RSI:{rsi:.1f} Vol:{vol_ratio:.1f}x")
+                    logging.info(f"!!! SEÑAL V204 !!! {entry_type} | RSI:{rsi:.1f}")
                     await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
             except Exception as e:
                 logging.error(f"Seek Error: {e}")
 
-    # --- MÉTODOS DE GESTIÓN (Mantenidos igual) ---
+    # --- GESTIÓN (Ajuste de Trailing) ---
     async def check_position_state(self):
         async with self.bot.lock:
             try:
@@ -186,14 +202,16 @@ class RiskManager:
 
                 if qty < self.state.last_known_position_qty: await self._handle_partial_tp(qty)
                 
-                # Trailing inteligente
+                # MEJORA 3: Trailing a BE más rápido (1.0 ATR)
                 entry = self.state.current_position_info["entry_price"]
                 mark = float(pos.get("markPrice"))
                 atr = self.state.cached_atr
                 if atr and not self.state.sl_moved_to_be:
                     side = self.state.current_position_info["side"]
                     pnl_dist = (mark - entry) if side == SIDE_BUY else (entry - mark)
-                    if pnl_dist > (atr * 1.5): 
+                    
+                    # Trigger agresivo: 1.0 ATR para asegurar empate
+                    if pnl_dist > (atr * 1.0): 
                         await self.orders_manager.move_sl_to_be(qty)
 
             except Exception: pass
