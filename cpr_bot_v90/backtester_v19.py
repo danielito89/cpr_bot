@@ -27,7 +27,7 @@ EXECUTION_MODE = "SMART"
 
 # --- IMPORTS DEL BOT CORE ---
 try:
-    from bot_core.risk.py import RiskManager
+    from bot_core.risk_pure.py import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
     from bot_core.utils import format_price, SIDE_BUY, SIDE_SELL
 except ImportError as e:

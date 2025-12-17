@@ -19,35 +19,38 @@ class RiskManager:
         self.max_trade_size_usdt = getattr(self.config, 'MAX_TRADE_SIZE_USDT', 50000)
         self.max_daily_trades = getattr(self.config, 'MAX_DAILY_TRADES', 50) 
         self.min_balance_buffer = 10 
+        
+        # MEMORIA DE NIVELES (Para evitar ametralladora)
+        self.last_reset_date = None
+        self.levels_traded_today = set()
 
     def _get_now(self):
         if hasattr(self.bot, 'get_current_timestamp'):
             return self.bot.get_current_timestamp()
         return time.time()
 
+    def _reset_daily_memory_if_needed(self, current_time):
+        # Resetear memoria de niveles al cambiar de día
+        dt = datetime.fromtimestamp(current_time)
+        current_date = dt.date()
+        if self.last_reset_date != current_date:
+            self.levels_traded_today = set()
+            self.last_reset_date = current_date
+
     async def can_trade(self, side, current_price):
         if self.state.trading_paused: return False, "Pausado"
         if self.state.is_in_position: return False, "Ya en posición"
         
         balance = await self.bot._get_account_balance()
-        if balance is None: return False, "Error Balance"
-        if balance < self.min_balance_buffer: return False, "Saldo Insuficiente"
-
-        # Límite de Pérdida Diaria
-        start_bal = self.state.daily_start_balance if self.state.daily_start_balance else balance
-        realized_pnl = sum(t.get("pnl", 0) for t in self.state.daily_trade_stats)
-        
-        if start_bal > 0:
-            daily_pnl_pct = (realized_pnl / start_bal) * 100
-            if daily_pnl_pct <= -abs(self.config.daily_loss_limit_pct):
-                return False, f"Límite Diario ({daily_pnl_pct:.2f}%)"
-
+        if not balance or balance < self.min_balance_buffer: return False, "Saldo"
         return True, "OK"
 
     async def seek_new_trade(self, kline):
-        current_price = float(kline["c"])
+        current_ts = self._get_now()
+        self._reset_daily_memory_if_needed(current_ts)
         
-        can_open, reason = await self.can_trade("CHECK", current_price)
+        current_price = float(kline["c"])
+        can_open, _ = await self.can_trade("CHECK", current_price)
         if not can_open: return
 
         # Datos necesarios
@@ -55,7 +58,9 @@ class RiskManager:
         if not p: return
         
         atr = self.state.cached_atr
-        ema_trend = self.state.cached_ema # Ahora es la EMA 200 (si actualizaste backtester)
+        # EMA 200 para filtro de tendencia mayor
+        ema_trend = self.state.cached_ema 
+        
         if not atr or not ema_trend: return
         
         async with self.bot.lock:
@@ -64,73 +69,73 @@ class RiskManager:
             try:
                 open_price = float(kline["o"])
                 
-                # --- PIVOT BOSS + GOLDEN TREND FILTER ---
-                
-                # 1. Definir Tendencia Mayor (EMA 200)
-                # En Bear Market (2022), esto bloqueará casi todos los Longs suicidas.
+                # --- FILTROS DE ESTRUCTURA ---
                 is_uptrend = current_price > ema_trend
                 is_downtrend = current_price < ema_trend
                 
-                # 2. Definir Régimen CPR
                 cpr_width = p.get("width", 0)
-                is_narrow_cpr = cpr_width < 0.20 # Más estricto para 15m
+                # Si CPR es muy ancho (>0.5%), el mercado está muerto. No operar.
+                if cpr_width > 0.5: return 
+
+                is_narrow_cpr = cpr_width < 0.20
                 
                 side = None
                 entry_type = None
                 sl = None
                 tp_prices = []
+                level_id = None # Identificador del nivel para no repetir
                 
                 is_green = current_price > open_price
                 is_red = current_price < open_price
 
-                # --- LÓGICA DE ENTRADA FILTRADA ---
+                # --- LÓGICA DE ENTRADA (ONE SHOT) ---
 
-                # A. BREAKOUTS (Solo si CPR es estrecho O hay mucha fuerza)
+                # A. BREAKOUTS (Solo si CPR es estrecho y a favor de tendencia)
                 if is_narrow_cpr:
-                    # Breakout Long (Solo en Uptrend)
+                    # Long Breakout H4
                     if is_uptrend and current_price > p["H4"] and is_green:
-                        side = SIDE_BUY
-                        entry_type = "Boss Breakout Long"
-                        sl = current_price - (atr * 1.5) # Stop más amplio en 15m
-                        tp_prices = [p.get("H5", current_price + (atr * 4))] # Target Ambicioso
+                        level_id = "BREAK_H4"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_BUY
+                            entry_type = "Boss Breakout Long"
+                            sl = current_price - (atr * 1.5)
+                            tp_prices = [current_price + (atr * 4.0)] # 4R Objetivo
 
-                    # Breakout Short (Solo en Downtrend)
+                    # Short Breakout L4
                     elif is_downtrend and current_price < p["L4"] and is_red:
-                        side = SIDE_SELL
-                        entry_type = "Boss Breakout Short"
-                        sl = current_price + (atr * 1.5)
-                        tp_prices = [p.get("L5", current_price - (atr * 4))]
+                        level_id = "BREAK_L4"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_SELL
+                            entry_type = "Boss Breakout Short"
+                            sl = current_price + (atr * 1.5)
+                            tp_prices = [current_price - (atr * 4.0)]
 
-                # B. REVERSIONES (CPR Normal/Ancho)
+                # B. REVERSIONES (CPR Normal)
                 else:
-                    # Reversión Long (Rebote en L3) -> SOLO SI ES UPTREND
-                    # "Comprar el dip en tendencia alcista"
+                    # Long Reversal L3 (Solo en Uptrend)
                     if is_uptrend and p["L4"] < current_price <= p["L3"] and is_green:
-                        side = SIDE_BUY
-                        entry_type = "Trend Pullback Long"
-                        sl = p["L4"] - (atr * 0.5)
-                        tp_prices = [p["H3"]] # Target al techo del rango, no solo al centro
+                        level_id = "REV_L3"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_BUY
+                            entry_type = "Trend Pullback Long"
+                            sl = p["L4"] - (atr * 0.5)
+                            tp_prices = [p["H3"]]
 
-                    # Reversión Short (Rebote en H3) -> SOLO SI ES DOWNTREND
-                    # "Vender el rally en tendencia bajista"
+                    # Short Reversal H3 (Solo en Downtrend)
                     elif is_downtrend and p["H3"] <= current_price < p["H4"] and is_red:
-                        side = SIDE_SELL
-                        entry_type = "Trend Pullback Short"
-                        sl = p["H4"] + (atr * 0.5)
-                        tp_prices = [p["L3"]] # Target al piso del rango
+                        level_id = "REV_H3"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_SELL
+                            entry_type = "Trend Pullback Short"
+                            sl = p["H4"] + (atr * 0.5)
+                            tp_prices = [p["L3"]]
 
-                # --- FILTRO DE CALIDAD R/R (Risk/Reward) ---
-                if side:
-                    entry = current_price
-                    target = tp_prices[0]
-                    
-                    risk = abs(entry - sl)
-                    reward = abs(target - entry)
-                    
-                    # Si el beneficio no es al menos 1.5 veces el riesgo, PASAMOS.
-                    # Esto evita ganar $1 arriesgando $2.
-                    if risk > 0 and (reward / risk) < 1.5:
-                        return 
+                # --- FILTRO R/R Y EJECUCIÓN ---
+                if side and level_id:
+                    # Validación R/R (Mínimo 2:1)
+                    risk = abs(current_price - sl)
+                    reward = abs(tp_prices[0] - current_price)
+                    if (reward / risk) < 2.0: return
 
                     # Ejecución
                     balance = await self.bot._get_account_balance()
@@ -143,13 +148,16 @@ class RiskManager:
                     
                     tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
                     
-                    logging.info(f"!!! SEÑAL FILTRADA !!! {entry_type} | EMA200 Filtro: {'✅'}")
+                    # MARCAR NIVEL COMO USADO HOY
+                    self.levels_traded_today.add(level_id)
+                    
+                    logging.info(f"!!! SEÑAL ÚNICA !!! {entry_type} | Nivel: {level_id}")
                     await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
             except Exception as e:
                 logging.error(f"Seek Error: {e}")
 
-    # --- MÉTODOS DE GESTIÓN (Simplificados) ---
+    # --- MÉTODOS DE GESTIÓN (Igual que antes) ---
     async def check_position_state(self):
         async with self.bot.lock:
             try:
@@ -174,14 +182,14 @@ class RiskManager:
 
                 if qty < self.state.last_known_position_qty: await self._handle_partial_tp(qty)
                 
-                # Trailing a BE simple
+                # Trailing a BE (Asegurar empate tras 1.5 ATR)
                 entry = self.state.current_position_info["entry_price"]
                 mark = float(pos.get("markPrice"))
                 atr = self.state.cached_atr
                 if atr and not self.state.sl_moved_to_be:
                     side = self.state.current_position_info["side"]
                     pnl_dist = (mark - entry) if side == SIDE_BUY else (entry - mark)
-                    if pnl_dist > (atr * 1.0): # Mover a BE tras 1 ATR de ganancia
+                    if pnl_dist > (atr * 1.5): 
                         await self.orders_manager.move_sl_to_be(qty)
 
             except Exception: pass
