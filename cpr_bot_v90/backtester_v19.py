@@ -314,7 +314,7 @@ class BacktesterV19:
             
             # Indicadores
             df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
-            df['ema'] = df['close'].ewm(span=20).mean().shift(1)
+            df['ema'] = df['close'].ewm(span=200).mean().shift(1)
             tr = pd.concat([
                 df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()
             ], axis=1).max(axis=1)
