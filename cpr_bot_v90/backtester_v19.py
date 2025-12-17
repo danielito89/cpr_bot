@@ -262,7 +262,7 @@ class BacktesterV19:
             file_normal = f"mainnet_data_{TIMEFRAME}_{self.symbol}.csv"
             
             # Buscar en carpetas típicas
-            search_paths = ["data", "/home/orangepi/bot_cpr/data", "cpr_bot_v90/data", "."]
+            search_paths = ["data", "../data", "cpr_bot_v90/data", "."]
             possible_files = []
             
             for folder in search_paths:
