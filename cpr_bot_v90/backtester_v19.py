@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v19.py
-# NIVEL: V203 (RSI Filter + EMA 200 + One Shot)
+# NIVEL: V207 (Trend Flow: EMA 200 + EMA 50 Re-entry + Prime/Semi Split)
 # USO: python cpr_bot_v90/backtester_v19.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -20,13 +20,13 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
 TIMEFRAME = '15m'
-BUFFER_DAYS = 200 # Aumentado para que la EMA 200 se calcule bien desde el principio
+BUFFER_DAYS = 200 # Importante para que EMA 200 y 50 arranquen bien calculadas
 CAPITAL_INICIAL = 1000
 EXECUTION_MODE = "SMART"
 
 # --- IMPORTS DEL BOT CORE ---
 try:
-    # CORREGIDO: Se importa del módulo (sin .py)
+    # CORREGIDO: Importamos del módulo (sin .py)
     from bot_core.risk_pure import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
     from bot_core.utils import format_price, SIDE_BUY, SIDE_SELL
@@ -62,7 +62,6 @@ class MockBotController:
         self.orders_manager = MockOrdersManager(simulator)
         self.state = simulator.state
         self.lock = asyncio.Lock()
-        # Cargar configuración como atributos
         for k, v in config_dict.items(): setattr(self, k, v)
         
     async def _get_account_balance(self): return self.state.balance
@@ -94,10 +93,11 @@ class SimulatorState:
         
         # Indicadores cacheados
         self.cached_atr = 0
-        self.cached_ema = 0
+        self.cached_ema = 0   # EMA 200
+        self.cached_ema50 = 0 # EMA 50 (Nuevo para V207)
         self.cached_median_vol = 0
         self.cached_adx = 0
-        self.cached_rsi = 50.0 # <--- RSI Agregado
+        self.cached_rsi = 50.0
         
         self.daily_pivots = {}
         self.current_timestamp = 0
@@ -114,21 +114,21 @@ class BacktesterV19:
         self.start_date = start_date
         self.custom_file = custom_file
         
-        # Configuración Dinámica según Símbolo
+        # Configuración Dinámica
         is_pepe = "PEPE" in symbol
         self.tick_size = 0.0000001 if is_pepe else 0.01
         self.step_size = 1 if is_pepe else 0.001
         self.participation_rate = 0.02 if is_pepe else 0.10
         self.timeframe = TIMEFRAME
         
-        # Configuración Simulada (Alineada con Risk Pure V203)
+        # Configuración Simulada V207
         self.config = {
             "symbol": symbol,
             "investment_pct": 0.05,
-            "leverage": 8, # Ajustado para 15m
+            "leverage": 8, 
             "cpr_width_threshold": 0.2,
             "volume_factor": 1.1,
-            "strict_volume_factor": 2.5, # Ajustado V203
+            "strict_volume_factor": 2.5,
             "breakout_atr_sl_multiplier": 1.2,  
             "breakout_tp_mult": 3.0,
             "indicator_update_interval_minutes": 15,
@@ -251,7 +251,7 @@ class BacktesterV19:
         info['tps_hit_count'] = tp_idx + 1
         if tp_idx == 0: self.move_sl_to_be()
 
-    # --- DATA LOADER (Flexible Pattern Search) ---
+    # --- DATA LOADER (Smart Pattern Search) ---
     def load_data(self):
         if self.custom_file:
             print(f"📂 Usando archivo personalizado: {self.custom_file}")
@@ -299,8 +299,11 @@ class BacktesterV19:
             # --- CÁLCULO DE INDICADORES ---
             df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
             
-            # EMA 200 (Filtro Golden Trend)
+            # EMA 200 (Golden Trend)
             df['ema'] = df['close'].ewm(span=200).mean().shift(1)
+            
+            # EMA 50 (Re-Entry Zone) - NUEVO V207
+            df['ema50'] = df['close'].ewm(span=50).mean().shift(1)
             
             # ATR
             tr = pd.concat([
@@ -323,7 +326,7 @@ class BacktesterV19:
             df['dx'] = 100 * abs(df['di_plus'] - df['di_minus']) / (df['di_plus'] + df['di_minus'])
             df['adx'] = df['dx'].ewm(alpha=1/adx_period, adjust=False).mean()
             
-            # RSI 14 (Nuevo Filtro V203)
+            # RSI 14
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).fillna(0)
             loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -346,7 +349,7 @@ class BacktesterV19:
         daily_df['prev_low'] = daily_df['low'].shift(1)
         daily_df['prev_close'] = daily_df['close'].shift(1)
         
-        print(f"\n🛡️ INICIANDO BACKTEST V203 (RSI + EMA200)")
+        print(f"\n🛡️ INICIANDO BACKTEST V207 (Trend Flow)")
         print(f"🎯 Par: {self.symbol} | Timeframe: {self.timeframe} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -372,15 +375,15 @@ class BacktesterV19:
             
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             if self.state.is_in_position:
-                # Usamos el método universal del nuevo risk_pure
                 await self.risk_manager.check_position_state()
                 self.check_exits(row)
 
             self.state.cached_atr = row.atr
             self.state.cached_ema = row.ema
+            self.state.cached_ema50 = row.ema50 # NUEVO
             self.state.cached_median_vol = row.median_vol
             self.state.cached_adx = row.adx
-            self.state.cached_rsi = row.rsi # <--- RSI Actualizado
+            self.state.cached_rsi = row.rsi
 
             if not self.state.is_in_position and not self.state.pending_order:
                 kline = {'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 'v': row.volume, 'q': row.quote_asset_volume, 'x': True}
@@ -424,12 +427,12 @@ class BacktesterV19:
         df_t.to_csv(csv_filename, index=False)
         
         print("\n" + "="*60)
-        print(f"📊 REPORTE PROFESIONAL (V203) - {self.symbol}")
+        print(f"📊 REPORTE PROFESIONAL (V207) - {self.symbol}")
         print("="*60)
         print(f"⚙️  CONFIGURACIÓN:")
         print(f"   • Leverage:        x{self.config['leverage']}")
         print(f"   • Vol Factor:      {self.config['volume_factor']} (Rango)")
-        print(f"   • Strict Factor:   {self.config['strict_volume_factor']} (Breakout/Tendencia)")
+        print(f"   • Strict Factor:   {self.config['strict_volume_factor']} (Breakout)")
         print(f"   • TP Multiplier:   {self.config['breakout_tp_mult']}x ATR")
         print(f"   • Trailing Stop:   Trigger {self.config['trailing_stop_trigger_atr']} / Dist {self.config['trailing_stop_distance_atr']}")
         print(f"   • Liquidez (Sim):  {self.participation_rate*100}% del Vol. Vela")
@@ -476,7 +479,7 @@ class BacktesterV19:
             print(f"⚠️ No se pudo generar el gráfico: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CPR Bot Backtester V203")
+    parser = argparse.ArgumentParser(description="CPR Bot Backtester V207")
     parser.add_argument("--symbol", type=str, default=DEFAULT_SYMBOL, help="Par a operar")
     parser.add_argument("--start", type=str, default=DEFAULT_START_DATE, help="Fecha inicio")
     parser.add_argument("--file", type=str, default=None, help="Archivo CSV específico")
