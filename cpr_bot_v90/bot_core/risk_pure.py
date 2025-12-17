@@ -53,10 +53,11 @@ class RiskManager:
         p = self.state.daily_pivots
         if not p: return
         
+        # INDICADORES
         atr = self.state.cached_atr
         ema_200 = self.state.cached_ema 
         ema_50 = getattr(self.state, 'cached_ema50', 0)
-        ema_slope = getattr(self.state, 'cached_ema_slope', 0) # FIX #3: Slope
+        ema_slope = getattr(self.state, 'cached_ema_slope', 0)
         rsi = getattr(self.state, 'cached_rsi', 50)
         median_vol = self.state.cached_median_vol
         adx = getattr(self.state, 'cached_adx', 0)
@@ -70,24 +71,23 @@ class RiskManager:
                 open_price = float(kline["o"])
                 current_vol = float(kline["q"])
                 
-                # --- CONTEXTO ---
+                # --- DIAGNÓSTICO DE REGIMEN ---
                 is_uptrend = current_price > ema_200
                 is_downtrend = current_price < ema_200
                 
-                # FIX #3: Filtro de Pendiente (Slope) + ADX
-                # Evita operar en chop cuando la EMA 200 está plana
+                vol_ratio = current_vol / median_vol if median_vol > 0 else 0
+                
+                # Trend Day Override (Volumen Explosivo + ADX Fuerte)
+                is_trend_day_event = (vol_ratio > 3.0) and (adx > 25)
+                
+                # Filtro Slope (Solo si no es evento explosivo)
                 has_slope = abs(ema_slope) > (atr * 0.05)
-                is_trending_strong = (adx > 22) and has_slope
+                is_valid_trend_context = has_slope or is_trend_day_event
                 
                 cpr_width = p.get("width", 0)
                 is_narrow_cpr = cpr_width < 0.25 
                 
-                vol_ratio = current_vol / median_vol if median_vol > 0 else 0
-                has_breakout_vol = vol_ratio > 2.0
-                
-                dt = datetime.utcfromtimestamp(current_ts)
-                is_prime_time = 6 <= dt.hour <= 19
-                
+                # --- DEFINICIÓN DE CONFIGURACIÓN ---
                 side = None
                 entry_type = None
                 sl = None
@@ -99,37 +99,73 @@ class RiskManager:
                 is_red = current_price < open_price
 
                 # ==========================================
-                # A. BREAKOUTS (Arma Principal)
+                # A. BREAKOUTS (Estructura Asimétrica)
                 # ==========================================
-                if is_narrow_cpr and is_prime_time:
+                # Condición: Narrow CPR O Trend Day Event
+                can_breakout = (is_narrow_cpr or is_trend_day_event) and is_valid_trend_context
+                
+                if can_breakout and (vol_ratio > 1.8):
+                    
+                    # CAMBIO #3: Detectar "Perfect Setup"
+                    is_perfect = is_narrow_cpr and (vol_ratio > 2.5) and (adx > 25)
+                    
                     if is_uptrend and current_price > p["H4"] and is_green:
-                        if rsi < 70 and has_breakout_vol:
+                        limit_rsi = 80 if is_trend_day_event else 70
+                        if rsi < limit_rsi:
                             level_id = "BREAK_H4"
                             if level_id not in self.levels_traded_today:
                                 side = SIDE_BUY
-                                entry_type = "Main Breakout Long"
-                                size_multiplier = 1.0
-                                sl = current_price - (atr * 1.2)
-                                tp_prices = [current_price + (atr * 4.0)]
+                                entry_type = "Perfect Breakout Long" if is_perfect else "Std Breakout Long"
+                                
+                                # SIZE & TARGETS
+                                if is_perfect:
+                                    size_multiplier = 1.3 # CAMBIO #3: Upsizing
+                                    # CAMBIO #1: Runner Estructural (2R, 5R, 10R)
+                                    tp_prices = [
+                                        current_price + (atr * 2.0),
+                                        current_price + (atr * 5.0),
+                                        current_price + (atr * 10.0)
+                                    ]
+                                else:
+                                    size_multiplier = 1.0
+                                    tp_prices = [
+                                        current_price + (atr * 2.0),
+                                        current_price + (atr * 4.0)
+                                    ]
+                                
+                                sl = current_price - (atr * 1.2) # SL Inicial
 
                     elif is_downtrend and current_price < p["L4"] and is_red:
-                        if rsi > 30 and has_breakout_vol:
+                        limit_rsi = 20 if is_trend_day_event else 30
+                        if rsi > limit_rsi:
                             level_id = "BREAK_L4"
                             if level_id not in self.levels_traded_today:
                                 side = SIDE_SELL
-                                entry_type = "Main Breakout Short"
-                                size_multiplier = 1.0
+                                entry_type = "Perfect Breakout Short" if is_perfect else "Std Breakout Short"
+                                
+                                if is_perfect:
+                                    size_multiplier = 1.3
+                                    tp_prices = [
+                                        current_price - (atr * 2.0),
+                                        current_price - (atr * 5.0),
+                                        current_price - (atr * 10.0)
+                                    ]
+                                else:
+                                    size_multiplier = 1.0
+                                    tp_prices = [
+                                        current_price - (atr * 2.0),
+                                        current_price - (atr * 4.0)
+                                    ]
+                                
                                 sl = current_price + (atr * 1.2)
-                                tp_prices = [current_price - (atr * 4.0)]
 
                 # ==========================================
-                # B. SMART RE-ENTRY (Arma Secundaria Mejorada)
+                # B. SMART RE-ENTRY (Estructura Conservadora)
                 # ==========================================
-                # FIX #3: Solo si hay tendencia fuerte Y pendiente real
-                if not side and is_trending_strong:
+                if not side and is_valid_trend_context and (adx > 20):
                     
                     dist_to_ema50 = abs(current_price - ema_50) / current_price * 100
-                    in_value_zone = dist_to_ema50 < 0.3
+                    in_value_zone = dist_to_ema50 < 0.4
                     rsi_neutral = 40 <= rsi <= 60
                     
                     if is_uptrend and in_value_zone and rsi_neutral and is_green:
@@ -137,11 +173,11 @@ class RiskManager:
                         if level_id not in self.levels_traded_today:
                             side = SIDE_BUY
                             entry_type = "Smart Re-entry Long"
-                            size_multiplier = 0.3 
-                            sl = current_price - (atr * 1.2) # FIX #2: SL un poco más amplio
-                            # FIX #2: TPs más amplios para mejorar R/R
+                            size_multiplier = 0.4 # CAMBIO #3: Low Risk
+                            sl = current_price - (atr * 1.2)
+                            # Targets realistas para continuación
                             tp_prices = [
-                                current_price + (atr * 2.0), 
+                                current_price + (atr * 1.5), 
                                 current_price + (atr * 3.0)
                             ]
 
@@ -150,15 +186,16 @@ class RiskManager:
                         if level_id not in self.levels_traded_today:
                             side = SIDE_SELL
                             entry_type = "Smart Re-entry Short"
-                            size_multiplier = 0.3 
+                            size_multiplier = 0.4 
                             sl = current_price + (atr * 1.2)
                             tp_prices = [
-                                current_price - (atr * 2.0), 
+                                current_price - (atr * 1.5), 
                                 current_price - (atr * 3.0)
                             ]
 
                 # --- EJECUCIÓN ---
                 if side and level_id:
+                    # Check R/R básico
                     risk = abs(current_price - sl)
                     reward = abs(tp_prices[0] - current_price)
                     if risk > 0 and (reward / risk) < 1.2: return
@@ -175,13 +212,13 @@ class RiskManager:
                     tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
                     
                     self.levels_traded_today.add(level_id)
-                    logging.info(f"!!! SEÑAL V209 !!! {entry_type} | Size:{size_multiplier}x")
+                    logging.info(f"!!! SEÑAL V210 !!! {entry_type} | Size:{size_multiplier}x Targets:{len(tp_prices)}")
                     await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
             except Exception as e:
                 logging.error(f"Seek Error: {e}")
 
-    # --- FIX #1: GESTIÓN DE TRAILING DIFERENCIADA ---
+    # --- CAMBIO #2: GESTIÓN DE TRAILING DIFERENCIADA Y ESTRUCTURAL ---
     async def check_position_state(self):
         async with self.bot.lock:
             try:
@@ -194,11 +231,12 @@ class RiskManager:
                     return 
                 
                 if not self.state.is_in_position and qty > 0:
+                    # Restaurar estado si se perdió
                     self.state.is_in_position = True
                     self.state.current_position_info = {
                         "quantity": qty, "entry_price": float(pos.get("entryPrice")),
                         "side": SIDE_BUY if float(pos.get("positionAmt")) > 0 else SIDE_SELL,
-                        "tps_hit_count": 0, "entry_time": self._get_now()
+                        "tps_hit_count": 0, "entry_time": self._get_now(), "entry_type": "Unknown"
                     }
                     self.state.last_known_position_qty = qty
                     self.state.save_state()
@@ -206,26 +244,49 @@ class RiskManager:
 
                 if qty < self.state.last_known_position_qty: await self._handle_partial_tp(qty)
                 
-                # --- TRAILING STOP DINÁMICO ---
-                entry = self.state.current_position_info["entry_price"]
+                # --- LÓGICA DE TRAILING AVANZADA ---
+                info = self.state.current_position_info
+                entry = info["entry_price"]
                 mark = float(pos.get("markPrice"))
                 atr = self.state.cached_atr
-                entry_type = self.state.current_position_info.get("entry_type", "")
+                ema_50 = getattr(self.state, 'cached_ema50', entry) # Usar EMA 50 como trailing
+                entry_type = info.get("entry_type", "")
+                side = info["side"]
                 
-                # Definir Trigger según el tipo de entrada
-                if "Main Breakout" in entry_type:
-                    trigger_dist = 1.5 # Breakout normal
-                else:
-                    trigger_dist = 2.5 # Re-entry: Dale aire para respirar (FIX #1)
+                is_breakout = "Breakout" in entry_type
                 
-                if atr and not self.state.sl_moved_to_be:
-                    side = self.state.current_position_info["side"]
-                    pnl_dist = (mark - entry) if side == SIDE_BUY else (entry - mark)
+                # Caso A: BREAKOUT (Dejar correr el Runner)
+                if is_breakout:
+                    current_pnl_dist = (mark - entry) if side == SIDE_BUY else (entry - mark)
                     
-                    if pnl_dist > (atr * trigger_dist): 
+                    # 1. Si ya pasamos TP1 (ej: +2 ATR), movemos SL a Entry + Costos (NO ANTES)
+                    if current_pnl_dist > (atr * 2.0):
+                        new_sl = entry + (atr * 0.1) if side == SIDE_BUY else entry - (atr * 0.1)
+                        if self._is_better_sl(side, new_sl, info.get("sl")):
+                            await self.orders_manager.update_sl(new_sl, qty)
+                            info["sl"] = new_sl
+
+                    # 2. Si ya pasamos TP2 (ej: +5 ATR), usamos EMA 50 como Trailing Profundo
+                    if current_pnl_dist > (atr * 5.0):
+                        # Solo actualizamos si la EMA 50 garantiza ganancia
+                        new_sl = ema_50
+                        if self._is_better_sl(side, new_sl, info.get("sl")):
+                            await self.orders_manager.update_sl(new_sl, qty)
+                            info["sl"] = new_sl
+
+                # Caso B: RE-ENTRY (Asegurar rápido)
+                else: 
+                    current_pnl_dist = (mark - entry) if side == SIDE_BUY else (entry - mark)
+                    # Mover a BE tras 1.2 ATR
+                    if current_pnl_dist > (atr * 1.2) and not self.state.sl_moved_to_be:
                         await self.orders_manager.move_sl_to_be(qty)
 
             except Exception: pass
+
+    def _is_better_sl(self, side, new_sl, current_sl):
+        if current_sl is None: return True
+        if side == SIDE_BUY: return new_sl > current_sl
+        else: return new_sl < current_sl
 
     async def _handle_full_close(self):
         try: await self.client.futures_cancel_all_open_orders(symbol=self.config.symbol)
