@@ -134,7 +134,7 @@ class BacktesterV19:
             "indicator_update_interval_minutes": 15,
             "ranging_atr_multiplier": 0.5,
             "daily_loss_limit_pct": 15.0,
-            "trailing_stop_trigger_atr": 1.0,
+            "trailing_stop_trigger_atr": 1.5,
             "trailing_stop_distance_atr": 1.5,
             "tick_size": self.tick_size,
             "step_size": self.step_size,
