@@ -27,7 +27,7 @@ EXECUTION_MODE = "SMART"
 
 # --- IMPORTS DEL BOT CORE ---
 try:
-    from bot_core.risk_pure import RiskManager
+    from bot_core.risk.py import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
     from bot_core.utils import format_price, SIDE_BUY, SIDE_SELL
 except ImportError as e:
@@ -262,7 +262,7 @@ class BacktesterV19:
             file_normal = f"mainnet_data_{TIMEFRAME}_{self.symbol}.csv"
             
             # Buscar en carpetas típicas
-            search_paths = ["data", "cpr_bot_v90/data", "."]
+            search_paths = ["data", "/home/orangepi/bot_cpr/data", "cpr_bot_v90/data", "."]
             possible_files = []
             
             for folder in search_paths:
