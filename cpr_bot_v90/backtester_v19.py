@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v19.py
-# NIVEL: V207 (Trend Flow: EMA 200 + EMA 50 Re-entry + Prime/Semi Split)
+# NIVEL: V209 (Slope Filter + Dynamic Trailing)
 # USO: python cpr_bot_v90/backtester_v19.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -20,18 +20,16 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
 TIMEFRAME = '15m'
-BUFFER_DAYS = 200 # Importante para que EMA 200 y 50 arranquen bien calculadas
+BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 EXECUTION_MODE = "SMART"
 
 # --- IMPORTS DEL BOT CORE ---
 try:
-    # CORREGIDO: Importamos del módulo (sin .py)
     from bot_core.risk_pure import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
     from bot_core.utils import format_price, SIDE_BUY, SIDE_SELL
 except ImportError as e:
-    # Fix para rutas relativas
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
         from cpr_bot_v90.bot_core.risk_pure import RiskManager
@@ -93,8 +91,9 @@ class SimulatorState:
         
         # Indicadores cacheados
         self.cached_atr = 0
-        self.cached_ema = 0   # EMA 200
-        self.cached_ema50 = 0 # EMA 50 (Nuevo para V207)
+        self.cached_ema = 0
+        self.cached_ema50 = 0
+        self.cached_ema_slope = 0 # <--- NUEVO V209
         self.cached_median_vol = 0
         self.cached_adx = 0
         self.cached_rsi = 50.0
@@ -106,7 +105,7 @@ class SimulatorState:
     def save_state(self): pass
 
 # ==========================================
-# 2. MOTOR V19 (Backtester)
+# 2. MOTOR V19
 # ==========================================
 class BacktesterV19:
     def __init__(self, symbol, start_date, custom_file=None):
@@ -114,14 +113,13 @@ class BacktesterV19:
         self.start_date = start_date
         self.custom_file = custom_file
         
-        # Configuración Dinámica
         is_pepe = "PEPE" in symbol
         self.tick_size = 0.0000001 if is_pepe else 0.01
         self.step_size = 1 if is_pepe else 0.001
         self.participation_rate = 0.02 if is_pepe else 0.10
         self.timeframe = TIMEFRAME
         
-        # Configuración Simulada V207
+        # Configuración V209
         self.config = {
             "symbol": symbol,
             "investment_pct": 0.05,
@@ -158,7 +156,6 @@ class BacktesterV19:
         total_slippage = self.base_slippage + (0.001 * impact_factor)
         return min(total_slippage, 0.10)
 
-    # --- MÉTODOS DE ORDENES ---
     def stage_order(self, side, qty, price, sl, tps, type_):
         self.state.pending_order = {"side": side, "quantity": qty, "sl": sl, "tps": tps, "type": type_}
 
@@ -249,16 +246,14 @@ class BacktesterV19:
         qty = min(total_initial * split_pct, info['quantity'])
         self.execute_exit(f"TP{tp_idx+1} Partial", price, qty, vol_usdt)
         info['tps_hit_count'] = tp_idx + 1
-        if tp_idx == 0: self.move_sl_to_be()
+        # El trailing se maneja en risk_pure ahora
 
-    # --- DATA LOADER (Smart Pattern Search) ---
     def load_data(self):
         if self.custom_file:
             print(f"📂 Usando archivo personalizado: {self.custom_file}")
             possible_files = [self.custom_file]
         else:
             print(f"🔍 Buscando datos para {self.symbol}...")
-            # Rutas de búsqueda seguras
             folder_paths = ["/home/orangepi/bot_cpr/data", "data", "cpr_bot_v90/data", "."]
             prefix = f"mainnet_data_{self.timeframe}_{self.symbol}"
             
@@ -272,7 +267,7 @@ class BacktesterV19:
                     except: continue
 
         if not possible_files:
-            print(f"❌ No se encontraron datos CSV para {self.symbol} (Patrón: {prefix})")
+            print(f"❌ No se encontraron datos CSV (Patrón: {prefix})")
             return None, None
 
         possible_files.sort(reverse=True) 
@@ -291,27 +286,24 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             
             if df.index[-1] < target_start:
-                print(f"❌ El archivo termina en {df.index[-1]}, antes de inicio {target_start}")
+                print(f"❌ El archivo termina en {df.index[-1]}")
                 return None, None
 
             df = df[df.index >= start_buffer].copy()
             
-            # --- CÁLCULO DE INDICADORES ---
+            # --- INDICADORES ---
             df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
-            
-            # EMA 200 (Golden Trend)
             df['ema'] = df['close'].ewm(span=200).mean().shift(1)
-            
-            # EMA 50 (Re-Entry Zone) - NUEVO V207
             df['ema50'] = df['close'].ewm(span=50).mean().shift(1)
             
-            # ATR
+            # EMA Slope (Variación absoluta de la EMA 200)
+            df['ema_slope'] = df['ema'].diff() # <--- NUEVO V209
+            
             tr = pd.concat([
                 df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
             
-            # ADX
             adx_period = 14
             df['up_move'] = df['high'] - df['high'].shift(1)
             df['down_move'] = df['low'].shift(1) - df['low']
@@ -326,7 +318,6 @@ class BacktesterV19:
             df['dx'] = 100 * abs(df['di_plus'] - df['di_minus']) / (df['di_plus'] + df['di_minus'])
             df['adx'] = df['dx'].ewm(alpha=1/adx_period, adjust=False).mean()
             
-            # RSI 14
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).fillna(0)
             loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -349,8 +340,8 @@ class BacktesterV19:
         daily_df['prev_low'] = daily_df['low'].shift(1)
         daily_df['prev_close'] = daily_df['close'].shift(1)
         
-        print(f"\n🛡️ INICIANDO BACKTEST V207 (Trend Flow)")
-        print(f"🎯 Par: {self.symbol} | Timeframe: {self.timeframe} | Inicio: {self.start_date}")
+        print(f"\n🛡️ INICIANDO BACKTEST V209 (Professional Edge)")
+        print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
         for current_time, row in df.iterrows():
@@ -380,7 +371,8 @@ class BacktesterV19:
 
             self.state.cached_atr = row.atr
             self.state.cached_ema = row.ema
-            self.state.cached_ema50 = row.ema50 # NUEVO
+            self.state.cached_ema50 = row.ema50
+            self.state.cached_ema_slope = row.ema_slope # <--- PASO AL ESTADO
             self.state.cached_median_vol = row.median_vol
             self.state.cached_adx = row.adx
             self.state.cached_rsi = row.rsi
@@ -394,23 +386,18 @@ class BacktesterV19:
     def generate_report(self):
         trades = self.state.trades_history
         if not trades:
-            print("⚠️ Sin operaciones en el periodo seleccionado.")
+            print("⚠️ Sin operaciones.")
             return
 
         df_t = pd.DataFrame(trades)
-        
         winners = df_t[df_t['pnl_usd'] > 0]
         losers = df_t[df_t['pnl_usd'] <= 0]
-        
         gross_profit = winners['pnl_usd'].sum()
         gross_loss = abs(losers['pnl_usd'].sum())
-        
         net_pnl = df_t['pnl_usd'].sum()
         total_legs = len(df_t)
-        
         win_rate = (len(winners) / total_legs) * 100
         profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else 999.0
-        
         avg_win = winners['pnl_usd'].mean() if not winners.empty else 0
         avg_loss = losers['pnl_usd'].mean() if not losers.empty else 0
         payoff_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
@@ -420,24 +407,14 @@ class BacktesterV19:
         running_max = equity.cummax()
         drawdown = (equity - running_max) / running_max * 100
         max_dd = drawdown.min()
-        
         avg_slippage = df_t['slippage_pct'].mean()
         
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         
         print("\n" + "="*60)
-        print(f"📊 REPORTE PROFESIONAL (V207) - {self.symbol}")
+        print(f"📊 REPORTE PROFESIONAL (V209) - {self.symbol}")
         print("="*60)
-        print(f"⚙️  CONFIGURACIÓN:")
-        print(f"   • Leverage:        x{self.config['leverage']}")
-        print(f"   • Vol Factor:      {self.config['volume_factor']} (Rango)")
-        print(f"   • Strict Factor:   {self.config['strict_volume_factor']} (Breakout)")
-        print(f"   • TP Multiplier:   {self.config['breakout_tp_mult']}x ATR")
-        print(f"   • Trailing Stop:   Trigger {self.config['trailing_stop_trigger_atr']} / Dist {self.config['trailing_stop_distance_atr']}")
-        print(f"   • Liquidez (Sim):  {self.participation_rate*100}% del Vol. Vela")
-        print("-" * 60)
-        print(f"💰 Balance Inicial:   ${CAPITAL_INICIAL:,.2f}")
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
         print(f"📉 Max Drawdown:      {max_dd:.2f}%")
@@ -450,36 +427,10 @@ class BacktesterV19:
         print(f"🔢 Total Trades:      {total_legs}")
         print(f"✅ Ganadores:         {len(winners)} (Avg: ${avg_win:.2f})")
         print(f"❌ Perdedores:        {len(losers)}  (Avg: ${avg_loss:.2f})")
-        print(f"💧 Slippage Prom:     {avg_slippage:.4f}%")
-        print(f"💾 CSV Detallado:     {csv_filename}")
         print("=" * 60)
-        
-        try:
-            output_folder = "backtest_results"
-            if not os.path.exists(output_folder): os.makedirs(output_folder)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{output_folder}/bt_{self.symbol}_{self.start_date}_{timestamp}.png"
-
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
-            ax1.plot(pd.to_datetime(df_t['date']), df_t['balance'], label='Equity', color='#00ff00', linewidth=1)
-            ax1.set_title(f"{self.symbol} | PF: {profit_factor:.2f} | DD: {max_dd:.2f}% | Net: ${net_pnl:,.0f}")
-            ax1.set_ylabel('Capital USDT (Log)')
-            ax1.set_yscale('log')
-            ax1.grid(True, alpha=0.2)
-            ax1.legend()
-            ax2.plot(drawdown.values, color='#ff0000', linewidth=1)
-            ax2.set_title("Drawdown %")
-            ax2.fill_between(range(len(drawdown)), drawdown, 0, color='#ff0000', alpha=0.3)
-            ax2.grid(True, alpha=0.2)
-            plt.tight_layout()
-            plt.savefig(filename)
-            print(f"📈 Gráfico guardado: {filename}")
-            plt.close(fig)
-        except Exception as e:
-            print(f"⚠️ No se pudo generar el gráfico: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CPR Bot Backtester V207")
+    parser = argparse.ArgumentParser(description="CPR Bot Backtester V209")
     parser.add_argument("--symbol", type=str, default=DEFAULT_SYMBOL, help="Par a operar")
     parser.add_argument("--start", type=str, default=DEFAULT_START_DATE, help="Fecha inicio")
     parser.add_argument("--file", type=str, default=None, help="Archivo CSV específico")
