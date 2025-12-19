@@ -14,9 +14,10 @@ class RiskManager:
         self.min_rr = 2.0
         self.debug_mode = False 
         
-        # --- CONFIGURACIÓN V225 (PROFESIONAL) ---
-        self.risk_per_trade = 0.02  # Arriesgar 2% de la cuenta por trade
-        self.max_leverage = 10      # Leverage disponible para lograr ese riesgo
+        # --- CONFIGURACIÓN V226 (ASYMMETRIC BETTING) ---
+        self.base_risk = 0.0075      # 0.75% Riesgo Estándar
+        self.premium_risk = 0.015    # 1.50% Riesgo en Setups 'A+'
+        self.max_leverage = 7.0      # Leverage controlado
 
     def _cleanup_zones(self, current_ts, current_price):
         valid_zones = []
@@ -110,6 +111,7 @@ class RiskManager:
                         tp_structure = sh
                         tp_min_rr = current_price + (risk * 2.5)
                         
+                        # TP Lógico
                         dist_to_struct = abs(tp_structure - current_price)
                         if dist_to_struct > (atr * 6.0):
                             take_profit = tp_min_rr
@@ -119,7 +121,7 @@ class RiskManager:
                         reward = take_profit - current_price
                         
                         if risk > 0 and (reward / risk) >= self.min_rr:
-                            best_setup = (SIDE_BUY, current_price, stop_loss, take_profit, "SMC Demand V225", z)
+                            best_setup = (SIDE_BUY, current_price, stop_loss, take_profit, "SMC Demand V226", z)
 
                 # --- SUPPLY SETUP ---
                 elif is_downtrend and z['type'] == 'SUPPLY':
@@ -149,36 +151,38 @@ class RiskManager:
                         reward = current_price - take_profit
                         
                         if risk > 0 and (reward / risk) >= self.min_rr:
-                            best_setup = (SIDE_SELL, current_price, stop_loss, take_profit, "SMC Supply V225", z)
+                            best_setup = (SIDE_SELL, current_price, stop_loss, take_profit, "SMC Supply V226", z)
 
             if best_setup:
                 side, entry, sl, tp, label, zone_ref = best_setup
                 
-                # CÁLCULO DE POSICIÓN DINÁMICA V225 (ESTO ES ORO)
+                # --- CALCULO DE TAMAÑO DINÁMICO (V226) ---
                 balance = await self.bot._get_account_balance()
                 if not balance: return
                 
-                # 1. ¿Cuánto dinero quiero perder si sale mal?
-                risk_amount = balance * self.risk_per_trade # Ej: $1000 * 0.02 = $20
+                # 1. Calcular Calidad del Setup
+                potential_rr = abs(tp - entry) / abs(entry - sl)
                 
-                # 2. ¿Cuál es la distancia al stop?
+                # 2. Asignar Riesgo
+                if potential_rr >= 3.5:
+                    risk_pct = self.premium_risk # 1.5%
+                    type_label = f"{label} (A+ Setup)"
+                else:
+                    risk_pct = self.base_risk # 0.75%
+                    type_label = f"{label} (Std Setup)"
+                
+                # 3. Calcular Size
+                risk_amount = balance * risk_pct
                 sl_distance = abs(entry - sl)
-                
                 if sl_distance <= 0: return
-
-                # 3. ¿Cuántas monedas necesito comprar para que esa distancia sea = $20?
-                # Qty = Riesgo_USD / Distancia_Precio
+                
                 raw_qty = risk_amount / sl_distance
                 
-                # 4. Validar con Leverage Máximo
+                # 4. Capar Leverage (Safety Net)
                 max_notional = balance * self.max_leverage
-                current_notional = raw_qty * entry
-                
-                # Si la posición calculada excede el apalancamiento máximo, la recortamos
-                if current_notional > max_notional:
+                if (raw_qty * entry) > max_notional:
                     raw_qty = max_notional / entry
-                    if self.debug_mode: print(f"⚠️ Posición recortada por Max Leverage 10x")
-
+                    
                 qty = float(format_qty(self.config.step_size, raw_qty))
                 
                 if qty > 0:
@@ -186,10 +190,6 @@ class RiskManager:
                     zone_ref['attempts'] += 1
                     
                     tps = [float(format_price(self.config.tick_size, tp))]
-                    rr_calc = (abs(tp-entry)/abs(entry-sl))
                     
-                    # Log más detallado para ver el apalancamiento real usado
-                    used_leverage = (qty * entry) / balance
-                    logging.info(f"!!! SIGNAL V225 !!! {label} | R/R: {rr_calc:.2f} | Lev: {used_leverage:.1f}x")
-                    
-                    await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps, label)
+                    logging.info(f"!!! SIGNAL V226 !!! {type_label} | R/R: {potential_rr:.2f} | Risk: {risk_pct*100}%")
+                    await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps, type_label)
