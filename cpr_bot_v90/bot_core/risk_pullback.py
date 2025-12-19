@@ -10,177 +10,118 @@ class RiskManager:
         self.orders_manager = bot_controller.orders_manager
         self.config = bot_controller 
         
-        self.zone_validity_candles = 72 
-        self.min_rr = 2.0
-        self.debug_mode = False 
-        
-        # Risk Config
-        self.base_risk = 0.0075      
-        self.premium_risk = 0.015    
+        # Config V230: Mean Reversion / Trap Trading
+        self.min_rr = 1.5           # MR suele tener RR más bajo pero WR más alto
+        self.risk_per_trade = 0.01  # 1% Estándar
         self.max_leverage = 7.0
-        
-        # Configuración V229 (Gestión Paciente)
-        self.max_trade_duration_candles = 24  # 24 Horas
-        self.be_trigger_r = 2.2               # BE relajado
 
-    def _cleanup_zones(self, current_ts, current_price):
-        valid_zones = []
-        for z in self.state.active_zones:
-            age_candles = (current_ts - z['created_at']) / 3600
-            if age_candles > self.zone_validity_candles: continue
-            if z.get('attempts', 0) > 0: continue
-            
-            if z['type'] == 'DEMAND' and current_price < (z['bottom'] * 0.98): continue 
-            if z['type'] == 'SUPPLY' and current_price > (z['top'] * 1.02): continue 
-            
-            valid_zones.append(z)
-        self.state.active_zones = valid_zones
-
-    def _create_smart_zone(self, row, prev_row, is_uptrend, is_downtrend):
-        if prev_row is None: return
-        if not row.is_impulse: return
-
-        if is_uptrend and row.close > row.last_swing_high:
-            zone = {
-                'type': 'DEMAND',
-                'top': prev_row.high,
-                'bottom': prev_row.low,
-                'created_at': self.state.current_timestamp,
-                'tested': False,
-                'origin_ts': self.state.current_timestamp,
-                'attempts': 0
-            }
-            self.state.active_zones.append(zone)
-
-        elif is_downtrend and row.close < row.last_swing_low:
-            zone = {
-                'type': 'SUPPLY',
-                'top': prev_row.high,
-                'bottom': prev_row.low,
-                'created_at': self.state.current_timestamp,
-                'tested': False,
-                'origin_ts': self.state.current_timestamp,
-                'attempts': 0
-            }
-            self.state.active_zones.append(zone)
-
+    # No usamos zonas persistentes en esta estrategia, sino eventos inmediatos
     async def seek_new_trade(self, _):
         row = self.state.current_row
-        prev_row = self.state.prev_row 
         current_price = row.close
         atr = self.state.cached_atr
         
         if not atr: return
         
-        sh = row.last_swing_high
-        sl = row.last_swing_low
-        psh = row.prev_swing_high
-        psl = row.prev_swing_low
+        # Estructura Fractal (Pre-calculada en Backtester V20)
+        # Necesitamos saber dónde estaba la liquidez (Highs/Lows previos)
+        last_high = row.last_swing_high
+        last_low = row.last_swing_low
         
-        if pd.isna(sh) or pd.isna(psh): return
+        if pd.isna(last_high) or pd.isna(last_low): return
 
-        is_uptrend = (sh > psh) and (sl > psl)
-        is_downtrend = (sh < psh) and (sl < psl)
-        
-        self._cleanup_zones(self.state.current_timestamp, current_price)
-        self._create_smart_zone(row, prev_row, is_uptrend, is_downtrend)
-        
-        if not is_uptrend and not is_downtrend: return 
-        
+        # FILTRO DE RÉGIMEN: Evitar operar contra tendencias nucleares
+        # Usamos el body size relativo. Si la vela actual es MONSTRUOSA (>4x ATR), no nos ponemos en medio.
+        body_size = abs(row.close - row.open)
+        if body_size > (atr * 4.0): return 
+
         async with self.bot.lock:
             if self.state.is_in_position: return
             
             best_setup = None
             
-            for z in self.state.active_zones:
-                if z['tested']: continue 
-                if self.state.current_timestamp == z['origin_ts']: continue
+            # --- SETUP 1: BEAR TRAP (Falsa ruptura bajista -> LONG) ---
+            # 1. El precio perforó el último Low (Tomó liquidez)
+            liquidity_grab_low = row.low < last_low
+            
+            # 2. Pero cerró POR ENCIMA del Low (Rechazo/Fallo)
+            rejection_close = row.close > last_low
+            
+            # 3. La vela es alcista (Verde)
+            is_green = row.close > row.open
+            
+            if liquidity_grab_low and rejection_close and is_green:
+                # Entrada: Cierre actual
+                entry = current_price
+                # SL: Debajo de la mecha del engaño
+                stop_loss = row.low - (atr * 0.2)
+                # TP: El High opuesto (o al menos hasta la mitad del rango)
+                take_profit = last_high
+                
+                # Validación R/R
+                risk = entry - stop_loss
+                reward = take_profit - entry
+                
+                # Si el rango es muy grande, capamos el TP para asegurar WR
+                if reward > (risk * 4): 
+                    take_profit = entry + (risk * 4)
+                
+                if risk > 0 and (reward / risk) >= self.min_rr:
+                    best_setup = (SIDE_BUY, entry, stop_loss, take_profit, "Bear Trap (Fakeout Low)")
 
-                # --- DEMAND SETUP ---
-                if is_uptrend and z['type'] == 'DEMAND':
-                    touched = row.low <= z['top']
-                    swept = row.low < (z['bottom'] - (atr * 0.1))
-                    
-                    body = abs(row.close - row.open)
-                    has_displacement = body > (atr * 0.6)
-                    
-                    confirmed = (row.close > row.open) and \
-                                (prev_row is not None and row.close > prev_row.high) and \
-                                has_displacement
-                    
-                    if touched and swept and confirmed:
-                        stop_loss = row.low - (atr * 0.5)
-                        risk = current_price - stop_loss
-                        
-                        tp1 = current_price + (risk * 1.5)
-                        tp2 = max(sh, current_price + (risk * 3.0))
-                        
-                        reward_avg = ((tp1 + tp2) / 2) - current_price
-                        
-                        if risk > 0 and (reward_avg / risk) >= 1.5:
-                            best_setup = (SIDE_BUY, current_price, stop_loss, [tp1, tp2], "SMC Demand V229", z)
+            # --- SETUP 2: BULL TRAP (Falsa ruptura alcista -> SHORT) ---
+            # 1. El precio perforó el último High
+            liquidity_grab_high = row.high > last_high
+            
+            # 2. Pero cerró POR DEBAJO (Fallo)
+            rejection_close_high = row.close < last_high
+            
+            # 3. Vela bajista (Roja)
+            is_red = row.close < row.open
+            
+            if liquidity_grab_high and rejection_close_high and is_red:
+                entry = current_price
+                stop_loss = row.high + (atr * 0.2)
+                take_profit = last_low
+                
+                risk = stop_loss - entry
+                reward = entry - take_profit
+                
+                if reward > (risk * 4):
+                    take_profit = entry - (risk * 4)
+                
+                if risk > 0 and (reward / risk) >= self.min_rr:
+                    best_setup = (SIDE_SELL, entry, stop_loss, take_profit, "Bull Trap (Fakeout High)")
 
-                # --- SUPPLY SETUP ---
-                elif is_downtrend and z['type'] == 'SUPPLY':
-                    touched = row.high >= z['bottom']
-                    swept = row.high > (z['top'] + (atr * 0.1))
-                    
-                    body = abs(row.close - row.open)
-                    has_displacement = body > (atr * 0.6)
-                    
-                    confirmed = (row.close < row.open) and \
-                                (prev_row is not None and row.close < prev_row.low) and \
-                                has_displacement
-                    
-                    if touched and swept and confirmed:
-                        stop_loss = row.high + (atr * 0.5)
-                        risk = stop_loss - current_price
-                        
-                        tp1 = current_price - (risk * 1.5)
-                        tp2 = min(sl, current_price - (risk * 3.0))
-                        
-                        reward_avg = current_price - ((tp1 + tp2) / 2)
-                        
-                        if risk > 0 and (reward_avg / risk) >= 1.5:
-                            best_setup = (SIDE_SELL, current_price, stop_loss, [tp1, tp2], "SMC Supply V229", z)
-
+            # --- EJECUCIÓN ---
             if best_setup:
-                side, entry, sl, tps, label, zone_ref = best_setup
+                side, entry, sl, tp, label = best_setup
                 
                 balance = await self.bot._get_account_balance()
                 if not balance: return
                 
-                avg_rr = abs(tps[1] - entry) / abs(entry - sl)
-                
-                if avg_rr >= 3.5:
-                    risk_pct = self.premium_risk 
-                    type_label = f"{label} (A+)"
-                else:
-                    risk_pct = self.base_risk 
-                    type_label = f"{label} (Std)"
-                
-                risk_amount = balance * risk_pct
+                # Sizing Dinámico V226 simplificado
+                risk_amount = balance * self.risk_per_trade
                 sl_distance = abs(entry - sl)
-                if sl_distance <= 0: return
                 
                 raw_qty = risk_amount / sl_distance
-                
                 max_notional = balance * self.max_leverage
+                
                 if (raw_qty * entry) > max_notional:
                     raw_qty = max_notional / entry
                     
                 qty = float(format_qty(self.config.step_size, raw_qty))
                 
                 if qty > 0:
-                    zone_ref['tested'] = True
-                    zone_ref['attempts'] += 1
-                    tps_fmt = [float(format_price(self.config.tick_size, p)) for p in tps]
-                    
-                    logging.info(f"!!! SIGNAL V229 !!! {type_label} | Risk: {risk_pct*100}%")
-                    await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps_fmt, type_label)
+                    tps = [float(format_price(self.config.tick_size, tp))]
+                    rr_calc = (abs(tp-entry)/abs(entry-sl))
+                    logging.info(f"!!! SIGNAL V230 !!! {label} | R/R: {rr_calc:.2f}")
+                    await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps, label)
 
-    # --- GESTIÓN ACTIVA V229 (FIXED & RELAXED) ---
+    # --- GESTIÓN ACTIVA V230 (SIMPLE) ---
     async def check_position_state(self):
+        # En estrategias de trampa, si no funciona rápido, salimos.
+        # Time-stop de 6 velas (6 horas). Si no vamos ganando, fuera.
         async with self.bot.lock:
             try:
                 pos = await self.bot._get_current_position()
@@ -192,7 +133,6 @@ class RiskManager:
                 mark_price = float(pos['markPrice'])
                 sl_price = self.state.current_position_info.get('sl')
                 side = self.state.current_position_info.get('side')
-                qty = abs(float(pos['positionAmt']))
                 
                 if not sl_price: return
 
@@ -204,15 +144,14 @@ class RiskManager:
                 else:
                     current_r = (entry_price - mark_price) / risk_dist
                 
-                # ZOMBIE: 24 horas y < 0.2R (Trade muerto)
-                if candles_open >= self.max_trade_duration_candles and current_r < 0.2:
-                    logging.info(f"💀 ZOMBIE KILLER: 24h+ y sin ganancia. Cerrando.")
-                    await self.orders_manager.close_position_manual("Time Exit")
+                # ZOMBIE KILLER AGRESIVO: 6 horas
+                if candles_open >= 6 and current_r < 0.3:
+                    await self.orders_manager.close_position_manual("Time Exit (Trap Failed)")
                     return
 
-                # BE RELAJADO: Solo al 2.2R (Dejamos correr)
-                if current_r > self.be_trigger_r and not self.state.sl_moved_to_be:
+                # BE AL 1.0R (Asegurar rápido en Mean Reversion)
+                if current_r > 1.0 and not self.state.sl_moved_to_be:
+                    qty = abs(float(pos['positionAmt']))
                     await self.orders_manager.move_sl_to_be(qty)
 
-            except Exception as e:
-                logging.error(f"Error en gestión V229: {e}")
+            except Exception: pass
