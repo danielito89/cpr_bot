@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V221 (SMC Strict - BOS & Base Candle)
+# NIVEL: V222 FINAL FIX (SMC Strict + ATR + State Fix)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
-TIMEFRAME = '1h' # CLAVE: 1H
+TIMEFRAME = '1h' # IMPORTANTE: 1 Hora
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
@@ -75,6 +75,8 @@ class SimulatorState:
         self.trading_paused = False
         self.sl_moved_to_be = False
         self.last_known_position_qty = 0.0
+        
+        # --- FIXED: Variable ATR en State ---
         self.cached_atr = 0.0
         
         # MEMORIA DE S/D
@@ -85,7 +87,7 @@ class SimulatorState:
         self.current_price = 0
     def save_state(self): pass
 
-class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
+class BacktesterV19:
     def __init__(self, symbol, start_date, custom_file=None):
         self.symbol = symbol
         self.start_date = start_date
@@ -217,7 +219,7 @@ class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- CÁLCULO DE ESTRUCTURA ROBUSTO ---
+            # --- CÁLCULO DE ESTRUCTURA ---
             df['is_swing_high'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(2)) & \
                                   (df['high'] > df['high'].shift(-1)) & (df['high'] > df['high'].shift(-2))
             
@@ -243,12 +245,20 @@ class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
             df['avg_body'] = df['body_size'].rolling(20).mean()
             df['is_impulse'] = df['body_size'] > (df['avg_body'] * 2.0)
             
-            # NUEVO PARA V221: Datos de vela anterior para definir la BASE
+            # Datos vela anterior
             df['prev_open'] = df['open'].shift(1)
             df['prev_close'] = df['close'].shift(1)
             df['prev_high'] = df['high'].shift(1)
             df['prev_low'] = df['low'].shift(1)
             
+            # --- FIXED: CÁLCULO ATR (ESTO FALTABA) ---
+            tr = pd.concat([
+                df['high'] - df['low'], 
+                (df['high'] - df['close'].shift(1)).abs(), 
+                (df['low'] - df['close'].shift(1)).abs()
+            ], axis=1).max(axis=1)
+            df['atr'] = tr.rolling(14).mean().shift(1)
+
             return df, target_start
         except Exception as e:
             print(f"❌ Error leyendo CSV: {e}")
@@ -257,7 +267,7 @@ class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V221 (SMC Strict)")
+        print(f"\n🛡️ INICIANDO BACKTEST V222 (SMC Liquidity Sweep)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -266,7 +276,9 @@ class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
             
             self.state.current_timestamp = current_time.timestamp()
             self.state.current_price = row.close 
-            self.state.current_row = row
+            self.state.current_row = row 
+            
+            # --- FIXED: ASIGNACIÓN ATR A STATE ---
             self.state.cached_atr = row.atr
             
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
@@ -274,7 +286,6 @@ class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
                 self.check_exits(row) 
 
             if not self.state.is_in_position and not self.state.pending_order:
-                # PASAMOS TODO LO NECESARIO
                 kline = {
                     'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 
                     'v': row.volume, 'prev_open': row.prev_open, 'prev_close': row.prev_close,
@@ -299,7 +310,7 @@ class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V221 (SMC Strict) - {self.symbol}")
+        print(f"📊 REPORTE V222 (SMC Liquidity Sweep) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
