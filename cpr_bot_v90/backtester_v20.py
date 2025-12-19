@@ -75,6 +75,7 @@ class SimulatorState:
         self.trading_paused = False
         self.sl_moved_to_be = False
         self.last_known_position_qty = 0.0
+        self.cached_atr = 0.0
         
         # MEMORIA DE S/D
         self.active_zones = [] 
@@ -265,7 +266,8 @@ class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
             
             self.state.current_timestamp = current_time.timestamp()
             self.state.current_price = row.close 
-            self.state.current_row = row 
+            self.state.current_row = row
+            self.state.cached_atr = row.atr
             
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             if self.state.is_in_position:
