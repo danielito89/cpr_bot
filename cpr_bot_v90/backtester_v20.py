@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V229 FIXED (SMC Strict + Active Mgmt Hooked)
+# NIVEL: V230.2 FIXED (SMC Strict + Active Mgmt Hooked)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -276,7 +276,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V229 (SMC Flow State)")
+        print(f"\n🛡️ INICIANDO BACKTEST V230.2 (SMC Flow State)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -291,7 +291,7 @@ class BacktesterV19:
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             
             if self.state.is_in_position:
-                # --- V229 CRÍTICO: CONECTAR LA GESTIÓN ACTIVA ---
+                # --- V230.2 CRÍTICO: CONECTAR LA GESTIÓN ACTIVA ---
                 await self.risk_manager.check_position_state()
                 self.check_exits(row) 
 
@@ -317,7 +317,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V229 (SMC Flow State) - {self.symbol}")
+        print(f"📊 REPORTE V230.2 (SMC Flow State) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")

@@ -10,79 +10,101 @@ class RiskManager:
         self.orders_manager = bot_controller.orders_manager
         self.config = bot_controller 
         
-        # Config V230: Mean Reversion / Trap Trading
-        self.min_rr = 1.5           # MR suele tener RR más bajo pero WR más alto
-        self.risk_per_trade = 0.01  # 1% Estándar
-        self.max_leverage = 7.0
+        # Config V230.2: Trap Trading (Fixed)
+        self.min_rr = 1.5           
+        self.risk_per_trade = 0.01  # 1% Riesgo Fijo
+        self.max_leverage = 5.0     # Bajamos leverage para testear estabilidad
 
-    # No usamos zonas persistentes en esta estrategia, sino eventos inmediatos
+        # --- CONTROLES DE FRECUENCIA (V230.2 FIX) ---
+        self.last_trade_ts = 0
+        self.cooldown_candles = 6   # 6 Horas de silencio tras trade
+        self.last_traded_swing_id = None # Para evitar re-entradas en el mismo nivel
+
     async def seek_new_trade(self, _):
+        # 1. COOLDOWN GLOBAL
+        # Si operamos hace poco, ignoramos todo
+        if (self.state.current_timestamp - self.last_trade_ts) < (self.cooldown_candles * 3600):
+            return
+
         row = self.state.current_row
         current_price = row.close
         atr = self.state.cached_atr
         
         if not atr: return
         
-        # Estructura Fractal (Pre-calculada en Backtester V20)
-        # Necesitamos saber dónde estaba la liquidez (Highs/Lows previos)
+        # Estructura Fractal
         last_high = row.last_swing_high
         last_low = row.last_swing_low
         
         if pd.isna(last_high) or pd.isna(last_low): return
 
-        # FILTRO DE RÉGIMEN: Evitar operar contra tendencias nucleares
-        # Usamos el body size relativo. Si la vela actual es MONSTRUOSA (>4x ATR), no nos ponemos en medio.
-        body_size = abs(row.close - row.open)
-        if body_size > (atr * 4.0): return 
+        # Crear un ID único para la estructura actual
+        # Si los niveles no han cambiado, el ID es el mismo
+        current_swing_id = f"{last_high:.2f}_{last_low:.2f}"
+
+        # 2. EVENT LOCK (V230.2 FIX)
+        # Si ya operamos esta estructura específica, no hacemos nada
+        if self.last_traded_swing_id == current_swing_id:
+            return
+
+        # 3. FILTRO DE CONTEXTO (RANGO)
+        # Si el rango es demasiado grande (> 3.5 ATR), es expansión/tendencia fuerte.
+        # Mean Reversion funciona mejor en rangos comprimidos o normales.
+        range_size = abs(last_high - last_low)
+        if range_size > (atr * 3.5):
+            return
 
         async with self.bot.lock:
             if self.state.is_in_position: return
             
             best_setup = None
             
-            # --- SETUP 1: BEAR TRAP (Falsa ruptura bajista -> LONG) ---
-            # 1. El precio perforó el último Low (Tomó liquidez)
+            # --- SETUP 1: BEAR TRAP (Fakeout Low -> LONG) ---
+            # A. Grab: Precio rompe el Low
             liquidity_grab_low = row.low < last_low
             
-            # 2. Pero cerró POR ENCIMA del Low (Rechazo/Fallo)
+            # B. Rejection: Precio cierra DENTRO del rango (encima del Low)
             rejection_close = row.close > last_low
             
-            # 3. La vela es alcista (Verde)
+            # C. Color: Vela verde
             is_green = row.close > row.open
             
-            if liquidity_grab_low and rejection_close and is_green:
-                # Entrada: Cierre actual
+            # D. Displacement (V230.2 FIX): La mecha/cuerpo muestra fuerza
+            # Exigimos que el cierre esté alejado del mínimo
+            displacement_ok = (row.close - row.low) > (atr * 0.4)
+            
+            if liquidity_grab_low and rejection_close and is_green and displacement_ok:
                 entry = current_price
-                # SL: Debajo de la mecha del engaño
                 stop_loss = row.low - (atr * 0.2)
-                # TP: El High opuesto (o al menos hasta la mitad del rango)
-                take_profit = last_high
                 
-                # Validación R/R
+                # E. TP LÓGICO (V230.2 FIX): Mid-Range
+                mid_range = (last_high + last_low) / 2
+                take_profit = mid_range
+                
+                # Cap de seguridad 4R
                 risk = entry - stop_loss
                 reward = take_profit - entry
                 
-                # Si el rango es muy grande, capamos el TP para asegurar WR
                 if reward > (risk * 4): 
                     take_profit = entry + (risk * 4)
                 
                 if risk > 0 and (reward / risk) >= self.min_rr:
-                    best_setup = (SIDE_BUY, entry, stop_loss, take_profit, "Bear Trap (Fakeout Low)")
+                    best_setup = (SIDE_BUY, entry, stop_loss, take_profit, "Bear Trap (Sniper)")
 
-            # --- SETUP 2: BULL TRAP (Falsa ruptura alcista -> SHORT) ---
-            # 1. El precio perforó el último High
+            # --- SETUP 2: BULL TRAP (Fakeout High -> SHORT) ---
             liquidity_grab_high = row.high > last_high
-            
-            # 2. Pero cerró POR DEBAJO (Fallo)
             rejection_close_high = row.close < last_high
-            
-            # 3. Vela bajista (Roja)
             is_red = row.close < row.open
             
-            if liquidity_grab_high and rejection_close_high and is_red:
+            # Displacement Short
+            displacement_ok_short = (row.high - row.close) > (atr * 0.4)
+            
+            if liquidity_grab_high and rejection_close_high and is_red and displacement_ok_short:
                 entry = current_price
                 stop_loss = row.high + (atr * 0.2)
-                take_profit = last_low
+                
+                mid_range = (last_high + last_low) / 2
+                take_profit = mid_range
                 
                 risk = stop_loss - entry
                 reward = entry - take_profit
@@ -91,7 +113,7 @@ class RiskManager:
                     take_profit = entry - (risk * 4)
                 
                 if risk > 0 and (reward / risk) >= self.min_rr:
-                    best_setup = (SIDE_SELL, entry, stop_loss, take_profit, "Bull Trap (Fakeout High)")
+                    best_setup = (SIDE_SELL, entry, stop_loss, take_profit, "Bull Trap (Sniper)")
 
             # --- EJECUCIÓN ---
             if best_setup:
@@ -100,7 +122,7 @@ class RiskManager:
                 balance = await self.bot._get_account_balance()
                 if not balance: return
                 
-                # Sizing Dinámico V226 simplificado
+                # Sizing Estándar (1%)
                 risk_amount = balance * self.risk_per_trade
                 sl_distance = abs(entry - sl)
                 
@@ -115,13 +137,16 @@ class RiskManager:
                 if qty > 0:
                     tps = [float(format_price(self.config.tick_size, tp))]
                     rr_calc = (abs(tp-entry)/abs(entry-sl))
-                    logging.info(f"!!! SIGNAL V230 !!! {label} | R/R: {rr_calc:.2f}")
+                    
+                    # ACTUALIZAR CONTROLES
+                    self.last_trade_ts = self.state.current_timestamp
+                    self.last_traded_swing_id = current_swing_id
+                    
+                    logging.info(f"!!! SIGNAL V230.2 !!! {label} | R/R: {rr_calc:.2f}")
                     await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps, label)
 
     # --- GESTIÓN ACTIVA V230 (SIMPLE) ---
     async def check_position_state(self):
-        # En estrategias de trampa, si no funciona rápido, salimos.
-        # Time-stop de 6 velas (6 horas). Si no vamos ganando, fuera.
         async with self.bot.lock:
             try:
                 pos = await self.bot._get_current_position()
@@ -144,13 +169,13 @@ class RiskManager:
                 else:
                     current_r = (entry_price - mark_price) / risk_dist
                 
-                # ZOMBIE KILLER AGRESIVO: 6 horas
+                # ZOMBIE KILLER: 6 horas (Mean Reversion debe ser rápida)
                 if candles_open >= 6 and current_r < 0.3:
-                    await self.orders_manager.close_position_manual("Time Exit (Trap Failed)")
+                    await self.orders_manager.close_position_manual("Time Exit (Stagnant)")
                     return
 
-                # BE AL 1.0R (Asegurar rápido en Mean Reversion)
-                if current_r > 1.0 and not self.state.sl_moved_to_be:
+                # BE TEMPRANO (0.8R) - Proteger rápido en MR
+                if current_r > 0.8 and not self.state.sl_moved_to_be:
                     qty = abs(float(pos['positionAmt']))
                     await self.orders_manager.move_sl_to_be(qty)
 
