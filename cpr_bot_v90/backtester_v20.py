@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V227 (SMC + EMA200 Context Filter)
+# NIVEL: V228 (SMC + EMA200 Context Filter)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -236,7 +236,7 @@ class BacktesterV19:
             prev_valid_lows = valid_lows.shift(1)
             df['prev_swing_low'] = prev_valid_lows.reindex(df.index).ffill()
 
-            # --- INDICADORES ADICIONALES (V227) ---
+            # --- INDICADORES ADICIONALES (V228) ---
             # EMA 200 para filtro HTF
             df['ema200'] = df['close'].ewm(span=200).mean().shift(1)
 
@@ -270,7 +270,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V227 (SMC + Trend Filter)")
+        print(f"\n🛡️ INICIANDO BACKTEST V228 (SMC + Trend Filter)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -308,7 +308,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V227 (SMC + Trend Filter) - {self.symbol}")
+        print(f"📊 REPORTE V228 (SMC + Trend Filter) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
