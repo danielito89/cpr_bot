@@ -77,21 +77,20 @@ class RiskManager:
                 
                 vol_ratio = current_vol / median_vol if median_vol > 0 else 0
                 
-                # CPR Logic (La base de todo)
+                # CPR Logic
                 cpr_width = p.get("width", 0)
                 is_narrow_cpr = cpr_width < 0.25 
                 
-                # Slope Check (Filtro de calidad)
+                # Slope Check
                 has_slope = abs(ema_slope) > (atr * 0.05)
                 is_valid_trend_context = has_slope and (adx > 20)
                 
-                # --- DEFINICIÓN DE "PERFECT SETUP" (El Unicornio) ---
-                # FIX V214: Mucho más estricto para evitar dilución
+                # PERFECT SETUP
                 has_strong_slope = abs(ema_slope) > (atr * 0.08)
                 is_perfect = (
                     is_narrow_cpr 
-                    and (vol_ratio > 3.2)  # Subido de 2.8
-                    and (adx > 30)         # Subido de 28
+                    and (vol_ratio > 3.2) 
+                    and (adx > 30) 
                     and has_strong_slope
                 )
 
@@ -106,9 +105,8 @@ class RiskManager:
                 is_red = current_price < open_price
 
                 # ==========================================
-                # A. BREAKOUTS (Standard & Perfect)
+                # A. BREAKOUTS
                 # ==========================================
-                # FIX V214: ELIMINADO "Re-Accel". Solo operamos si CPR es Narrow.
                 can_breakout = is_narrow_cpr and is_valid_trend_context
                 
                 if can_breakout and (vol_ratio > 2.0):
@@ -121,17 +119,19 @@ class RiskManager:
                                 entry_type = "Perfect Breakout Long" if is_perfect else "Std Breakout Long"
                                 
                                 if is_perfect:
-                                    size_multiplier = 1.5 # Size Premium
-                                    tp_prices = [
-                                        current_price + (atr * 2.0),
-                                        current_price + (atr * 5.0),
-                                        current_price + (atr * 12.0)
-                                    ]
-                                else:
-                                    size_multiplier = 1.0
+                                    size_multiplier = 1.5 
+                                    # FIX #3: Perfect TPs ajustados (3, 6, 14)
                                     tp_prices = [
                                         current_price + (atr * 3.0),
-                                        current_price + (atr * 6.0)
+                                        current_price + (atr * 6.0),
+                                        current_price + (atr * 14.0)
+                                    ]
+                                else:
+                                    # FIX #1: Standard TPs agresivos (4, 9)
+                                    size_multiplier = 1.0
+                                    tp_prices = [
+                                        current_price + (atr * 4.0),
+                                        current_price + (atr * 9.0)
                                     ]
                                 
                                 sl = current_price - (atr * 1.2)
@@ -146,21 +146,21 @@ class RiskManager:
                                 if is_perfect:
                                     size_multiplier = 1.5
                                     tp_prices = [
-                                        current_price - (atr * 2.0),
-                                        current_price - (atr * 5.0),
-                                        current_price - (atr * 12.0)
+                                        current_price - (atr * 3.0),
+                                        current_price - (atr * 6.0),
+                                        current_price - (atr * 14.0)
                                     ]
                                 else:
                                     size_multiplier = 1.0
                                     tp_prices = [
-                                        current_price - (atr * 3.0),
-                                        current_price - (atr * 6.0)
+                                        current_price - (atr * 4.0),
+                                        current_price - (atr * 9.0)
                                     ]
                                 
                                 sl = current_price + (atr * 1.2)
 
                 # ==========================================
-                # B. SMART RE-ENTRY (Sidearm)
+                # B. SMART RE-ENTRY
                 # ==========================================
                 if not side and is_valid_trend_context and (adx > 22):
                     
@@ -175,7 +175,10 @@ class RiskManager:
                             entry_type = "Smart Re-entry Long"
                             size_multiplier = 0.3 
                             sl = current_price - (atr * 1.2)
-                            tp_prices = [current_price + (atr * 2.0), current_price + (atr * 3.0)]
+                            tp_prices = [
+                                current_price + (atr * 2.0), 
+                                current_price + (atr * 3.0)
+                            ]
 
                     elif is_downtrend and in_value_zone and rsi_neutral and is_red:
                         level_id = "RE_ENTRY_SHORT_DAY"
@@ -184,14 +187,19 @@ class RiskManager:
                             entry_type = "Smart Re-entry Short"
                             size_multiplier = 0.3 
                             sl = current_price + (atr * 1.2)
-                            tp_prices = [current_price - (atr * 2.0), current_price - (atr * 3.0)]
+                            tp_prices = [
+                                current_price - (atr * 2.0), 
+                                current_price - (atr * 3.0)
+                            ]
 
                 # --- EJECUCIÓN ---
                 if side and level_id:
-                    # R/R Check
+                    # FIX #2: FILTRO R/R 1.8 MINIMO
                     risk = abs(current_price - sl)
                     reward = abs(tp_prices[0] - current_price)
-                    if risk > 0 and (reward / risk) < 1.05: return # V214: Filtro relajado
+                    
+                    # Filtro estricto 1.8 para todos
+                    if risk > 0 and (reward / risk) < 1.8: return 
 
                     balance = await self.bot._get_account_balance()
                     if not balance: return
@@ -205,13 +213,13 @@ class RiskManager:
                     tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
                     
                     self.levels_traded_today.add(level_id)
-                    logging.info(f"!!! SEÑAL V214 !!! {entry_type} | Size:{size_multiplier}x")
+                    logging.info(f"!!! SEÑAL V215 !!! {entry_type} | Size:{size_multiplier}x R/R:{reward/risk:.2f}")
                     await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
             except Exception as e:
                 logging.error(f"Seek Error: {e}")
 
-    # --- FIX V214: GESTIÓN DE TRAILING POR REGIMEN ---
+    # --- GESTIÓN (Igual a V214, funcionó bien) ---
     async def check_position_state(self):
         async with self.bot.lock:
             try:
@@ -236,7 +244,7 @@ class RiskManager:
 
                 if qty < self.state.last_known_position_qty: await self._handle_partial_tp(qty)
                 
-                # --- LÓGICA DE TRAILING V214 ---
+                # --- LÓGICA DE TRAILING ---
                 info = self.state.current_position_info
                 entry = info["entry_price"]
                 mark = float(pos.get("markPrice"))
@@ -254,36 +262,33 @@ class RiskManager:
                     
                     # 1. PERFECT BREAKOUT (Pulmón de Acero)
                     if is_perfect:
-                        # BE recién a los 4.5 ATR
                         if pnl_dist > (atr * 4.5):
                             new_sl = entry + (atr * 0.1) if side == SIDE_BUY else entry - (atr * 0.1)
                             if self._is_better_sl(side, new_sl, info.get("sl")):
                                 await self.orders_manager.update_sl(new_sl, qty)
                                 info["sl"] = new_sl
                         
-                        # Trailing profundo tras 7.0 ATR
                         if pnl_dist > (atr * 7.0):
                             new_sl = ema_50
                             if self._is_better_sl(side, new_sl, info.get("sl")):
                                 await self.orders_manager.update_sl(new_sl, qty)
                                 info["sl"] = new_sl
 
-                    # 2. STANDARD BREAKOUT (Gestión Normal - Tightened)
+                    # 2. STANDARD BREAKOUT (Normal)
                     elif is_standard:
-                        # FIX V214: BE a los 2.0 ATR (Asegurar antes)
-                        if pnl_dist > (atr * 2.0) and not self.state.sl_moved_to_be:
+                        # BE tras 2.5 ATR (Aguantar)
+                        if pnl_dist > (atr * 2.5) and not self.state.sl_moved_to_be:
                             await self.orders_manager.move_sl_to_be(qty)
                         
-                        # Trailing suave tras 4.0 ATR
                         if pnl_dist > (atr * 4.0):
                              new_sl = entry + (atr * 1.5) if side == SIDE_BUY else entry - (atr * 1.5)
                              if self._is_better_sl(side, new_sl, info.get("sl")):
                                 await self.orders_manager.update_sl(new_sl, qty)
                                 info["sl"] = new_sl
 
-                    # 3. RE-ENTRY (Gestión Defensiva)
+                    # 3. RE-ENTRY (Defensivo)
                     elif is_reentry:
-                        # FIX V214: BE a los 1.5 ATR (Scalp mode)
+                        # BE tras 1.5 ATR
                         if pnl_dist > (atr * 1.5) and not self.state.sl_moved_to_be:
                             await self.orders_manager.move_sl_to_be(qty)
 
