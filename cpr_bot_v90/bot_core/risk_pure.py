@@ -17,6 +17,7 @@ class RiskManager:
         self.config = bot_controller 
 
         self.max_trade_size_usdt = getattr(self.config, 'MAX_TRADE_SIZE_USDT', 50000)
+        self.max_daily_trades = getattr(self.config, 'MAX_DAILY_TRADES', 50) 
         self.min_balance_buffer = 10 
         
         self.last_reset_date = None
@@ -73,16 +74,16 @@ class RiskManager:
                 vol_ratio = current_vol / median_vol if median_vol > 0 else 0
                 
                 # --- DEFINICIÓN DE RÉGIMEN ---
-                
-                # 1. Breakout (V216)
                 cpr_width = p.get("width", 0)
                 is_narrow_cpr = cpr_width < 0.25
                 has_slope = abs(ema_slope) > (atr * 0.05)
+                
+                # 1. Breakout Regime
                 is_breakout_regime = is_narrow_cpr and has_slope and (adx > 20)
                 
-                # 2. Rango (V217)
+                # 2. Range Regime (Sin slope, adx bajo, cpr ancho)
                 is_range_regime = (
-                    (adx < 20) and 
+                    (adx < 22) and # Un poco más de margen (antes 20)
                     (abs(ema_slope) < (atr * 0.04)) and 
                     (cpr_width > 0.30)
                 )
@@ -92,7 +93,6 @@ class RiskManager:
                         current_price, open_price, vol_ratio, adx, ema_200, atr, p, rsi, ema_slope, ema_50
                     )
                 elif is_range_regime:
-                    # Pasamos kline completo para chequear previous high/low
                     await self._check_range_signals(
                         current_price, open_price, vol_ratio, rsi, atr, p, kline
                     )
@@ -101,7 +101,7 @@ class RiskManager:
                 logging.error(f"Seek Error: {e}")
 
     # ==========================================
-    # MOTOR DE BREAKOUTS (V216 Logic - Intacta)
+    # MOTOR DE BREAKOUTS + RE-ENTRY (V218)
     # ==========================================
     async def _check_breakout_signals(self, current_price, open_price, vol_ratio, adx, ema_200, atr, p, rsi, ema_slope, ema_50):
         is_uptrend = current_price > ema_200
@@ -112,8 +112,6 @@ class RiskManager:
         has_strong_slope = abs(ema_slope) > (atr * 0.08)
         is_perfect_context = (vol_ratio > 3.2) and (adx > 30) and has_strong_slope
         
-        is_momentum_context = (vol_ratio > 2.2) and (adx > 28) and abs(ema_slope) > (atr * 0.06)
-
         side = None
         entry_type = None
         sl = None
@@ -121,6 +119,7 @@ class RiskManager:
         level_id = None
         size_multiplier = 1.0
 
+        # A. MAIN BREAKOUT
         if vol_ratio > 2.0:
             if is_uptrend and current_price > p["H4"] and is_green and rsi < 70:
                 level_id = "BREAK_H4"
@@ -129,7 +128,12 @@ class RiskManager:
                     entry_type = "Perfect Breakout Long" if is_perfect_context else "Std Breakout Long"
                     if is_perfect_context:
                         size_multiplier = 1.5 
-                        tp_prices = [current_price + (atr*3.0), current_price + (atr*6.0), current_price + (atr*14.0)]
+                        # FIX V218: TP1 más cercano para asegurar
+                        tp_prices = [
+                            current_price + (atr*2.0), 
+                            current_price + (atr*5.0), 
+                            current_price + (atr*10.0)
+                        ]
                     else:
                         size_multiplier = 1.0
                         tp_prices = [current_price + (atr*4.0), current_price + (atr*9.0)]
@@ -142,57 +146,48 @@ class RiskManager:
                     entry_type = "Perfect Breakout Short" if is_perfect_context else "Std Breakout Short"
                     if is_perfect_context:
                         size_multiplier = 1.5
-                        tp_prices = [current_price - (atr*3.0), current_price - (atr*6.0), current_price - (atr*14.0)]
+                        tp_prices = [
+                            current_price - (atr*2.0), 
+                            current_price - (atr*5.0), 
+                            current_price - (atr*10.0)
+                        ]
                     else:
                         size_multiplier = 1.0
                         tp_prices = [current_price - (atr*4.0), current_price - (atr*9.0)]
                     sl = current_price + (atr * 1.2)
 
-        if not side and is_momentum_context:
-            h4_momentum = p["H4"] + (atr * 0.5)
-            l4_momentum = p["L4"] - (atr * 0.5)
-            
-            if is_uptrend and current_price > h4_momentum and is_green and rsi < 75:
-                level_id = "BREAK_H4.5_MOMENTUM"
-                if "BREAK_H4" not in self.levels_traded_today and level_id not in self.levels_traded_today:
-                    side = SIDE_BUY
-                    entry_type = "Momentum Breakout Long"
-                    size_multiplier = 1.0
-                    sl = current_price - (atr * 1.2)
-                    tp_prices = [current_price + (atr * 3.0), current_price + (atr * 7.0)]
-
-            elif is_downtrend and current_price < l4_momentum and is_red and rsi > 25:
-                level_id = "BREAK_L4.5_MOMENTUM"
-                if "BREAK_L4" not in self.levels_traded_today and level_id not in self.levels_traded_today:
-                    side = SIDE_SELL
-                    entry_type = "Momentum Breakout Short"
-                    size_multiplier = 1.0
-                    sl = current_price + (atr * 1.2)
-                    tp_prices = [current_price - (atr * 3.0), current_price - (atr * 7.0)]
-
+        # B. SMART RE-ENTRY (V218: Optimizado)
         if not side and adx > 22:
             dist_to_ema50 = abs(current_price - ema_50) / current_price * 100
             in_value_zone = dist_to_ema50 < 0.4
             rsi_neutral = 40 <= rsi <= 60
             
-            if is_uptrend and in_value_zone and rsi_neutral and is_green:
-                level_id = "RE_ENTRY_LONG_DAY"
-                if level_id not in self.levels_traded_today:
+            # FIX V218: Contar re-entries hoy
+            re_entries_count = len([x for x in self.levels_traded_today if "RE_ENTRY" in x])
+            can_re_entry = re_entries_count < 2 # Permitir hasta 2
+            
+            # FIX V218: Size Boost en tendencia fuerte
+            base_size = 0.45 if adx > 28 else 0.3
+            
+            if can_re_entry:
+                if is_uptrend and in_value_zone and rsi_neutral and is_green:
+                    # ID único para permitir múltiples
+                    level_id = f"RE_ENTRY_LONG_{int(time.time())}" 
                     side = SIDE_BUY
                     entry_type = "Smart Re-entry Long"
-                    size_multiplier = 0.3 
+                    size_multiplier = base_size
                     sl = current_price - (atr * 1.2)
                     tp_prices = [current_price + (atr * 2.0), current_price + (atr * 3.0)]
 
-            elif is_downtrend and in_value_zone and rsi_neutral and is_red:
-                level_id = "RE_ENTRY_SHORT_DAY"
-                if level_id not in self.levels_traded_today:
+                elif is_downtrend and in_value_zone and rsi_neutral and is_red:
+                    level_id = f"RE_ENTRY_SHORT_{int(time.time())}"
                     side = SIDE_SELL
                     entry_type = "Smart Re-entry Short"
-                    size_multiplier = 0.3 
+                    size_multiplier = base_size
                     sl = current_price + (atr * 1.2)
                     tp_prices = [current_price - (atr * 2.0), current_price - (atr * 3.0)]
 
+        # EXECUTE
         if side and level_id:
             risk = abs(current_price - sl)
             reward = abs(tp_prices[0] - current_price)
@@ -207,14 +202,15 @@ class RiskManager:
             tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
             
             self.levels_traded_today.add(level_id)
-            logging.info(f"!!! BREAKOUT V216 !!! {entry_type} | Size:{size_multiplier}x")
+            logging.info(f"!!! BREAKOUT/RE V218 !!! {entry_type} | Size:{size_multiplier}x")
             await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
     # ==========================================
-    # MOTOR DE RANGO MEJORADO (V217.1)
+    # MOTOR DE RANGO MEJORADO (V218)
     # ==========================================
     async def _check_range_signals(self, current_price, open_price, vol_ratio, rsi, atr, p, kline):
-        if vol_ratio > 1.8: return 
+        # FIX V218: Vol ratio un poco más permisivo para rango (antes 0.9)
+        if vol_ratio > 1.1: return 
         
         is_green = current_price > open_price
         is_red = current_price < open_price
@@ -226,43 +222,41 @@ class RiskManager:
         level_id = None
         size_multiplier = 0.35 
         
-        # DEFINIR BANDAS EXTREMAS (Ultimo 30% del rango H3-H4 / L3-L4)
         h4_h3_dist = p["H4"] - p["H3"]
         l3_l4_dist = p["L3"] - p["L4"]
         
         short_trigger_zone = p["H4"] - (h4_h3_dist * 0.3)
         long_trigger_zone = p["L4"] + (l3_l4_dist * 0.3)
         
-        # CHEQUEO DE MICRO-FALLO (Vela actual no supera extremo anterior)
-        # kline['ph'] es prev_high, kline['pl'] es prev_low (Vienen del Backtester actualizado)
         prev_high = float(kline.get('ph', 999999))
         prev_low = float(kline.get('pl', 0))
         
         failed_high = current_price < prev_high
         failed_low = current_price > prev_low
         
+        # FIX V218: Contar range trades hoy
+        range_trades_count = len([x for x in self.levels_traded_today if "RANGE" in x])
+        if range_trades_count >= 2: return # Max 2 trades de rango por día
+
         # 1. SHORT DE RANGO
-        # Precio en zona extrema alta + RSI > 65 + Vela Roja + Fallo de nuevos máximos
+        # FIX V218: RSI > 60 (antes 65), failed_high OR is_red
         in_short_zone = short_trigger_zone < current_price < p["H4"]
-        
-        if in_short_zone and is_red and (rsi > 65) and (vol_ratio < 0.9) and failed_high:
-            level_id = f"RANGE_SHORT_{int(time.time()/3600)}" 
-            if level_id not in self.levels_traded_today:
-                side = SIDE_SELL
-                entry_type = "Range Reversion Short"
-                sl = p["H4"] + (atr * 0.6) # Stop ajustado
-                tp_prices = [p["P"], p["P"] - (atr * 0.3)] # TP Escalonado
+        if in_short_zone and (rsi > 60) and (failed_high or is_red):
+            level_id = f"RANGE_SHORT_{int(time.time())}" 
+            side = SIDE_SELL
+            entry_type = "Range Reversion Short"
+            sl = p["H4"] + (atr * 0.6)
+            tp_prices = [p["P"], p["P"] - (atr * 0.3)]
 
         # 2. LONG DE RANGO
+        # FIX V218: RSI < 40 (antes 35), failed_low OR is_green
         in_long_zone = p["L4"] < current_price < long_trigger_zone
-        
-        if in_long_zone and is_green and (rsi < 35) and (vol_ratio < 0.9) and failed_low:
-            level_id = f"RANGE_LONG_{int(time.time()/3600)}"
-            if level_id not in self.levels_traded_today:
-                side = SIDE_BUY
-                entry_type = "Range Reversion Long"
-                sl = p["L4"] - (atr * 0.6)
-                tp_prices = [p["P"], p["P"] + (atr * 0.3)]
+        if in_long_zone and (rsi < 40) and (failed_low or is_green):
+            level_id = f"RANGE_LONG_{int(time.time())}"
+            side = SIDE_BUY
+            entry_type = "Range Reversion Long"
+            sl = p["L4"] - (atr * 0.6)
+            tp_prices = [p["P"], p["P"] + (atr * 0.3)]
 
         if side and level_id:
             risk = abs(current_price - sl)
@@ -278,10 +272,10 @@ class RiskManager:
             tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
             
             self.levels_traded_today.add(level_id)
-            logging.info(f"!!! RANGE V217.1 !!! {entry_type} | RSI:{rsi:.1f} Vol:{vol_ratio:.2f}")
+            logging.info(f"!!! RANGE V218 !!! {entry_type} | RSI:{rsi:.1f} Vol:{vol_ratio:.2f}")
             await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
-    # --- GESTIÓN DE TRAILING ---
+    # --- GESTIÓN DE TRAILING (V218) ---
     async def check_position_state(self):
         async with self.bot.lock:
             try:

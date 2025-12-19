@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v19.py
-# NIVEL: V217.1 (Support for Micro-Failure Logic)
+# NIVEL: V218 (Support for Micro-Failure Logic)
 # USO: python cpr_bot_v90/backtester_v19.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -270,7 +270,7 @@ class BacktesterV19:
             df['ema50'] = df['close'].ewm(span=50).mean().shift(1)
             df['ema_slope'] = df['ema'].diff()
             
-            # NUEVO V217.1: Pre-calculate Previous High/Low for Micro-failure check
+            # NUEVO V218: Pre-calculate Previous High/Low for Micro-failure check
             df['prev_high'] = df['high'].shift(1)
             df['prev_low'] = df['low'].shift(1)
             
@@ -315,7 +315,7 @@ class BacktesterV19:
         daily_df['prev_low'] = daily_df['low'].shift(1)
         daily_df['prev_close'] = daily_df['close'].shift(1)
         
-        print(f"\n🛡️ INICIANDO BACKTEST V217.1 (Improved Range)")
+        print(f"\n🛡️ INICIANDO BACKTEST V218 (Improved Range)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -353,7 +353,7 @@ class BacktesterV19:
             self.state.cached_rsi = row.rsi
 
             if not self.state.is_in_position and not self.state.pending_order:
-                # PASAMOS prev_high y prev_low en kline para V217.1
+                # PASAMOS prev_high y prev_low en kline para V218
                 kline = {
                     'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 
                     'v': row.volume, 'q': row.quote_asset_volume, 'x': True,
@@ -392,7 +392,7 @@ class BacktesterV19:
         df_t.to_csv(csv_filename, index=False)
         
         print("\n" + "="*60)
-        print(f"📊 REPORTE PROFESIONAL (V217.1) - {self.symbol}")
+        print(f"📊 REPORTE PROFESIONAL (V218) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
@@ -409,7 +409,7 @@ class BacktesterV19:
         print("=" * 60)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CPR Bot Backtester V217.1")
+    parser = argparse.ArgumentParser(description="CPR Bot Backtester V218")
     parser.add_argument("--symbol", type=str, default=DEFAULT_SYMBOL, help="Par a operar")
     parser.add_argument("--start", type=str, default=DEFAULT_START_DATE, help="Fecha inicio")
     parser.add_argument("--file", type=str, default=None, help="Archivo CSV específico")
