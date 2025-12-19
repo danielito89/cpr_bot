@@ -14,10 +14,10 @@ class RiskManager:
         self.min_rr = 2.0
         self.debug_mode = False 
         
-        # --- CONFIGURACIÓN V226 (ASYMMETRIC BETTING) ---
-        self.base_risk = 0.0075      # 0.75% Riesgo Estándar
-        self.premium_risk = 0.015    # 1.50% Riesgo en Setups 'A+'
-        self.max_leverage = 7.0      # Leverage controlado
+        # Risk Config V226/V227
+        self.base_risk = 0.0075      
+        self.premium_risk = 0.015    
+        self.max_leverage = 7.0      
 
     def _cleanup_zones(self, current_ts, current_price):
         valid_zones = []
@@ -65,6 +65,7 @@ class RiskManager:
         prev_row = self.state.prev_row 
         current_price = row.close
         atr = self.state.cached_atr
+        ema_200 = row.ema200
         
         if not atr: return
         
@@ -94,6 +95,9 @@ class RiskManager:
 
                 # --- DEMAND SETUP ---
                 if is_uptrend and z['type'] == 'DEMAND':
+                    # FILTRO HTF V227: No operar contra EMA 200
+                    if current_price < ema_200: continue
+                    
                     touched = row.low <= z['top']
                     swept = row.low < (z['bottom'] - (atr * 0.1))
                     
@@ -111,7 +115,6 @@ class RiskManager:
                         tp_structure = sh
                         tp_min_rr = current_price + (risk * 2.5)
                         
-                        # TP Lógico
                         dist_to_struct = abs(tp_structure - current_price)
                         if dist_to_struct > (atr * 6.0):
                             take_profit = tp_min_rr
@@ -121,10 +124,13 @@ class RiskManager:
                         reward = take_profit - current_price
                         
                         if risk > 0 and (reward / risk) >= self.min_rr:
-                            best_setup = (SIDE_BUY, current_price, stop_loss, take_profit, "SMC Demand V226", z)
+                            best_setup = (SIDE_BUY, current_price, stop_loss, take_profit, "SMC Demand V227", z)
 
                 # --- SUPPLY SETUP ---
                 elif is_downtrend and z['type'] == 'SUPPLY':
+                    # FILTRO HTF V227
+                    if current_price > ema_200: continue
+                    
                     touched = row.high >= z['bottom']
                     swept = row.high > (z['top'] + (atr * 0.1))
                     
@@ -151,34 +157,29 @@ class RiskManager:
                         reward = current_price - take_profit
                         
                         if risk > 0 and (reward / risk) >= self.min_rr:
-                            best_setup = (SIDE_SELL, current_price, stop_loss, take_profit, "SMC Supply V226", z)
+                            best_setup = (SIDE_SELL, current_price, stop_loss, take_profit, "SMC Supply V227", z)
 
             if best_setup:
                 side, entry, sl, tp, label, zone_ref = best_setup
                 
-                # --- CALCULO DE TAMAÑO DINÁMICO (V226) ---
                 balance = await self.bot._get_account_balance()
                 if not balance: return
                 
-                # 1. Calcular Calidad del Setup
                 potential_rr = abs(tp - entry) / abs(entry - sl)
                 
-                # 2. Asignar Riesgo
                 if potential_rr >= 3.5:
-                    risk_pct = self.premium_risk # 1.5%
-                    type_label = f"{label} (A+ Setup)"
+                    risk_pct = self.premium_risk 
+                    type_label = f"{label} (A+)"
                 else:
-                    risk_pct = self.base_risk # 0.75%
-                    type_label = f"{label} (Std Setup)"
+                    risk_pct = self.base_risk 
+                    type_label = f"{label} (Std)"
                 
-                # 3. Calcular Size
                 risk_amount = balance * risk_pct
                 sl_distance = abs(entry - sl)
                 if sl_distance <= 0: return
                 
                 raw_qty = risk_amount / sl_distance
                 
-                # 4. Capar Leverage (Safety Net)
                 max_notional = balance * self.max_leverage
                 if (raw_qty * entry) > max_notional:
                     raw_qty = max_notional / entry
@@ -188,8 +189,6 @@ class RiskManager:
                 if qty > 0:
                     zone_ref['tested'] = True
                     zone_ref['attempts'] += 1
-                    
                     tps = [float(format_price(self.config.tick_size, tp))]
-                    
-                    logging.info(f"!!! SIGNAL V226 !!! {type_label} | R/R: {potential_rr:.2f} | Risk: {risk_pct*100}%")
+                    logging.info(f"!!! SIGNAL V227 !!! {type_label} | R/R: {potential_rr:.2f} | Risk: {risk_pct*100}%")
                     await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps, type_label)
