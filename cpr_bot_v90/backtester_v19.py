@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v19.py
-# NIVEL: V212 (Slope Filter + Dynamic Trailing)
+# NIVEL: V213 (Slope Filter + Dynamic Trailing)
 # USO: python cpr_bot_v90/backtester_v19.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -93,7 +93,7 @@ class SimulatorState:
         self.cached_atr = 0
         self.cached_ema = 0
         self.cached_ema50 = 0
-        self.cached_ema_slope = 0 # <--- NUEVO V212
+        self.cached_ema_slope = 0 # <--- NUEVO V213
         self.cached_median_vol = 0
         self.cached_adx = 0
         self.cached_rsi = 50.0
@@ -119,7 +119,7 @@ class BacktesterV19:
         self.participation_rate = 0.02 if is_pepe else 0.10
         self.timeframe = TIMEFRAME
         
-        # Configuración V212
+        # Configuración V213
         self.config = {
             "symbol": symbol,
             "investment_pct": 0.05,
@@ -297,7 +297,7 @@ class BacktesterV19:
             df['ema50'] = df['close'].ewm(span=50).mean().shift(1)
             
             # EMA Slope (Variación absoluta de la EMA 200)
-            df['ema_slope'] = df['ema'].diff() # <--- NUEVO V212
+            df['ema_slope'] = df['ema'].diff() # <--- NUEVO V213
             
             tr = pd.concat([
                 df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()
@@ -340,7 +340,7 @@ class BacktesterV19:
         daily_df['prev_low'] = daily_df['low'].shift(1)
         daily_df['prev_close'] = daily_df['close'].shift(1)
         
-        print(f"\n🛡️ INICIANDO BACKTEST V212 (Professional Edge)")
+        print(f"\n🛡️ INICIANDO BACKTEST V213 (Professional Edge)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -413,7 +413,7 @@ class BacktesterV19:
         df_t.to_csv(csv_filename, index=False)
         
         print("\n" + "="*60)
-        print(f"📊 REPORTE PROFESIONAL (V212) - {self.symbol}")
+        print(f"📊 REPORTE PROFESIONAL (V213) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
@@ -430,7 +430,7 @@ class BacktesterV19:
         print("=" * 60)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CPR Bot Backtester V212")
+    parser = argparse.ArgumentParser(description="CPR Bot Backtester V213")
     parser.add_argument("--symbol", type=str, default=DEFAULT_SYMBOL, help="Par a operar")
     parser.add_argument("--start", type=str, default=DEFAULT_START_DATE, help="Fecha inicio")
     parser.add_argument("--file", type=str, default=None, help="Archivo CSV específico")

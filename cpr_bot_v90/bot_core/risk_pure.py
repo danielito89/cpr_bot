@@ -71,7 +71,7 @@ class RiskManager:
                 open_price = float(kline["o"])
                 current_vol = float(kline["q"])
                 
-                # --- 1. ANÁLISIS DE CONTEXTO ---
+                # --- CONTEXTO ---
                 is_uptrend = current_price > ema_200
                 is_downtrend = current_price < ema_200
                 
@@ -81,18 +81,10 @@ class RiskManager:
                 cpr_width = p.get("width", 0)
                 is_narrow_cpr = cpr_width < 0.25 
                 
+                # Slope Check
                 has_slope = abs(ema_slope) > (atr * 0.05)
-                is_valid_trend_context = has_slope and (adx > 20)
                 
-                # PERFECT SETUP
-                has_strong_slope = abs(ema_slope) > (atr * 0.08)
-                is_perfect = (
-                    is_narrow_cpr 
-                    and (vol_ratio > 2.8) 
-                    and (adx > 28) 
-                    and has_strong_slope
-                )
-
+                # --- DEFINICIÓN DE CONFIGURACIÓN ---
                 side = None
                 entry_type = None
                 sl = None
@@ -104,65 +96,115 @@ class RiskManager:
                 is_red = current_price < open_price
 
                 # ==========================================
-                # A. BREAKOUTS
+                # 1. PERFECT BREAKOUT (La Joya de la Corona)
                 # ==========================================
-                can_breakout = is_narrow_cpr and is_valid_trend_context
+                # Narrow CPR + Vol > 2.8 + ADX > 28 + Slope
+                is_perfect_context = (
+                    is_narrow_cpr and (vol_ratio > 2.8) and (adx > 28) and has_slope
+                )
                 
-                if can_breakout and (vol_ratio > 2.0):
-                    
-                    if is_uptrend and current_price > p["H4"] and is_green:
-                        if rsi < 70:
-                            level_id = "BREAK_H4"
-                            if level_id not in self.levels_traded_today:
-                                side = SIDE_BUY
-                                entry_type = "Perfect Breakout Long" if is_perfect else "Std Breakout Long"
-                                
-                                if is_perfect:
-                                    size_multiplier = 1.3
-                                    tp_prices = [
-                                        current_price + (atr * 2.0),
-                                        current_price + (atr * 5.0),
-                                        current_price + (atr * 10.0)
-                                    ]
-                                else:
-                                    # FIX #2: Targets más ambiciosos para Standard
-                                    size_multiplier = 1.0
-                                    tp_prices = [
-                                        current_price + (atr * 3.0), # Antes 2.0
-                                        current_price + (atr * 6.0)  # Antes 4.0
-                                    ]
-                                
-                                sl = current_price - (atr * 1.2)
+                if not side and is_perfect_context:
+                    if is_uptrend and current_price > p["H4"] and is_green and rsi < 75:
+                        level_id = "BREAK_H4_PERFECT"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_BUY
+                            entry_type = "Perfect Breakout Long"
+                            size_multiplier = 1.5 # CAMBIO B: Agresivo
+                            sl = current_price - (atr * 1.2)
+                            # CAMBIO A: Fat Tail Targets
+                            tp_prices = [
+                                current_price + (atr * 2.0),
+                                current_price + (atr * 5.0),
+                                current_price + (atr * 12.0)
+                            ]
 
-                    elif is_downtrend and current_price < p["L4"] and is_red:
-                        if rsi > 30:
-                            level_id = "BREAK_L4"
-                            if level_id not in self.levels_traded_today:
-                                side = SIDE_SELL
-                                entry_type = "Perfect Breakout Short" if is_perfect else "Std Breakout Short"
-                                
-                                if is_perfect:
-                                    size_multiplier = 1.3
-                                    tp_prices = [
-                                        current_price - (atr * 2.0),
-                                        current_price - (atr * 5.0),
-                                        current_price - (atr * 10.0)
-                                    ]
-                                else:
-                                    # FIX #2
-                                    size_multiplier = 1.0
-                                    tp_prices = [
-                                        current_price - (atr * 3.0),
-                                        current_price - (atr * 6.0)
-                                    ]
-                                
-                                sl = current_price + (atr * 1.2)
+                    elif is_downtrend and current_price < p["L4"] and is_red and rsi > 25:
+                        level_id = "BREAK_L4_PERFECT"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_SELL
+                            entry_type = "Perfect Breakout Short"
+                            size_multiplier = 1.5
+                            sl = current_price + (atr * 1.2)
+                            tp_prices = [
+                                current_price - (atr * 2.0),
+                                current_price - (atr * 5.0),
+                                current_price - (atr * 12.0)
+                            ]
 
                 # ==========================================
-                # B. SMART RE-ENTRY
+                # 2. STANDARD BREAKOUT (El Pan de cada día)
                 # ==========================================
-                if not side and is_valid_trend_context and (adx > 22):
+                # Narrow CPR + Vol > 2.0 + ADX > 20
+                is_std_context = is_narrow_cpr and (vol_ratio > 2.0) and (adx > 20)
+                
+                if not side and is_std_context:
+                    if is_uptrend and current_price > p["H4"] and is_green and rsi < 70:
+                        level_id = "BREAK_H4_STD"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_BUY
+                            entry_type = "Std Breakout Long"
+                            size_multiplier = 1.0
+                            sl = current_price - (atr * 1.2)
+                            tp_prices = [
+                                current_price + (atr * 2.0),
+                                current_price + (atr * 4.0)
+                            ]
                     
+                    elif is_downtrend and current_price < p["L4"] and is_red and rsi > 30:
+                        level_id = "BREAK_L4_STD"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_SELL
+                            entry_type = "Std Breakout Short"
+                            size_multiplier = 1.0
+                            sl = current_price + (atr * 1.2)
+                            tp_prices = [
+                                current_price - (atr * 2.0),
+                                current_price - (atr * 4.0)
+                            ]
+
+                # ==========================================
+                # 3. RE-ACELERACIÓN (CAMBIO C: El Nuevo Trigger)
+                # ==========================================
+                # NO requiere CPR Narrow. Requiere Momentum y Vol > 1.8
+                # Rompe H3/L3 con fuerza en tendencia.
+                is_reaccel_context = (
+                    not is_narrow_cpr # Solo si NO es narrow (para no duplicar)
+                    and (vol_ratio > 1.8) 
+                    and (adx > 25) 
+                    and has_slope
+                )
+                
+                if not side and is_reaccel_context:
+                    # Long Re-Accel (Rompe H3 hacia arriba)
+                    if is_uptrend and current_price > p["H3"] and is_green and rsi < 70:
+                        level_id = "RE_ACCEL_H3"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_BUY
+                            entry_type = "Re-Accel Breakout Long"
+                            size_multiplier = 1.0
+                            sl = current_price - (atr * 1.2)
+                            tp_prices = [
+                                current_price + (atr * 2.0),
+                                current_price + (atr * 4.5)
+                            ]
+                    
+                    # Short Re-Accel (Rompe L3 hacia abajo)
+                    elif is_downtrend and current_price < p["L3"] and is_red and rsi > 30:
+                        level_id = "RE_ACCEL_L3"
+                        if level_id not in self.levels_traded_today:
+                            side = SIDE_SELL
+                            entry_type = "Re-Accel Breakout Short"
+                            size_multiplier = 1.0
+                            sl = current_price + (atr * 1.2)
+                            tp_prices = [
+                                current_price - (atr * 2.0),
+                                current_price - (atr * 4.5)
+                            ]
+
+                # ==========================================
+                # 4. RE-ENTRY (El Sidearm)
+                # ==========================================
+                if not side and has_slope and (adx > 22):
                     dist_to_ema50 = abs(current_price - ema_50) / current_price * 100
                     in_value_zone = dist_to_ema50 < 0.4
                     rsi_neutral = 40 <= rsi <= 60
@@ -172,30 +214,28 @@ class RiskManager:
                         if level_id not in self.levels_traded_today:
                             side = SIDE_BUY
                             entry_type = "Smart Re-entry Long"
-                            size_multiplier = 0.3 
+                            size_multiplier = 0.4
                             sl = current_price - (atr * 1.2)
-                            tp_prices = [
-                                current_price + (atr * 2.0), 
-                                current_price + (atr * 3.0)
-                            ]
+                            tp_prices = [current_price + (atr * 2.0), current_price + (atr * 3.0)]
 
                     elif is_downtrend and in_value_zone and rsi_neutral and is_red:
                         level_id = "RE_ENTRY_SHORT_DAY"
                         if level_id not in self.levels_traded_today:
                             side = SIDE_SELL
                             entry_type = "Smart Re-entry Short"
-                            size_multiplier = 0.3 
+                            size_multiplier = 0.4
                             sl = current_price + (atr * 1.2)
-                            tp_prices = [
-                                current_price - (atr * 2.0), 
-                                current_price - (atr * 3.0)
-                            ]
+                            tp_prices = [current_price - (atr * 2.0), current_price - (atr * 3.0)]
 
                 # --- EJECUCIÓN ---
                 if side and level_id:
+                    # CAMBIO D: R/R Filter Relajado
                     risk = abs(current_price - sl)
                     reward = abs(tp_prices[0] - current_price)
-                    if risk > 0 and (reward / risk) < 1.2: return
+                    
+                    # Solo bloqueamos si es atroz (menos de 1.05)
+                    # En Re-entry o Standard permitimos entrar "justo" porque confiamos en la gestión
+                    if risk > 0 and (reward / risk) < 1.05: return
 
                     balance = await self.bot._get_account_balance()
                     if not balance: return
@@ -209,13 +249,13 @@ class RiskManager:
                     tps_fmt = [float(format_price(self.config.tick_size, tp)) for tp in tp_prices]
                     
                     self.levels_traded_today.add(level_id)
-                    logging.info(f"!!! SEÑAL V212 !!! {entry_type} | Size:{size_multiplier}x")
+                    logging.info(f"!!! SEÑAL V213 !!! {entry_type} | Size:{size_multiplier}x")
                     await self.orders_manager.place_bracket_order(side, qty, current_price, sl, tps_fmt, entry_type)
 
             except Exception as e:
                 logging.error(f"Seek Error: {e}")
 
-    # --- FIX #1 y #3: GESTIÓN DE SALIDA "SIN MIEDO" ---
+    # --- CAMBIO A: GESTIÓN DE TRAILING "PULMÓN DE ACERO" ---
     async def check_position_state(self):
         async with self.bot.lock:
             try:
@@ -240,7 +280,7 @@ class RiskManager:
 
                 if qty < self.state.last_known_position_qty: await self._handle_partial_tp(qty)
                 
-                # --- LÓGICA DE TRAILING (V212) ---
+                # --- LÓGICA DE TRAILING ---
                 info = self.state.current_position_info
                 entry = info["entry_price"]
                 mark = float(pos.get("markPrice"))
@@ -250,37 +290,38 @@ class RiskManager:
                 side = info["side"]
                 
                 is_perfect = "Perfect" in entry_type
-                is_standard = "Std" in entry_type or "Main" in entry_type
+                is_standard = "Std" in entry_type
+                is_reaccel = "Re-Accel" in entry_type
                 is_reentry = "Re-entry" in entry_type
                 
                 if atr:
                     pnl_dist = (mark - entry) if side == SIDE_BUY else (entry - mark)
                     
-                    # 1. PERFECT BREAKOUT (Paciencia Extrema)
+                    # 1. PERFECT BREAKOUT (Modo Runner Total)
                     if is_perfect:
-                        # FIX #3: BE solo tras 3.0 ATR
-                        if pnl_dist > (atr * 3.0):
-                            new_sl = entry
+                        # BE recién a los 4.5 ATR (Después del TP2)
+                        if pnl_dist > (atr * 4.5):
+                            new_sl = entry + (atr * 0.1) if side == SIDE_BUY else entry - (atr * 0.1)
                             if self._is_better_sl(side, new_sl, info.get("sl")):
                                 await self.orders_manager.update_sl(new_sl, qty)
                                 info["sl"] = new_sl
                         
-                        # Trailing profundo tras 5 ATR
-                        if pnl_dist > (atr * 5.0):
+                        # Trailing profundo tras 7.0 ATR
+                        if pnl_dist > (atr * 7.0):
                             new_sl = ema_50
                             if self._is_better_sl(side, new_sl, info.get("sl")):
                                 await self.orders_manager.update_sl(new_sl, qty)
                                 info["sl"] = new_sl
 
-                    # 2. STANDARD BREAKOUT (Paciencia Media)
-                    elif is_standard:
-                        # FIX #1: BE solo tras 2.5 ATR (Antes 1.5)
+                    # 2. STANDARD & RE-ACCEL (Modo Normal)
+                    elif is_standard or is_reaccel:
+                        # BE tras 2.5 ATR
                         if pnl_dist > (atr * 2.5) and not self.state.sl_moved_to_be:
                             await self.orders_manager.move_sl_to_be(qty)
 
-                    # 3. RE-ENTRY (Paciencia Baja pero no nula)
+                    # 3. RE-ENTRY (Modo Rápido)
                     elif is_reentry:
-                        # FIX #1: BE solo tras 2.0 ATR (Antes 1.2)
+                        # BE tras 2.0 ATR
                         if pnl_dist > (atr * 2.0) and not self.state.sl_moved_to_be:
                             await self.orders_manager.move_sl_to_be(qty)
 
