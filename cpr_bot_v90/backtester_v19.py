@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v19.py
-# NIVEL: V217 (Slope Filter + Dynamic Trailing)
+# NIVEL: V217.1 (Support for Micro-Failure Logic)
 # USO: python cpr_bot_v90/backtester_v19.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -13,10 +13,8 @@ import argparse
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
-# Configuración de Logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-# Valores por defecto
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
 TIMEFRAME = '15m'
@@ -24,7 +22,6 @@ BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 EXECUTION_MODE = "SMART"
 
-# --- IMPORTS DEL BOT CORE ---
 try:
     from bot_core.risk_pure import RiskManager
     from bot_core.pivots import calculate_pivots_from_data
@@ -39,9 +36,7 @@ except ImportError as e:
         print(f"❌ Error importando bot_core: {e}")
         sys.exit(1)
 
-# ==========================================
-# 1. MOCKS Y CLASES AUXILIARES
-# ==========================================
+# MOCKS (Sin cambios)
 class MockTelegram:
     async def _send_message(self, text): pass
 
@@ -88,58 +83,38 @@ class SimulatorState:
         self.sl_moved_to_be = False
         self.trade_cooldown_until = 0
         self.last_known_position_qty = 0.0
-        
-        # Indicadores cacheados
         self.cached_atr = 0
         self.cached_ema = 0
         self.cached_ema50 = 0
-        self.cached_ema_slope = 0 # <--- NUEVO V217
+        self.cached_ema_slope = 0
         self.cached_median_vol = 0
         self.cached_adx = 0
         self.cached_rsi = 50.0
-        
         self.daily_pivots = {}
         self.current_timestamp = 0
         self.current_price = 0
-    
     def save_state(self): pass
 
-# ==========================================
-# 2. MOTOR V19
-# ==========================================
+# BACKTESTER
 class BacktesterV19:
     def __init__(self, symbol, start_date, custom_file=None):
         self.symbol = symbol
         self.start_date = start_date
         self.custom_file = custom_file
-        
         is_pepe = "PEPE" in symbol
         self.tick_size = 0.0000001 if is_pepe else 0.01
         self.step_size = 1 if is_pepe else 0.001
         self.participation_rate = 0.02 if is_pepe else 0.10
         self.timeframe = TIMEFRAME
-        
-        # Configuración V217
         self.config = {
-            "symbol": symbol,
-            "investment_pct": 0.05,
-            "leverage": 8, 
-            "cpr_width_threshold": 0.2,
-            "volume_factor": 1.1,
-            "strict_volume_factor": 2.5,
-            "breakout_atr_sl_multiplier": 1.2,  
-            "breakout_tp_mult": 3.0,
-            "indicator_update_interval_minutes": 15,
-            "ranging_atr_multiplier": 0.5,
-            "daily_loss_limit_pct": 15.0,
-            "trailing_stop_trigger_atr": 1.5,
-            "trailing_stop_distance_atr": 1.5,
-            "tick_size": self.tick_size,
-            "step_size": self.step_size,
-            "MAX_TRADE_SIZE_USDT": 20000 if is_pepe else 50000, 
-            "MAX_DAILY_TRADES": 50
+            "symbol": symbol, "investment_pct": 0.05, "leverage": 8, 
+            "cpr_width_threshold": 0.2, "volume_factor": 1.1, "strict_volume_factor": 2.5,
+            "breakout_atr_sl_multiplier": 1.2, "breakout_tp_mult": 3.0,
+            "indicator_update_interval_minutes": 15, "ranging_atr_multiplier": 0.5,
+            "daily_loss_limit_pct": 15.0, "trailing_stop_trigger_atr": 1.5,
+            "trailing_stop_distance_atr": 1.5, "tick_size": self.tick_size,
+            "step_size": self.step_size, "MAX_TRADE_SIZE_USDT": 50000, "MAX_DAILY_TRADES": 50
         }
-        
         self.state = SimulatorState()
         self.controller = MockBotController(self, self.config)
         self.risk_manager = RiskManager(self.controller)
@@ -246,7 +221,6 @@ class BacktesterV19:
         qty = min(total_initial * split_pct, info['quantity'])
         self.execute_exit(f"TP{tp_idx+1} Partial", price, qty, vol_usdt)
         info['tps_hit_count'] = tp_idx + 1
-        # El trailing se maneja en risk_pure ahora
 
     def load_data(self):
         if self.custom_file:
@@ -256,7 +230,6 @@ class BacktesterV19:
             print(f"🔍 Buscando datos para {self.symbol}...")
             folder_paths = ["/home/orangepi/bot_cpr/data", "data", "cpr_bot_v90/data", "."]
             prefix = f"mainnet_data_{self.timeframe}_{self.symbol}"
-            
             possible_files = []
             for folder in folder_paths:
                 if os.path.exists(folder):
@@ -295,9 +268,11 @@ class BacktesterV19:
             df['median_vol'] = df['quote_asset_volume'].rolling(60).median().shift(1)
             df['ema'] = df['close'].ewm(span=200).mean().shift(1)
             df['ema50'] = df['close'].ewm(span=50).mean().shift(1)
+            df['ema_slope'] = df['ema'].diff()
             
-            # EMA Slope (Variación absoluta de la EMA 200)
-            df['ema_slope'] = df['ema'].diff() # <--- NUEVO V217
+            # NUEVO V217.1: Pre-calculate Previous High/Low for Micro-failure check
+            df['prev_high'] = df['high'].shift(1)
+            df['prev_low'] = df['low'].shift(1)
             
             tr = pd.concat([
                 df['high'] - df['low'], (df['high'] - df['close'].shift(1)).abs(), (df['low'] - df['close'].shift(1)).abs()
@@ -340,7 +315,7 @@ class BacktesterV19:
         daily_df['prev_low'] = daily_df['low'].shift(1)
         daily_df['prev_close'] = daily_df['close'].shift(1)
         
-        print(f"\n🛡️ INICIANDO BACKTEST V217 (Professional Edge)")
+        print(f"\n🛡️ INICIANDO BACKTEST V217.1 (Improved Range)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -372,13 +347,18 @@ class BacktesterV19:
             self.state.cached_atr = row.atr
             self.state.cached_ema = row.ema
             self.state.cached_ema50 = row.ema50
-            self.state.cached_ema_slope = row.ema_slope # <--- PASO AL ESTADO
+            self.state.cached_ema_slope = row.ema_slope
             self.state.cached_median_vol = row.median_vol
             self.state.cached_adx = row.adx
             self.state.cached_rsi = row.rsi
 
             if not self.state.is_in_position and not self.state.pending_order:
-                kline = {'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 'v': row.volume, 'q': row.quote_asset_volume, 'x': True}
+                # PASAMOS prev_high y prev_low en kline para V217.1
+                kline = {
+                    'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 
+                    'v': row.volume, 'q': row.quote_asset_volume, 'x': True,
+                    'ph': row.prev_high, 'pl': row.prev_low 
+                }
                 await self.risk_manager.seek_new_trade(kline)
 
         self.generate_report()
@@ -407,13 +387,12 @@ class BacktesterV19:
         running_max = equity.cummax()
         drawdown = (equity - running_max) / running_max * 100
         max_dd = drawdown.min()
-        avg_slippage = df_t['slippage_pct'].mean()
         
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         
         print("\n" + "="*60)
-        print(f"📊 REPORTE PROFESIONAL (V217) - {self.symbol}")
+        print(f"📊 REPORTE PROFESIONAL (V217.1) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
@@ -430,12 +409,11 @@ class BacktesterV19:
         print("=" * 60)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CPR Bot Backtester V217")
+    parser = argparse.ArgumentParser(description="CPR Bot Backtester V217.1")
     parser.add_argument("--symbol", type=str, default=DEFAULT_SYMBOL, help="Par a operar")
     parser.add_argument("--start", type=str, default=DEFAULT_START_DATE, help="Fecha inicio")
     parser.add_argument("--file", type=str, default=None, help="Archivo CSV específico")
     args = parser.parse_args()
-    
     try:
         bt = BacktesterV19(symbol=args.symbol, start_date=args.start, custom_file=args.file)
         asyncio.run(bt.run())
