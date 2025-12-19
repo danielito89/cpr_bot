@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V223 (SMC Precision - Explicit State)
+# NIVEL: V224 (SMC High Prob - Stricter Impulse)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -76,14 +76,9 @@ class SimulatorState:
         self.sl_moved_to_be = False
         self.last_known_position_qty = 0.0
         self.cached_atr = 0.0
-        
-        # MEMORIA DE S/D
         self.active_zones = [] 
-        
-        # --- FIXED V223: Manejo explícito de filas ---
         self.current_row = None
-        self.prev_row = None # La clave para zonas precisas
-        
+        self.prev_row = None
         self.current_timestamp = 0
         self.current_price = 0
     def save_state(self): pass
@@ -241,12 +236,7 @@ class BacktesterV19:
             prev_valid_lows = valid_lows.shift(1)
             df['prev_swing_low'] = prev_valid_lows.reindex(df.index).ffill()
 
-            # IMPULSOS
-            df['body_size'] = (df['close'] - df['open']).abs()
-            df['avg_body'] = df['body_size'].rolling(20).mean()
-            df['is_impulse'] = df['body_size'] > (df['avg_body'] * 2.0)
-            
-            # ATR
+            # --- ATR (MOVIDO ANTES DEL IMPULSO PARA V224) ---
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
@@ -254,6 +244,21 @@ class BacktesterV19:
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
 
+            # IMPULSOS (V224 STRICTER)
+            df['body_size'] = (df['close'] - df['open']).abs()
+            df['avg_body'] = df['body_size'].rolling(20).mean()
+            # FIX V224: Body > 2.5x Avg Y Rango > 1.2x ATR
+            df['is_impulse'] = (
+                (df['body_size'] > (df['avg_body'] * 2.5)) & 
+                ((df['high'] - df['low']) > (df['atr'] * 1.2))
+            )
+            
+            # Datos vela anterior
+            df['prev_open'] = df['open'].shift(1)
+            df['prev_close'] = df['close'].shift(1)
+            df['prev_high'] = df['high'].shift(1)
+            df['prev_low'] = df['low'].shift(1)
+            
             return df, target_start
         except Exception as e:
             print(f"❌ Error leyendo CSV: {e}")
@@ -262,7 +267,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V223 (SMC Strict + Fixes)")
+        print(f"\n🛡️ INICIANDO BACKTEST V224 (SMC High Prob)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -279,10 +284,8 @@ class BacktesterV19:
                 self.check_exits(row) 
 
             if not self.state.is_in_position and not self.state.pending_order:
-                # No necesitamos pasar kline complejo, el risk manager lee del state
                 await self.risk_manager.seek_new_trade({})
 
-            # --- V223 CRÍTICO: GUARDAR ESTADO PARA LA SIGUIENTE ITERACIÓN ---
             self.state.prev_row = row
 
         self.generate_report()
@@ -302,7 +305,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V223 (SMC Strict) - {self.symbol}")
+        print(f"📊 REPORTE V224 (SMC High Prob) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
