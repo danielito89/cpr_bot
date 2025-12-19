@@ -219,33 +219,47 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- CÁLCULO DE ESTRUCTURA (V220) ---
+            # --- CÁLCULO DE ESTRUCTURA ROBUSTO (V220 Fixed) ---
             
             # 1. Swing Points (Fractales de 5 velas)
-            # Un High es Swing High si es mayor que 2 velas atras y 2 adelante
-            # Nota: Esto introduce "lookahead" de 2 velas en backtest, pero en live es un retraso de 2 velas.
-            # Para simular live, usamos shift(2)
+            # Un High es Swing si es mayor que 2 atrás y 2 adelante
+            # IMPORTANTE: shift(-2) es "futuro". En simulación live, esto significa 
+            # que la señal se confirma 2 velas DESPUÉS.
+            
             df['is_swing_high'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(2)) & \
                                   (df['high'] > df['high'].shift(-1)) & (df['high'] > df['high'].shift(-2))
+            
             df['is_swing_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(2)) & \
                                  (df['low'] < df['low'].shift(-1)) & (df['low'] < df['low'].shift(-2))
             
-            # Ajustamos para no ver el futuro: La señal se confirma 2 velas DESPUÉS
+            # 2. Asignar valores SOLO donde es True
             df['swing_high_val'] = np.where(df['is_swing_high'], df['high'], np.nan)
             df['swing_low_val'] = np.where(df['is_swing_low'], df['low'], np.nan)
             
-            # Forward fill para saber el último swing en cualquier momento
-            # Importante: Shift(2) para simular que recien nos enteramos 2 velas despues
+            # 3. Propagar el último valor conocido (Forward Fill)
+            # Shift(2) es OBLIGATORIO para no ver el futuro.
             df['last_swing_high'] = df['swing_high_val'].shift(2).ffill()
             df['last_swing_low'] = df['swing_low_val'].shift(2).ffill()
             
-            # Penúltimo swing (para estructura HH/HL)
-            df['prev_swing_high'] = df['swing_high_val'].shift(2).rolling(100).apply(lambda x: pd.Series(x).dropna().iloc[-2] if len(pd.Series(x).dropna()) >= 2 else np.nan, raw=False)
-            df['prev_swing_low'] = df['swing_low_val'].shift(2).rolling(100).apply(lambda x: pd.Series(x).dropna().iloc[-2] if len(pd.Series(x).dropna()) >= 2 else np.nan, raw=False)
+            # 4. Obtener el PENÚLTIMO Swing (Previous)
+            # Truco: Detectamos cuando cambia el 'last_swing_high' y tomamos el valor anterior
+            # Agrupamos los bloques donde el valor es igual, y tomamos el valor del bloque previo
+            
+            # Metodo simple vectorial:
+            # Shift valid swings down by 1 position in their own series
+            valid_highs = df['swing_high_val'].shift(2).dropna()
+            prev_valid_highs = valid_highs.shift(1) # El anterior al actual
+            # Reindexamos al índice original y ffill
+            df['prev_swing_high'] = prev_valid_highs.reindex(df.index).ffill()
+            
+            valid_lows = df['swing_low_val'].shift(2).dropna()
+            prev_valid_lows = valid_lows.shift(1)
+            df['prev_swing_low'] = prev_valid_lows.reindex(df.index).ffill()
 
-            # 2. Impulsos (Velas Grandes)
+            # 5. Impulsos (Velas Grandes)
             df['body_size'] = (df['close'] - df['open']).abs()
             df['avg_body'] = df['body_size'].rolling(20).mean()
+            # Impulso es vela 2x promedio Y que rompe estructura (opcional, por ahora solo tamaño)
             df['is_impulse'] = df['body_size'] > (df['avg_body'] * 2.0)
             
             return df, target_start
