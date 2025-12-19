@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V222 FINAL FIX (SMC Strict + ATR + State Fix)
+# NIVEL: V223 (SMC Precision - Explicit State)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
-TIMEFRAME = '1h' # IMPORTANTE: 1 Hora
+TIMEFRAME = '1h'
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
@@ -75,14 +75,15 @@ class SimulatorState:
         self.trading_paused = False
         self.sl_moved_to_be = False
         self.last_known_position_qty = 0.0
-        
-        # --- FIXED: Variable ATR en State ---
         self.cached_atr = 0.0
         
         # MEMORIA DE S/D
         self.active_zones = [] 
         
+        # --- FIXED V223: Manejo explícito de filas ---
         self.current_row = None
+        self.prev_row = None # La clave para zonas precisas
+        
         self.current_timestamp = 0
         self.current_price = 0
     def save_state(self): pass
@@ -245,13 +246,7 @@ class BacktesterV19:
             df['avg_body'] = df['body_size'].rolling(20).mean()
             df['is_impulse'] = df['body_size'] > (df['avg_body'] * 2.0)
             
-            # Datos vela anterior
-            df['prev_open'] = df['open'].shift(1)
-            df['prev_close'] = df['close'].shift(1)
-            df['prev_high'] = df['high'].shift(1)
-            df['prev_low'] = df['low'].shift(1)
-            
-            # --- FIXED: CÁLCULO ATR (ESTO FALTABA) ---
+            # ATR
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
@@ -267,7 +262,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V222 (SMC Liquidity Sweep)")
+        print(f"\n🛡️ INICIANDO BACKTEST V223 (SMC Strict + Fixes)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -277,8 +272,6 @@ class BacktesterV19:
             self.state.current_timestamp = current_time.timestamp()
             self.state.current_price = row.close 
             self.state.current_row = row 
-            
-            # --- FIXED: ASIGNACIÓN ATR A STATE ---
             self.state.cached_atr = row.atr
             
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
@@ -286,12 +279,11 @@ class BacktesterV19:
                 self.check_exits(row) 
 
             if not self.state.is_in_position and not self.state.pending_order:
-                kline = {
-                    'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 
-                    'v': row.volume, 'prev_open': row.prev_open, 'prev_close': row.prev_close,
-                    'prev_high': row.prev_high, 'prev_low': row.prev_low
-                }
-                await self.risk_manager.seek_new_trade(kline)
+                # No necesitamos pasar kline complejo, el risk manager lee del state
+                await self.risk_manager.seek_new_trade({})
+
+            # --- V223 CRÍTICO: GUARDAR ESTADO PARA LA SIGUIENTE ITERACIÓN ---
+            self.state.prev_row = row
 
         self.generate_report()
 
@@ -310,7 +302,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V222 (SMC Liquidity Sweep) - {self.symbol}")
+        print(f"📊 REPORTE V223 (SMC Strict) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
