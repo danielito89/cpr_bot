@@ -102,7 +102,7 @@ class BacktesterV19:
         self.risk_manager = RiskManager(self.controller)
         self.commission = 0.0006
         self.base_slippage = 0.0001
-        self.tp_splits = [1.0] 
+        self.tp_splits = [0.5, 0.5] 
 
     def calculate_dynamic_slippage(self, price, qty, candle_volume_usdt):
         if candle_volume_usdt <= 0: return 0.05
