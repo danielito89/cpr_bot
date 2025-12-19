@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # backtester_v20.py
 # NIVEL: V230.2 FIXED (SMC Strict + Active Mgmt Hooked)
-# USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
+# USO d: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
 import sys

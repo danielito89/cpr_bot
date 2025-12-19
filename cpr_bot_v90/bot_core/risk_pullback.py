@@ -21,7 +21,7 @@ class RiskManager:
         self.last_traded_swing_id = None # Para evitar re-entradas en el mismo nivel
 
     async def seek_new_trade(self, _):
-        # 1. COOLDOWN GLOBAL
+        # 1. COOLDOWN GLOBALL
         # Si operamos hace poco, ignoramos todo
         if (self.state.current_timestamp - self.last_trade_ts) < (self.cooldown_candles * 3600):
             return
