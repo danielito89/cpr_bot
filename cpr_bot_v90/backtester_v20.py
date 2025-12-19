@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V228 (SMC + EMA200 Context Filter)
+# NIVEL: V229 FIXED (SMC Strict + Active Mgmt Hooked)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -102,7 +102,7 @@ class BacktesterV19:
         self.risk_manager = RiskManager(self.controller)
         self.commission = 0.0006
         self.base_slippage = 0.0001
-        self.tp_splits = [0.5, 0.5] 
+        self.tp_splits = [0.5, 0.5] # 50% TP1, 50% TP2
 
     def calculate_dynamic_slippage(self, price, qty, candle_volume_usdt):
         if candle_volume_usdt <= 0: return 0.05
@@ -173,14 +173,27 @@ class BacktesterV19:
         sl, tps = info.get('sl'), info.get('tps', [])
         hit_sl = (info['side'] == SIDE_BUY and row.low <= sl) or (info['side'] == SIDE_SELL and row.high >= sl) if sl else False
         
-        hit_tp = False
-        if tps:
-            tp_price = tps[0]
-            if (info['side'] == SIDE_BUY and row.high >= tp_price) or (info['side'] == SIDE_SELL and row.low <= tp_price):
-                hit_tp = True
+        tps_hit = []
+        for i, tp in enumerate(tps):
+            if i >= info['tps_hit_count']:
+                if (info['side'] == SIDE_BUY and row.high >= tp) or (info['side'] == SIDE_SELL and row.low <= tp):
+                    tps_hit.append((i, tp))
         
         if hit_sl: self.close_position("SL", sl, row.quote_asset_volume); return
-        if hit_tp: self.close_position("TP", tps[0], row.quote_asset_volume); return
+        
+        for idx, tp_price in tps_hit:
+            if info['quantity'] <= 0: break
+            if idx == len(tps) - 1: self.close_position("TP Final", tp_price, row.quote_asset_volume); return
+            else: self._process_partial_tp(idx, tp_price, row.quote_asset_volume)
+
+    def _process_partial_tp(self, tp_idx, price, vol_usdt):
+        info = self.state.current_position_info
+        total_initial = info.get('initial_quantity', info['quantity'])
+        split_pct = self.tp_splits[tp_idx] if tp_idx < len(self.tp_splits) else 0.0
+        # Simplificación: cerramos % del total inicial
+        qty = min(total_initial * split_pct, info['quantity'])
+        self.execute_exit(f"TP{tp_idx+1}", price, qty, vol_usdt)
+        info['tps_hit_count'] = tp_idx + 1
 
     def load_data(self):
         if self.custom_file:
@@ -236,11 +249,6 @@ class BacktesterV19:
             prev_valid_lows = valid_lows.shift(1)
             df['prev_swing_low'] = prev_valid_lows.reindex(df.index).ffill()
 
-            # --- INDICADORES ADICIONALES (V228) ---
-            # EMA 200 para filtro HTF
-            df['ema200'] = df['close'].ewm(span=200).mean().shift(1)
-
-            # ATR
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
@@ -248,7 +256,6 @@ class BacktesterV19:
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
 
-            # IMPULSOS
             df['body_size'] = (df['close'] - df['open']).abs()
             df['avg_body'] = df['body_size'].rolling(20).mean()
             df['is_impulse'] = (
@@ -256,7 +263,6 @@ class BacktesterV19:
                 ((df['high'] - df['low']) > (df['atr'] * 1.2))
             )
             
-            # Datos vela anterior
             df['prev_open'] = df['open'].shift(1)
             df['prev_close'] = df['close'].shift(1)
             df['prev_high'] = df['high'].shift(1)
@@ -270,7 +276,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V228 (SMC + Trend Filter)")
+        print(f"\n🛡️ INICIANDO BACKTEST V229 (SMC Flow State)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -283,7 +289,10 @@ class BacktesterV19:
             self.state.cached_atr = row.atr
             
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
+            
             if self.state.is_in_position:
+                # --- V229 CRÍTICO: CONECTAR LA GESTIÓN ACTIVA ---
+                await self.risk_manager.check_position_state()
                 self.check_exits(row) 
 
             if not self.state.is_in_position and not self.state.pending_order:
@@ -308,7 +317,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V228 (SMC + Trend Filter) - {self.symbol}")
+        print(f"📊 REPORTE V229 (SMC Flow State) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")

@@ -19,9 +19,9 @@ class RiskManager:
         self.premium_risk = 0.015    
         self.max_leverage = 7.0
         
-        # Configuración V228 (Gestión Activa)
-        self.max_trade_duration_candles = 12  # Zombie Killer (12h)
-        self.be_trigger_r = 1.5               # Mover a BE al 1.5R
+        # Configuración V229 (Gestión Paciente)
+        self.max_trade_duration_candles = 24  # 24 Horas
+        self.be_trigger_r = 2.2               # BE relajado
 
     def _cleanup_zones(self, current_ts, current_price):
         valid_zones = []
@@ -69,7 +69,6 @@ class RiskManager:
         prev_row = self.state.prev_row 
         current_price = row.close
         atr = self.state.cached_atr
-        # V228: Eliminado EMA200 filter para capturar giros tempranos
         
         if not atr: return
         
@@ -113,15 +112,13 @@ class RiskManager:
                         stop_loss = row.low - (atr * 0.5)
                         risk = current_price - stop_loss
                         
-                        # V228: TP1 Fijo (1.5R) y TP2 Estructural
                         tp1 = current_price + (risk * 1.5)
-                        tp2 = max(sh, current_price + (risk * 3.0)) # Runner
+                        tp2 = max(sh, current_price + (risk * 3.0))
                         
                         reward_avg = ((tp1 + tp2) / 2) - current_price
                         
-                        # Filtro Base RR (sobre el promedio)
                         if risk > 0 and (reward_avg / risk) >= 1.5:
-                            best_setup = (SIDE_BUY, current_price, stop_loss, [tp1, tp2], "SMC Demand V228", z)
+                            best_setup = (SIDE_BUY, current_price, stop_loss, [tp1, tp2], "SMC Demand V229", z)
 
                 # --- SUPPLY SETUP ---
                 elif is_downtrend and z['type'] == 'SUPPLY':
@@ -145,7 +142,7 @@ class RiskManager:
                         reward_avg = current_price - ((tp1 + tp2) / 2)
                         
                         if risk > 0 and (reward_avg / risk) >= 1.5:
-                            best_setup = (SIDE_SELL, current_price, stop_loss, [tp1, tp2], "SMC Supply V228", z)
+                            best_setup = (SIDE_SELL, current_price, stop_loss, [tp1, tp2], "SMC Supply V229", z)
 
             if best_setup:
                 side, entry, sl, tps, label, zone_ref = best_setup
@@ -153,7 +150,6 @@ class RiskManager:
                 balance = await self.bot._get_account_balance()
                 if not balance: return
                 
-                # Calcular calidad para Sizing
                 avg_rr = abs(tps[1] - entry) / abs(entry - sl)
                 
                 if avg_rr >= 3.5:
@@ -180,17 +176,16 @@ class RiskManager:
                     zone_ref['attempts'] += 1
                     tps_fmt = [float(format_price(self.config.tick_size, p)) for p in tps]
                     
-                    logging.info(f"!!! SIGNAL V228 !!! {type_label} | Risk: {risk_pct*100}%")
+                    logging.info(f"!!! SIGNAL V229 !!! {type_label} | Risk: {risk_pct*100}%")
                     await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps_fmt, type_label)
 
-    # --- V228: GESTIÓN ACTIVA (ZOMBIE KILLER & BE) ---
+    # --- GESTIÓN ACTIVA V229 (FIXED & RELAXED) ---
     async def check_position_state(self):
         async with self.bot.lock:
             try:
                 pos = await self.bot._get_current_position()
                 if not pos: return
                 
-                # Info necesaria
                 entry_time = self.state.current_position_info.get('entry_time', 0)
                 current_time = self.state.current_timestamp
                 entry_price = float(pos['entryPrice'])
@@ -201,26 +196,23 @@ class RiskManager:
                 
                 if not sl_price: return
 
-                # 1. ZOMBIE KILLER (Time-based Exit)
                 candles_open = (current_time - entry_time) / 3600
                 risk_dist = abs(entry_price - sl_price)
                 
-                # Calcular PnL actual en R (Unrealized R)
                 if side == SIDE_BUY:
                     current_r = (mark_price - entry_price) / risk_dist
                 else:
                     current_r = (entry_price - mark_price) / risk_dist
                 
-                # Si pasaron 12 horas y no vamos ganando al menos 0.5R -> CERRAR
-                if candles_open >= self.max_trade_duration_candles and current_r < 0.5:
-                    logging.info(f"💀 ZOMBIE KILLER: Trade estancado {candles_open:.1f}h. Closing.")
-                    await self.orders_manager.close_position_manual("Time Exit (Stagnant)")
+                # ZOMBIE: 24 horas y < 0.2R (Trade muerto)
+                if candles_open >= self.max_trade_duration_candles and current_r < 0.2:
+                    logging.info(f"💀 ZOMBIE KILLER: 24h+ y sin ganancia. Cerrando.")
+                    await self.orders_manager.close_position_manual("Time Exit")
                     return
 
-                # 2. BREAKEVEN AGRESIVO (Si TP1 ya pasó o estamos muy cerca)
-                # Si el precio supera 1.5R, proteger la posición
+                # BE RELAJADO: Solo al 2.2R (Dejamos correr)
                 if current_r > self.be_trigger_r and not self.state.sl_moved_to_be:
                     await self.orders_manager.move_sl_to_be(qty)
 
             except Exception as e:
-                logging.error(f"Error en gestión V228: {e}")
+                logging.error(f"Error en gestión V229: {e}")
