@@ -413,7 +413,7 @@ class BacktesterV19:
         df_t.to_csv(csv_filename, index=False)
         
         print("\n" + "="*60)
-        print(f"📊 REPORTE PROFESIONAL (V209) - {self.symbol}")
+        print(f"📊 REPORTE PROFESIONAL (V211) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
