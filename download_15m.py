@@ -5,7 +5,7 @@ from binance.client import Client
 from datetime import datetime
 
 # --- CONFIGURACIÓN M15 ---
-SYMBOLS = ["ETHUSDT"] 
+SYMBOLS = ["BTCUSDT"] 
 START_DATE = "2022-01-01" 
 END_DATE = "2025-16-12"   # Vamos a probar un periodo largo
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE # <--- CLAVE
