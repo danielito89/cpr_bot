@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V220 (Supply & Demand - Price Action)
-# USO: python cpr_bot_v90/backtester_v19.py --symbol ETHUSDT --start 2022-01-01
+# NIVEL: V221 (SMC Strict - BOS & Base Candle)
+# USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
 import sys
@@ -15,8 +15,8 @@ from datetime import datetime, timedelta
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
-DEFAULT_START_DATE = "2021-01-01"
-TIMEFRAME = '1h' 
+DEFAULT_START_DATE = "2022-01-01"
+TIMEFRAME = '1h' # CLAVE: 1H
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
@@ -77,15 +77,14 @@ class SimulatorState:
         self.last_known_position_qty = 0.0
         
         # MEMORIA DE S/D
-        self.active_zones = [] # Lista de diccionarios {'type': 'SUPPLY/DEMAND', 'top': float, 'bottom': float, 'created_at': ts}
+        self.active_zones = [] 
         
-        # Datos row actual
         self.current_row = None
         self.current_timestamp = 0
         self.current_price = 0
     def save_state(self): pass
 
-class BacktesterV19:
+class BacktesterV19: # Mantenemos nombre clase aunque archivo sea v20
     def __init__(self, symbol, start_date, custom_file=None):
         self.symbol = symbol
         self.start_date = start_date
@@ -108,7 +107,6 @@ class BacktesterV19:
 
     def calculate_dynamic_slippage(self, price, qty, candle_volume_usdt):
         if candle_volume_usdt <= 0: return 0.05
-        # Asumimos que podemos tomar el 1% de la liquidez sin impacto masivo en S/D
         available_liquidity = candle_volume_usdt * 0.01 
         trade_size_usdt = price * qty
         impact_factor = trade_size_usdt / available_liquidity
@@ -186,7 +184,6 @@ class BacktesterV19:
         if hit_tp: self.close_position("TP", tps[0], row.quote_asset_volume); return
 
     def load_data(self):
-        # ... (Carga de archivos estándar)
         if self.custom_file:
             possible_files = [self.custom_file]
         else:
@@ -219,48 +216,37 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- CÁLCULO DE ESTRUCTURA ROBUSTO (V220 Fixed) ---
-            
-            # 1. Swing Points (Fractales de 5 velas)
-            # Un High es Swing si es mayor que 2 atrás y 2 adelante
-            # IMPORTANTE: shift(-2) es "futuro". En simulación live, esto significa 
-            # que la señal se confirma 2 velas DESPUÉS.
-            
+            # --- CÁLCULO DE ESTRUCTURA ROBUSTO ---
             df['is_swing_high'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(2)) & \
                                   (df['high'] > df['high'].shift(-1)) & (df['high'] > df['high'].shift(-2))
             
             df['is_swing_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(2)) & \
                                  (df['low'] < df['low'].shift(-1)) & (df['low'] < df['low'].shift(-2))
             
-            # 2. Asignar valores SOLO donde es True
             df['swing_high_val'] = np.where(df['is_swing_high'], df['high'], np.nan)
             df['swing_low_val'] = np.where(df['is_swing_low'], df['low'], np.nan)
             
-            # 3. Propagar el último valor conocido (Forward Fill)
-            # Shift(2) es OBLIGATORIO para no ver el futuro.
             df['last_swing_high'] = df['swing_high_val'].shift(2).ffill()
             df['last_swing_low'] = df['swing_low_val'].shift(2).ffill()
             
-            # 4. Obtener el PENÚLTIMO Swing (Previous)
-            # Truco: Detectamos cuando cambia el 'last_swing_high' y tomamos el valor anterior
-            # Agrupamos los bloques donde el valor es igual, y tomamos el valor del bloque previo
-            
-            # Metodo simple vectorial:
-            # Shift valid swings down by 1 position in their own series
             valid_highs = df['swing_high_val'].shift(2).dropna()
-            prev_valid_highs = valid_highs.shift(1) # El anterior al actual
-            # Reindexamos al índice original y ffill
+            prev_valid_highs = valid_highs.shift(1)
             df['prev_swing_high'] = prev_valid_highs.reindex(df.index).ffill()
             
             valid_lows = df['swing_low_val'].shift(2).dropna()
             prev_valid_lows = valid_lows.shift(1)
             df['prev_swing_low'] = prev_valid_lows.reindex(df.index).ffill()
 
-            # 5. Impulsos (Velas Grandes)
+            # IMPULSOS
             df['body_size'] = (df['close'] - df['open']).abs()
             df['avg_body'] = df['body_size'].rolling(20).mean()
-            # Impulso es vela 2x promedio Y que rompe estructura (opcional, por ahora solo tamaño)
             df['is_impulse'] = df['body_size'] > (df['avg_body'] * 2.0)
+            
+            # NUEVO PARA V221: Datos de vela anterior para definir la BASE
+            df['prev_open'] = df['open'].shift(1)
+            df['prev_close'] = df['close'].shift(1)
+            df['prev_high'] = df['high'].shift(1)
+            df['prev_low'] = df['low'].shift(1)
             
             return df, target_start
         except Exception as e:
@@ -270,7 +256,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V220 (Supply & Demand)")
+        print(f"\n🛡️ INICIANDO BACKTEST V221 (SMC Strict)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
         print("-" * 60)
         
@@ -279,15 +265,20 @@ class BacktesterV19:
             
             self.state.current_timestamp = current_time.timestamp()
             self.state.current_price = row.close 
-            self.state.current_row = row # Guardamos row para acceso fácil
+            self.state.current_row = row 
             
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             if self.state.is_in_position:
-                self.check_exits(row) # Gestión simple por ahora
+                self.check_exits(row) 
 
             if not self.state.is_in_position and not self.state.pending_order:
-                # El análisis completo ocurre en risk_pure usando state.current_row
-                await self.risk_manager.seek_new_trade({})
+                # PASAMOS TODO LO NECESARIO
+                kline = {
+                    'o': row.open, 'c': row.close, 'h': row.high, 'l': row.low, 
+                    'v': row.volume, 'prev_open': row.prev_open, 'prev_close': row.prev_close,
+                    'prev_high': row.prev_high, 'prev_low': row.prev_low
+                }
+                await self.risk_manager.seek_new_trade(kline)
 
         self.generate_report()
 
@@ -301,15 +292,12 @@ class BacktesterV19:
         gross_loss = abs(losers['pnl_usd'].sum())
         win_rate = (len(winners) / len(df_t)) * 100
         profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else 999.0
-        
         equity = pd.Series(self.state.equity_curve)
         max_dd = ((equity - equity.cummax()) / equity.cummax() * 100).min()
-        
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
-        
         print("\n" + "="*60)
-        print(f"📊 REPORTE V220 (S/D Structure) - {self.symbol}")
+        print(f"📊 REPORTE V221 (SMC Strict) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
