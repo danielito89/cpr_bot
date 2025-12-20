@@ -82,16 +82,18 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V6.1 - MOMENTUM ENFORCER)
+# 3. GESTIÓN (V6.1 - MOMENTUM ENFORCER) - SE MANTIENE
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
     risk_per_share = atr_value * 1.5 
     tp1_ratio = 1.0 
     tp2_ratio = 3.0 
+    
     sl_price = entry_price - risk_per_share if direction == 'LONG' else entry_price + risk_per_share
     tp1_price = entry_price + (risk_per_share * tp1_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp1_ratio)
     tp2_price = entry_price + (risk_per_share * tp2_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp2_ratio)
+    
     tp1_hit = False
     
     # 1. EARLY EXIT (Bar 1)
@@ -119,34 +121,18 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
                 return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
 
-    # --- 2. FAILED FOLLOW-THROUGH (V6.1 - Bar 2 Check) ---
+    # 2. FAILED FOLLOW-THROUGH (Bar 2)
     if entry_index + 2 < len(df):
         c1 = df.iloc[entry_index + 1]
         c2 = df.iloc[entry_index + 2]
-        
-        # Check simple: Si en las primeras 2 velas no logramos superar el precio de entrada, CORTAR.
         if direction == 'LONG':
-            # Si el máximo de las 2 velas no supera la entrada, no hay "Higher High" local relativo a entrada.
-            # Estamos bajo el agua desde el inicio.
             if max(c1['high'], c2['high']) <= entry_price:
-                return {
-                    "outcome": "FAILED_FT",
-                    "r_realized": -0.15,
-                    "bars": 2,
-                    "info": "No HH after entry"
-                }
-
+                return {"outcome": "FAILED_FT", "r_realized": -0.15, "bars": 2, "info": "No HH"}
         if direction == 'SHORT':
-            # Si el mínimo de las 2 velas no rompe la entrada, no hay "Lower Low".
             if min(c1['low'], c2['low']) >= entry_price:
-                return {
-                    "outcome": "FAILED_FT",
-                    "r_realized": -0.15,
-                    "bars": 2,
-                    "info": "No LL after entry"
-                }
+                return {"outcome": "FAILED_FT", "r_realized": -0.15, "bars": 2, "info": "No LL"}
 
-    # 3. MANAGEMENT (Loop Principal)
+    # 3. MANAGEMENT LOOP
     for j in range(1, 12): 
         if entry_index + j >= len(df): break
         row = df.iloc[entry_index + j]
@@ -171,7 +157,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
                 if cvd_now > cvd_entry: tp1_hit, sl_price = True, entry_price 
-                else: return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Divergence"}
+                else: return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Div"}
 
             if curr_high >= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": tp2_ratio, "bars": j, "info": "Target 3R"}
@@ -186,7 +172,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
                 if cvd_now < cvd_entry: tp1_hit, sl_price = True, entry_price
-                else: return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Divergence"}
+                else: return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Div"}
 
             if curr_low <= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": tp2_ratio, "bars": j, "info": "Target 3R"}
@@ -198,15 +184,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V6.1 - MOMENTUM ENFORCER)
+# 4. EJECUCIÓN (V6.2 - ACCEPTANCE ENTRY)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 18 
 
-def run_v6_1_fft_test():
-    print("--- ORANGE PI LAB: V6.1 (MOMENTUM ENFORCER) ---")
+def run_v6_2_acceptance_test():
+    print("--- ORANGE PI LAB: V6.2 (ACCEPTANCE ENTRY) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -215,67 +201,61 @@ def run_v6_1_fft_test():
     current_cooldown = 12 
     trade_log = []
     
-    print(f"\n--- INICIANDO BACKTEST (FFT ACTIVE) ---")
+    print(f"\n--- INICIANDO BACKTEST (CONFIRMATION CANDLE) ---")
     
     for i in range(500, len(df)):
         if i - last_trade_index < current_cooldown: continue
-        row = df.iloc[i]
+        row = df.iloc[i] # VELA DE ENTRADA (Confirmation)
+        prev_row = df.iloc[i-1] # VELA DE SETUP (Rejection)
         
-        # Filtros Base V6.0
+        # Filtros Globales (sobre vela actual)
         if not is_core_session(row['timestamp']): continue
         if row['ATR'] < row['ATR_Threshold']: continue 
         
-        zones = get_volume_profile_zones(df.iloc[i-288:i])
+        # Zonas (basadas en datos hasta i-1 para no repintar en setup, o i es igual)
+        zones = get_volume_profile_zones(df.iloc[i-289:i-1]) # Perfil previo al setup
         if not zones: continue
         vah, val = zones['VAH'], zones['VAL']
         
-        # Filtro 1: Impulse
-        impulse_move = abs(row['close'] - df.iloc[i-6]['open'])
-        if impulse_move < (row['ATR'] * 1.5): continue
-
-        # Filtro 2: Deceleration (1.25)
-        last_3_ranges = (df.iloc[i-3:i]['high'] - df.iloc[i-3:i]['low']).mean()
-        if last_3_ranges > (row['ATR'] * 1.25): continue 
-
-        # Filtro 3: Conviction (0.48)
-        c_range = row['high'] - row['low']
-        c_body = abs(row['close'] - row['open'])
-        if c_range == 0: continue
-        if (c_body / c_range) < 0.48: continue 
-
         entry_signal = None
-        penetration_threshold = 0.50 
-        va_range = vah - val
-        edge_zone = va_range * 0.25
-
-        is_long = row['low'] <= val and row['close'] > val
-        is_short = row['high'] >= vah and row['close'] < vah
-
-        if is_long:
-            if row['low'] > (val + edge_zone): continue 
-            if df.iloc[i-1]['close'] < val: continue 
-            if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
-            if row['close'] <= val: continue
-            if ((row['close'] - row['low']) / c_range) < 0.48: continue
-
-            if row['RSI'] < 48 and row['delta_norm'] > 0:
+        is_long = False
+        is_short = False
+        
+        # --- LÓGICA V6.2 ---
+        
+        # 1. ANALISIS VELA PREVIA (SETUP)
+        # ¿Tocó la zona y rebotó?
+        setup_long = (prev_row['low'] <= val) and (prev_row['close'] > val)
+        setup_short = (prev_row['high'] >= vah) and (prev_row['close'] < vah)
+        
+        if not (setup_long or setup_short): continue # Si no hubo setup ayer, no hay trade hoy
+        
+        # 2. ANALISIS VELA ACTUAL (CONFIRMATION / ACCEPTANCE)
+        
+        if setup_long:
+            # Acceptance:
+            # - Low encima de VAL (Soporte validado)
+            # - Close rompe High previo (Momentum)
+            # - Delta Positivo
+            if row['low'] > val and row['close'] > prev_row['high'] and row['delta_norm'] > 0:
+                is_long = True
                 entry_signal = 'LONG'
                 
-        elif is_short:
-            if row['high'] < (vah - edge_zone): continue
-            if df.iloc[i-1]['close'] > vah: continue
-            if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
-            if row['close'] >= vah: continue
-            if ((row['close'] - row['low']) / c_range) > 0.52: continue
-            
-            if row['RSI'] > 52 and row['delta_norm'] < 0:
+        elif setup_short:
+            # Acceptance:
+            # - High debajo de VAH (Resistencia validada)
+            # - Close rompe Low previo (Momentum)
+            # - Delta Negativo
+            if row['high'] < vah and row['close'] < prev_row['low'] and row['delta_norm'] < 0:
+                is_short = True
                 entry_signal = 'SHORT'
-                
+        
+        # Si tenemos señal confirmada, ejecutamos gestión
         if entry_signal:
             zone_level = val if entry_signal == 'LONG' else vah
             res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
             
-            # Smart Fees (FFT is also cheap)
+            # Smart Fees
             if res['outcome'] in ['EARLY_EXIT', 'STAGNANT', 'FAILED_FT']: fee = 0.015
             else: fee = 0.045
             final_r = res['r_realized'] - fee
@@ -306,7 +286,7 @@ def run_v6_1_fft_test():
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("V6.1 - MOMENTUM ENFORCER (50K CANDLES)")
+    print("V6.2 - ACCEPTANCE ENTRY (FINAL CHECK)")
     print("="*50)
     print(f"Total Trades:   {len(df_res)}")
     print(f"TOTAL R NETO:   {total_r_net:.2f} R")
@@ -324,4 +304,4 @@ def run_v6_1_fft_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_v6_1_fft_test()
+    run_v6_2_acceptance_test()
