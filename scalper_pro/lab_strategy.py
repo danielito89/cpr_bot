@@ -5,14 +5,13 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. UTILIDADES Y DESCARGA MASIVA (50k)
+# 1. UTILIDADES Y DESCARGA (50k)
 # ---------------------------------------------------------
 
 def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=50000):
     exchange = ccxt.binance()
     limit_per_call = 1000
     print(f"📡 {symbol}: Descargando historial masivo ({total_candles} velas)...")
-    print("   Esto tomará unos minutos. Paciencia...")
     
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit_per_call)
     all_ohlcv = ohlcv
@@ -26,7 +25,6 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=5000
             new_batch = [x for x in new_batch if x[0] < oldest_timestamp]
             if not new_batch: break
             all_ohlcv = new_batch + all_ohlcv
-            
             if len(all_ohlcv) % 10000 == 0:
                 print(f"   ... {len(all_ohlcv)} velas cargadas")
             time.sleep(0.15) 
@@ -62,10 +60,7 @@ def calculate_indicators(df):
     low_close = np.abs(df['low'] - df['close'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=14).mean()
-    
-    # ATR Threshold (Percentil 0.25 - Mantenemos V5.4)
     df['ATR_Threshold'] = df['ATR'].rolling(window=500).quantile(0.25)
-    
     return df
 
 def get_volume_profile_zones(df, lookback_bars=288):
@@ -87,7 +82,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V5.5 - NO CHANGES HERE)
+# 3. GESTIÓN (V5.6 - THE RECLAIM SPECIALIST)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -134,7 +129,6 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
         current_r = current_pnl / risk_per_share
 
-        # Stagnant Checks
         if j == 4 and not tp1_hit:
             if current_r < 0.10: return {"outcome": "STAGNANT", "r_realized": -0.05, "bars": j, "info": "Bar 4"}
             if current_r >= 0.60: tp1_hit, sl_price = True, entry_price
@@ -142,14 +136,13 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         if j == 6 and not tp1_hit:
              if current_r < 0.20: return {"outcome": "STAGNANT", "r_realized": -0.15, "bars": j, "info": "Bar 6"}
 
-        # SL / TP Logic
         if direction == 'LONG':
             if curr_low <= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
-            # CVD GUARD (Management Filter)
+            # CVD GUARD
             if not tp1_hit and curr_high >= tp1_price:
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
@@ -168,6 +161,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
+            # CVD GUARD
             if not tp1_hit and curr_low <= tp1_price:
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
@@ -187,16 +181,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V5.5 - ASYMMETRIC ENTRY)
+# 4. EJECUCIÓN (V5.6 - STRONG CLOSE)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 14 <= hour <= 16
 
-def run_v5_5_massive_test():
-    print("--- ORANGE PI LAB: V5.5 (50K CANDLES + RELAXED ENTRY) ---")
-    # Descarga MASIVA 
+def run_v5_6_strong_close_test():
+    print("--- ORANGE PI LAB: V5.6 (STRONG CLOSE FILTER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -205,13 +198,12 @@ def run_v5_5_massive_test():
     current_cooldown = 12 
     trade_log = []
     
-    print(f"\n--- INICIANDO BACKTEST (6 MESES APROX) ---")
+    print(f"\n--- INICIANDO BACKTEST ---")
     
     for i in range(500, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         
-        # Filtros Estructurales (SE MANTIENEN)
         if not is_core_session(row['timestamp']): continue
         if row['ATR'] < row['ATR_Threshold']: continue 
         
@@ -226,23 +218,41 @@ def run_v5_5_massive_test():
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
-        # GATEKEEPER (0.5 ATR)
         penetration_threshold = 0.50 
         
-        # --- CAMBIO CLAVE: ENTRADA RELAJADA (SIN CVD) ---
+        # --- NUEVO FILTRO: STRONG CLOSE (TIMING) ---
+        # Exigimos que la vela cierre en el tercio favorable de su rango.
+        # Candle Range
+        c_range = (row['high'] - row['low'])
+        if c_range == 0: continue
+        
         if is_long:
-            if prev_row['close'] < val: continue # Falling Knife
+            # 1. Knife Logic
+            if prev_row['close'] < val: continue 
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
             
-            # RSI < 48 (antes 45) | Delta > 0 | CVD ELIMINADO
+            # 2. Reclaim Real
+            if row['close'] <= val: continue # Debe cerrar dentro de la zona (reclamar)
+
+            # 3. Strong Close (Top 40%)
+            close_position = (row['close'] - row['low']) / c_range
+            if close_position < 0.60: continue # Rechazo débil, ignorar.
+
             if row['RSI'] < 48 and row['delta_norm'] > 0:
                 entry_signal = 'LONG'
                 
         elif is_short:
-            if prev_row['close'] > vah: continue # Rising Knife
+            # 1. Knife Logic
+            if prev_row['close'] > vah: continue 
             if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
             
-            # RSI > 52 (antes 55) | Delta < 0 | CVD ELIMINADO
+            # 2. Reclaim Real
+            if row['close'] >= vah: continue # Debe cerrar dentro de la zona
+
+            # 3. Strong Close (Bottom 40%)
+            close_position = (row['close'] - row['low']) / c_range
+            if close_position > 0.40: continue # Rechazo débil, ignorar.
+            
             if row['RSI'] > 52 and row['delta_norm'] < 0:
                 entry_signal = 'SHORT'
                 
@@ -283,9 +293,8 @@ def run_v5_5_massive_test():
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("V5.5 - ASYMMETRIC ENTRY (50K CANDLES)")
+    print("V5.6 - STRONG CLOSE FILTER (TIMING FIX)")
     print("="*50)
-    print(f"Periodo:        {df['timestamp'].iloc[0]} -> {df['timestamp'].iloc[-1]}")
     print(f"Total Trades:   {len(df_res)}")
     print(f"TOTAL R NETO:   {total_r_net:.2f} R")
     print("-" * 50)
@@ -302,4 +311,4 @@ def run_v5_5_massive_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_v5_5_massive_test()
+    run_v5_6_strong_close_test()
