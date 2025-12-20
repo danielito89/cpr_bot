@@ -61,6 +61,10 @@ def calculate_indicators(df):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=14).mean()
     df['ATR_Threshold'] = df['ATR'].rolling(window=500).quantile(0.25)
+    
+    # --- V6.4: VOLUME MOVING AVERAGE (20) ---
+    df['Vol_MA'] = df['volume'].rolling(window=20).mean()
+    
     return df
 
 def get_volume_profile_zones(df, lookback_bars=288):
@@ -82,7 +86,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V6.3 - SAME SOLID ENGINE)
+# 3. GESTIÓN (V6.4 - AGGRESSIVE STAGNANT KILLER)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -138,10 +142,16 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
         current_r = current_pnl / risk_per_share
 
+        # --- AJUSTE B: AGGRESSIVE TIME STOP (Bar 4) ---
         if j == 4 and not tp1_hit:
-            if current_r < 0.10: return {"outcome": "STAGNANT", "r_realized": -0.05, "bars": j, "info": "Bar 4"}
+            # Si en 20 mins no vamos ganando +0.25R, nos vamos.
+            # Esto libera capital y reduce exposición.
+            if current_r < 0.25: 
+                return {"outcome": "STAGNANT", "r_realized": 0.0, "bars": j, "info": "Aggressive Stagnant (Bar 4)"}
+            
             if current_r >= 0.60: tp1_hit, sl_price = True, entry_price
 
+        # Si llegamos a bar 6 y sigue débil, fuera.
         if j == 6 and not tp1_hit:
              if current_r < 0.20: return {"outcome": "STAGNANT", "r_realized": -0.15, "bars": j, "info": "Bar 6"}
 
@@ -182,15 +192,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V6.3 - PRODUCTION CANDIDATE)
+# 4. EJECUCIÓN (V6.4 - THE VELOCITY SNIPER)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 18 
 
-def run_v6_3_production_test():
-    print("--- ORANGE PI LAB: V6.3 (PRODUCTION CANDIDATE) ---")
+def run_v6_4_velocity_test():
+    print("--- ORANGE PI LAB: V6.4 (VELOCITY SNIPER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -199,12 +209,12 @@ def run_v6_3_production_test():
     current_cooldown = 12 
     trade_log = []
     
-    print(f"\n--- INICIANDO BACKTEST (QUALITY FILTER) ---")
+    print(f"\n--- INICIANDO BACKTEST (VOL + EXPANSION) ---")
     
     for i in range(500, len(df)):
         if i - last_trade_index < current_cooldown: continue
-        row = df.iloc[i] # Vela de Entrada (Confirmación)
-        prev_row = df.iloc[i-1] # Vela de Setup (Rechazo)
+        row = df.iloc[i] 
+        prev_row = df.iloc[i-1] 
         
         # Filtros Globales
         if not is_core_session(row['timestamp']): continue
@@ -218,37 +228,39 @@ def run_v6_3_production_test():
         is_long = False
         is_short = False
         
-        # --- LÓGICA V6.3 ---
-        
-        # Setup Candles
+        # Setup Candles Check
         setup_long = (prev_row['low'] <= val) and (prev_row['close'] > val)
         setup_short = (prev_row['high'] >= vah) and (prev_row['close'] < vah)
         if not (setup_long or setup_short): continue 
         
-        # Quality Check de la Vela de Entrada (Confirmación)
-        # Queremos que la confirmación tenga un cuerpo decente (>40%)
-        # Si confirmamos con un Doji, es debilidad.
+        # Quality Check
         c_range = row['high'] - row['low']
         if c_range == 0: continue
         c_body = abs(row['close'] - row['open'])
         body_strength = c_body / c_range
         
-        # --- AJUSTE 1: CONFIRMATION QUALITY ---
-        if body_strength < 0.40: continue # La vela de disparo debe tener intención
-        
-        # --- AJUSTE 2: RSI ROOM ---
-        rsi_long_limit = 45 # Antes 48
-        rsi_short_limit = 55 # Antes 52
+        if body_strength < 0.40: continue 
+
+        # --- AJUSTE A: MINIMUM EXPANSION ---
+        # El precio debe haberse movido al menos 0.25 ATR desde el cierre anterior
+        expansion = abs(row['close'] - prev_row['close'])
+        if expansion < (row['ATR'] * 0.25): continue
+
+        # --- AJUSTE C: VOLUME VALIDATION ---
+        # El volumen debe ser al menos el 80% del promedio de las ultimas 20 velas
+        # Queremos participación, no una ruptura fantasma.
+        if row['volume'] < (row['Vol_MA'] * 0.8): continue
+
+        rsi_long_limit = 45 
+        rsi_short_limit = 55 
 
         if setup_long:
-            # Acceptance: Low > VAL | Close > Prev High | Delta > 0
             if row['low'] > val and row['close'] > prev_row['high'] and row['delta_norm'] > 0:
                 if row['RSI'] < rsi_long_limit:
                     is_long = True
                     entry_signal = 'LONG'
                 
         elif setup_short:
-            # Acceptance: High < VAH | Close < Prev Low | Delta < 0
             if row['high'] < vah and row['close'] < prev_row['low'] and row['delta_norm'] < 0:
                 if row['RSI'] > rsi_short_limit:
                     is_short = True
@@ -289,7 +301,7 @@ def run_v6_3_production_test():
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("V6.3 - PRODUCTION CANDIDATE (FINAL)")
+    print("V6.4 - VELOCITY SNIPER (FINAL)")
     print("="*50)
     print(f"Total Trades:   {len(df_res)}")
     print(f"TOTAL R NETO:   {total_r_net:.2f} R")
@@ -307,4 +319,4 @@ def run_v6_3_production_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_v6_3_production_test()
+    run_v6_4_velocity_test()
