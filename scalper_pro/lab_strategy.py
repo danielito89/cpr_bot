@@ -82,21 +82,19 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V6.1 - MOMENTUM ENFORCER) - SE MANTIENE
+# 3. GESTIÓN (V6.3 - SAME SOLID ENGINE)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
     risk_per_share = atr_value * 1.5 
     tp1_ratio = 1.0 
     tp2_ratio = 3.0 
-    
     sl_price = entry_price - risk_per_share if direction == 'LONG' else entry_price + risk_per_share
     tp1_price = entry_price + (risk_per_share * tp1_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp1_ratio)
     tp2_price = entry_price + (risk_per_share * tp2_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp2_ratio)
-    
     tp1_hit = False
     
-    # 1. EARLY EXIT (Bar 1)
+    # EARLY EXIT
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
@@ -121,7 +119,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
                 return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
 
-    # 2. FAILED FOLLOW-THROUGH (Bar 2)
+    # FAILED FOLLOW-THROUGH
     if entry_index + 2 < len(df):
         c1 = df.iloc[entry_index + 1]
         c2 = df.iloc[entry_index + 2]
@@ -132,7 +130,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
             if min(c1['low'], c2['low']) >= entry_price:
                 return {"outcome": "FAILED_FT", "r_realized": -0.15, "bars": 2, "info": "No LL"}
 
-    # 3. MANAGEMENT LOOP
+    # MANAGEMENT LOOP
     for j in range(1, 12): 
         if entry_index + j >= len(df): break
         row = df.iloc[entry_index + j]
@@ -184,15 +182,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V6.2 - ACCEPTANCE ENTRY)
+# 4. EJECUCIÓN (V6.3 - PRODUCTION CANDIDATE)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 18 
 
-def run_v6_2_acceptance_test():
-    print("--- ORANGE PI LAB: V6.2 (ACCEPTANCE ENTRY) ---")
+def run_v6_3_production_test():
+    print("--- ORANGE PI LAB: V6.3 (PRODUCTION CANDIDATE) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -201,19 +199,18 @@ def run_v6_2_acceptance_test():
     current_cooldown = 12 
     trade_log = []
     
-    print(f"\n--- INICIANDO BACKTEST (CONFIRMATION CANDLE) ---")
+    print(f"\n--- INICIANDO BACKTEST (QUALITY FILTER) ---")
     
     for i in range(500, len(df)):
         if i - last_trade_index < current_cooldown: continue
-        row = df.iloc[i] # VELA DE ENTRADA (Confirmation)
-        prev_row = df.iloc[i-1] # VELA DE SETUP (Rejection)
+        row = df.iloc[i] # Vela de Entrada (Confirmación)
+        prev_row = df.iloc[i-1] # Vela de Setup (Rechazo)
         
-        # Filtros Globales (sobre vela actual)
+        # Filtros Globales
         if not is_core_session(row['timestamp']): continue
         if row['ATR'] < row['ATR_Threshold']: continue 
         
-        # Zonas (basadas en datos hasta i-1 para no repintar en setup, o i es igual)
-        zones = get_volume_profile_zones(df.iloc[i-289:i-1]) # Perfil previo al setup
+        zones = get_volume_profile_zones(df.iloc[i-289:i-1]) 
         if not zones: continue
         vah, val = zones['VAH'], zones['VAL']
         
@@ -221,36 +218,42 @@ def run_v6_2_acceptance_test():
         is_long = False
         is_short = False
         
-        # --- LÓGICA V6.2 ---
+        # --- LÓGICA V6.3 ---
         
-        # 1. ANALISIS VELA PREVIA (SETUP)
-        # ¿Tocó la zona y rebotó?
+        # Setup Candles
         setup_long = (prev_row['low'] <= val) and (prev_row['close'] > val)
         setup_short = (prev_row['high'] >= vah) and (prev_row['close'] < vah)
+        if not (setup_long or setup_short): continue 
         
-        if not (setup_long or setup_short): continue # Si no hubo setup ayer, no hay trade hoy
+        # Quality Check de la Vela de Entrada (Confirmación)
+        # Queremos que la confirmación tenga un cuerpo decente (>40%)
+        # Si confirmamos con un Doji, es debilidad.
+        c_range = row['high'] - row['low']
+        if c_range == 0: continue
+        c_body = abs(row['close'] - row['open'])
+        body_strength = c_body / c_range
         
-        # 2. ANALISIS VELA ACTUAL (CONFIRMATION / ACCEPTANCE)
+        # --- AJUSTE 1: CONFIRMATION QUALITY ---
+        if body_strength < 0.40: continue # La vela de disparo debe tener intención
         
+        # --- AJUSTE 2: RSI ROOM ---
+        rsi_long_limit = 45 # Antes 48
+        rsi_short_limit = 55 # Antes 52
+
         if setup_long:
-            # Acceptance:
-            # - Low encima de VAL (Soporte validado)
-            # - Close rompe High previo (Momentum)
-            # - Delta Positivo
+            # Acceptance: Low > VAL | Close > Prev High | Delta > 0
             if row['low'] > val and row['close'] > prev_row['high'] and row['delta_norm'] > 0:
-                is_long = True
-                entry_signal = 'LONG'
+                if row['RSI'] < rsi_long_limit:
+                    is_long = True
+                    entry_signal = 'LONG'
                 
         elif setup_short:
-            # Acceptance:
-            # - High debajo de VAH (Resistencia validada)
-            # - Close rompe Low previo (Momentum)
-            # - Delta Negativo
+            # Acceptance: High < VAH | Close < Prev Low | Delta < 0
             if row['high'] < vah and row['close'] < prev_row['low'] and row['delta_norm'] < 0:
-                is_short = True
-                entry_signal = 'SHORT'
+                if row['RSI'] > rsi_short_limit:
+                    is_short = True
+                    entry_signal = 'SHORT'
         
-        # Si tenemos señal confirmada, ejecutamos gestión
         if entry_signal:
             zone_level = val if entry_signal == 'LONG' else vah
             res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
@@ -286,7 +289,7 @@ def run_v6_2_acceptance_test():
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("V6.2 - ACCEPTANCE ENTRY (FINAL CHECK)")
+    print("V6.3 - PRODUCTION CANDIDATE (FINAL)")
     print("="*50)
     print(f"Total Trades:   {len(df_res)}")
     print(f"TOTAL R NETO:   {total_r_net:.2f} R")
@@ -304,4 +307,4 @@ def run_v6_2_acceptance_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_v6_2_acceptance_test()
+    run_v6_3_production_test()
