@@ -5,13 +5,14 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. UTILIDADES Y DESCARGA (BTC ONLY)
+# 1. UTILIDADES Y DESCARGA MASIVA (50k)
 # ---------------------------------------------------------
 
-def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=15000):
+def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=50000):
     exchange = ccxt.binance()
     limit_per_call = 1000
-    print(f"📡 {symbol}: Descargando historial ({total_candles} velas)...")
+    print(f"📡 {symbol}: Descargando historial masivo ({total_candles} velas)...")
+    print("   Esto tomará unos minutos. Paciencia...")
     
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit_per_call)
     all_ohlcv = ohlcv
@@ -25,11 +26,14 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
             new_batch = [x for x in new_batch if x[0] < oldest_timestamp]
             if not new_batch: break
             all_ohlcv = new_batch + all_ohlcv
-            if len(all_ohlcv) % 5000 == 0:
-                print(f"   ... {len(all_ohlcv)} velas")
+            
+            if len(all_ohlcv) % 10000 == 0:
+                print(f"   ... {len(all_ohlcv)} velas cargadas")
             time.sleep(0.15) 
         except Exception as e:
+            print(f"Error descarga: {e}")
             break
+            
     if len(all_ohlcv) > total_candles:
         all_ohlcv = all_ohlcv[-total_candles:]
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -37,7 +41,7 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
     return df
 
 # ---------------------------------------------------------
-# 2. INDICADORES (CON ATR RELAJADO)
+# 2. INDICADORES
 # ---------------------------------------------------------
 
 def calculate_indicators(df):
@@ -59,7 +63,7 @@ def calculate_indicators(df):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=14).mean()
     
-    # --- CAMBIO 1: ATR THRESHOLD RELAJADO (0.25) ---
+    # ATR Threshold (Percentil 0.25 - Mantenemos V5.4)
     df['ATR_Threshold'] = df['ATR'].rolling(window=500).quantile(0.25)
     
     return df
@@ -83,7 +87,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V5.4 - UNCHAINED)
+# 3. GESTIÓN (V5.5 - NO CHANGES HERE)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -97,14 +101,11 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     
     tp1_hit = False
     
-    # 1. EARLY EXIT RELAJADO
+    # EARLY EXIT (25% Tolerance)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
-        
-        # --- CAMBIO 3: TOLERANCIA AUMENTADA (25%) ---
         tolerance = abs(entry_delta) * 0.25
-        
         potential_early_exit = False
         if direction == 'LONG':
             if next_delta < -tolerance and next_candle['close'] < entry_price: potential_early_exit = True
@@ -125,12 +126,11 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
                 return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
 
-    # 2. MANAGEMENT
+    # MANAGEMENT
     for j in range(1, 12): 
         if entry_index + j >= len(df): break
         row = df.iloc[entry_index + j]
         curr_low, curr_high, curr_close = row['low'], row['high'], row['close']
-        
         current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
         current_r = current_pnl / risk_per_share
 
@@ -149,7 +149,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
-            # CVD GUARD
+            # CVD GUARD (Management Filter)
             if not tp1_hit and curr_high >= tp1_price:
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
@@ -168,7 +168,6 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
-            # CVD GUARD
             if not tp1_hit and curr_low <= tp1_price:
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
@@ -188,28 +187,31 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V5.4 - UNCHAINED)
+# 4. EJECUCIÓN (V5.5 - ASYMMETRIC ENTRY)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 14 <= hour <= 16
 
-def run_unchained_test():
-    print("--- ORANGE PI LAB: V5.4 (UNCHAINED HUNTER) ---")
-    df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
+def run_v5_5_massive_test():
+    print("--- ORANGE PI LAB: V5.5 (50K CANDLES + RELAXED ENTRY) ---")
+    # Descarga MASIVA 
+    df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
     
     last_trade_index = -999
+    current_cooldown = 12 
     trade_log = []
     
-    print(f"\n--- INICIANDO BACKTEST (RELAJADO) ---")
+    print(f"\n--- INICIANDO BACKTEST (6 MESES APROX) ---")
     
     for i in range(500, len(df)):
-        if i - last_trade_index < 12: continue
+        if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         
+        # Filtros Estructurales (SE MANTIENEN)
         if not is_core_session(row['timestamp']): continue
         if row['ATR'] < row['ATR_Threshold']: continue 
         
@@ -224,18 +226,24 @@ def run_unchained_test():
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
-        # --- CAMBIO 2: GATEKEEPER 0.5 ATR ---
+        # GATEKEEPER (0.5 ATR)
         penetration_threshold = 0.50 
         
+        # --- CAMBIO CLAVE: ENTRADA RELAJADA (SIN CVD) ---
         if is_long:
-            if prev_row['close'] < val: continue 
+            if prev_row['close'] < val: continue # Falling Knife
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
-            if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
+            
+            # RSI < 48 (antes 45) | Delta > 0 | CVD ELIMINADO
+            if row['RSI'] < 48 and row['delta_norm'] > 0:
                 entry_signal = 'LONG'
+                
         elif is_short:
-            if prev_row['close'] > vah: continue
+            if prev_row['close'] > vah: continue # Rising Knife
             if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
-            if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
+            
+            # RSI > 52 (antes 55) | Delta < 0 | CVD ELIMINADO
+            if row['RSI'] > 52 and row['delta_norm'] < 0:
                 entry_signal = 'SHORT'
                 
         if entry_signal:
@@ -256,7 +264,12 @@ def run_unchained_test():
                 "r_net": final_r,
             }
             trade_log.append(trade_data)
+            
             last_trade_index = i
+            if res['outcome'] in ['EARLY_EXIT', 'STAGNANT']:
+                current_cooldown = 2
+            else:
+                current_cooldown = 12
 
     # --- REPORTE ---
     if not trade_log:
@@ -270,20 +283,18 @@ def run_unchained_test():
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("UNCHAINED HUNTER (V5.4)")
+    print("V5.5 - ASYMMETRIC ENTRY (50K CANDLES)")
     print("="*50)
-    print(f"Total Trades: {len(df_res)}")
-    print(f"TOTAL R NETO: {total_r_net:.2f} R")
+    print(f"Periodo:        {df['timestamp'].iloc[0]} -> {df['timestamp'].iloc[-1]}")
+    print(f"Total Trades:   {len(df_res)}")
+    print(f"TOTAL R NETO:   {total_r_net:.2f} R")
     print("-" * 50)
     print(f"SCRATCHES:      {len(df_scratches)}")
     print(f"EJECUTADOS:     {len(df_exec)}")
     
     if not df_exec.empty:
-        # Profit solo de los ejecutados
         exec_profit = df_exec['r_net'].sum()
         print(f"PROFIT EJEC:    {exec_profit:.2f} R")
-        
-        # Expectancy Global
         exp_total = total_r_net / len(df_res)
         print(f"EXPECTANCY TOT: {exp_total:.3f} R / trade")
 
@@ -291,4 +302,4 @@ def run_unchained_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_unchained_test()
+    run_v5_5_massive_test()
