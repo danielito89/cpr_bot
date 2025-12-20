@@ -82,7 +82,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V5.9/6.0 - INTACTA)
+# 3. GESTIÓN (V6.1 - MOMENTUM ENFORCER)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -94,7 +94,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     tp2_price = entry_price + (risk_per_share * tp2_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp2_ratio)
     tp1_hit = False
     
-    # EARLY EXIT
+    # 1. EARLY EXIT (Bar 1)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
@@ -119,7 +119,34 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
                 return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
 
-    # MANAGEMENT
+    # --- 2. FAILED FOLLOW-THROUGH (V6.1 - Bar 2 Check) ---
+    if entry_index + 2 < len(df):
+        c1 = df.iloc[entry_index + 1]
+        c2 = df.iloc[entry_index + 2]
+        
+        # Check simple: Si en las primeras 2 velas no logramos superar el precio de entrada, CORTAR.
+        if direction == 'LONG':
+            # Si el máximo de las 2 velas no supera la entrada, no hay "Higher High" local relativo a entrada.
+            # Estamos bajo el agua desde el inicio.
+            if max(c1['high'], c2['high']) <= entry_price:
+                return {
+                    "outcome": "FAILED_FT",
+                    "r_realized": -0.15,
+                    "bars": 2,
+                    "info": "No HH after entry"
+                }
+
+        if direction == 'SHORT':
+            # Si el mínimo de las 2 velas no rompe la entrada, no hay "Lower Low".
+            if min(c1['low'], c2['low']) >= entry_price:
+                return {
+                    "outcome": "FAILED_FT",
+                    "r_realized": -0.15,
+                    "bars": 2,
+                    "info": "No LL after entry"
+                }
+
+    # 3. MANAGEMENT (Loop Principal)
     for j in range(1, 12): 
         if entry_index + j >= len(df): break
         row = df.iloc[entry_index + j]
@@ -171,16 +198,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V6.0 - THE SCALABLE SNIPER)
+# 4. EJECUCIÓN (V6.1 - MOMENTUM ENFORCER)
 # ---------------------------------------------------------
 
-# --- CAMBIO 3: SESIÓN EXPANDIDA ---
 def is_core_session(timestamp):
     hour = timestamp.hour
-    return 13 <= hour <= 18 # 13:00 - 18:59
+    return 13 <= hour <= 18 
 
-def run_v6_0_scalable_test():
-    print("--- ORANGE PI LAB: V6.0 (THE SCALABLE SNIPER) ---")
+def run_v6_1_fft_test():
+    print("--- ORANGE PI LAB: V6.1 (MOMENTUM ENFORCER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -189,13 +215,13 @@ def run_v6_0_scalable_test():
     current_cooldown = 12 
     trade_log = []
     
-    print(f"\n--- INICIANDO BACKTEST (FILTROS CALIBRADOS) ---")
+    print(f"\n--- INICIANDO BACKTEST (FFT ACTIVE) ---")
     
     for i in range(500, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         
-        # Filtros Base
+        # Filtros Base V6.0
         if not is_core_session(row['timestamp']): continue
         if row['ATR'] < row['ATR_Threshold']: continue 
         
@@ -203,15 +229,15 @@ def run_v6_0_scalable_test():
         if not zones: continue
         vah, val = zones['VAH'], zones['VAL']
         
-        # Filtro 1: Impulse (V5.8)
+        # Filtro 1: Impulse
         impulse_move = abs(row['close'] - df.iloc[i-6]['open'])
         if impulse_move < (row['ATR'] * 1.5): continue
 
-        # --- CAMBIO 1: DECELERATION RELAJADO (1.25) ---
+        # Filtro 2: Deceleration (1.25)
         last_3_ranges = (df.iloc[i-3:i]['high'] - df.iloc[i-3:i]['low']).mean()
         if last_3_ranges > (row['ATR'] * 1.25): continue 
 
-        # --- CAMBIO 2: CONVICTION RELAJADO (0.48) ---
+        # Filtro 3: Conviction (0.48)
         c_range = row['high'] - row['low']
         c_body = abs(row['close'] - row['open'])
         if c_range == 0: continue
@@ -227,12 +253,9 @@ def run_v6_0_scalable_test():
 
         if is_long:
             if row['low'] > (val + edge_zone): continue 
-            # Reclaim Logic
             if df.iloc[i-1]['close'] < val: continue 
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
             if row['close'] <= val: continue
-            # Strong Close check is now implicit in Conviction Filter above (0.48)
-            # but we keep direction check
             if ((row['close'] - row['low']) / c_range) < 0.48: continue
 
             if row['RSI'] < 48 and row['delta_norm'] > 0:
@@ -240,12 +263,10 @@ def run_v6_0_scalable_test():
                 
         elif is_short:
             if row['high'] < (vah - edge_zone): continue
-            # Reclaim Logic
             if df.iloc[i-1]['close'] > vah: continue
             if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
             if row['close'] >= vah: continue
-            
-            if ((row['close'] - row['low']) / c_range) > 0.52: continue # 1 - 0.48
+            if ((row['close'] - row['low']) / c_range) > 0.52: continue
             
             if row['RSI'] > 52 and row['delta_norm'] < 0:
                 entry_signal = 'SHORT'
@@ -254,8 +275,8 @@ def run_v6_0_scalable_test():
             zone_level = val if entry_signal == 'LONG' else vah
             res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
             
-            # Smart Fees
-            if res['outcome'] in ['EARLY_EXIT', 'STAGNANT']: fee = 0.015
+            # Smart Fees (FFT is also cheap)
+            if res['outcome'] in ['EARLY_EXIT', 'STAGNANT', 'FAILED_FT']: fee = 0.015
             else: fee = 0.045
             final_r = res['r_realized'] - fee
             
@@ -268,7 +289,7 @@ def run_v6_0_scalable_test():
             trade_log.append(trade_data)
             
             last_trade_index = i
-            if res['outcome'] in ['EARLY_EXIT', 'STAGNANT']:
+            if res['outcome'] in ['EARLY_EXIT', 'STAGNANT', 'FAILED_FT']:
                 current_cooldown = 2
             else:
                 current_cooldown = 12
@@ -279,13 +300,13 @@ def run_v6_0_scalable_test():
         return
 
     df_res = pd.DataFrame(trade_log)
-    df_scratches = df_res[df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])]
-    df_exec = df_res[~df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])]
+    df_scratches = df_res[df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT', 'FAILED_FT'])]
+    df_exec = df_res[~df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT', 'FAILED_FT'])]
     
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("V6.0 - THE SCALABLE SNIPER (FINAL)")
+    print("V6.1 - MOMENTUM ENFORCER (50K CANDLES)")
     print("="*50)
     print(f"Total Trades:   {len(df_res)}")
     print(f"TOTAL R NETO:   {total_r_net:.2f} R")
@@ -303,4 +324,4 @@ def run_v6_0_scalable_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_v6_0_scalable_test()
+    run_v6_1_fft_test()
