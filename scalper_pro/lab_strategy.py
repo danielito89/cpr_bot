@@ -80,63 +80,45 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN "STRUCTURAL HYBRID" (V4.4)
+# 3. GESTIÓN (V4.4 - STRUCTURAL HYBRID) - SIN CAMBIOS
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
-    """
-    Ahora recibe 'zone_level' para validar ruptura estructural.
-    """
     risk_per_share = atr_value * 1.5 
     tp1_ratio = 0.8
-    
     sl_price = entry_price - risk_per_share if direction == 'LONG' else entry_price + risk_per_share
     tp1_price = entry_price + (risk_per_share * tp1_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp1_ratio)
     tp2_price = entry_price + (risk_per_share * 2.0) if direction == 'LONG' else entry_price - (risk_per_share * 2.0)
-    
     tp1_hit = False
     
-    # 1. HYBRID EARLY EXIT (Cost Control + Structural Integrity)
+    # HYBRID EARLY EXIT
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
         tolerance = abs(entry_delta) * 0.10
-        
         potential_early_exit = False
         
-        # A. Trigger Técnico (Delta + Precio en contra)
         if direction == 'LONG':
-            if next_delta < -tolerance and next_candle['close'] < entry_price:
-                potential_early_exit = True
+            if next_delta < -tolerance and next_candle['close'] < entry_price: potential_early_exit = True
         elif direction == 'SHORT':
-            if next_delta > tolerance and next_candle['close'] > entry_price:
-                potential_early_exit = True
+            if next_delta > tolerance and next_candle['close'] > entry_price: potential_early_exit = True
         
         if potential_early_exit:
-            # Calcular R Actual
             exit_price = next_candle['close']
             pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
             r_realized = pnl / risk_per_share
             
-            # B. Trigger Estructural (¿Rompió el nivel?)
-            # Buffer del 10% del ATR para evitar ruido de mechas milimétricas
             structural_break = False
             if direction == 'LONG':
-                if next_candle['low'] < (zone_level - atr_value * 0.1):
-                    structural_break = True
+                if next_candle['low'] < (zone_level - atr_value * 0.1): structural_break = True
             elif direction == 'SHORT':
-                if next_candle['high'] > (zone_level + atr_value * 0.1):
-                    structural_break = True
+                if next_candle['high'] > (zone_level + atr_value * 0.1): structural_break = True
             
-            # --- DECISIÓN FINAL HÍBRIDA ---
-            # Salimos si es barato (>= -0.35R) O si la estructura se rompió (structural_break)
             if r_realized >= -0.35 or structural_break:
                 reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
                 return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
-            else:
-                pass # Es caro y la estructura aguanta -> HOLD.
 
-    # 2. GESTIÓN NORMAL
+    # NORMAL MANAGEMENT
     for j in range(1, 9):
         if entry_index + j >= len(df): break
         row = df.iloc[entry_index + j]
@@ -152,7 +134,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
             if not tp1_hit and curr_high >= tp1_price:
                 tp1_hit = True
                 sl_price = entry_price 
-        else: # SHORT
+        else:
             if curr_high >= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
@@ -163,24 +145,22 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 tp1_hit = True
                 sl_price = entry_price 
 
-    # 3. TIME STOP
     exit_price = df.iloc[entry_index + 8]['close'] if entry_index + 8 < len(df) else df.iloc[-1]['close']
     pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
     r_realized = pnl / risk_per_share
     if tp1_hit: r_realized = max(r_realized, 0.4) 
-    
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN
+# 4. EJECUCIÓN (V4.5 - THE GATEKEEPER)
 # ---------------------------------------------------------
 
 def is_ny_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 17
 
-def run_lab_test_v4_4():
-    print("--- ORANGE PI LAB: STRATEGY V4.4 (STRUCTURAL HYBRID) ---")
+def run_lab_test_v4_5():
+    print("--- ORANGE PI LAB: STRATEGY V4.5 (GATEKEEPER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=4000)
     
     print("Calculando indicadores...")
@@ -195,12 +175,11 @@ def run_lab_test_v4_4():
     
     trade_log = []
     
-    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS (NY SESSION) ---")
+    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS (NY SESSION + PENETRATION FILTER) ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
-        
         if not is_ny_session(row['timestamp']): continue
         if row['ATR'] < 50: continue 
         
@@ -212,17 +191,32 @@ def run_lab_test_v4_4():
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
+        # --- FILTRO V4.5: PENETRATION CHECK ---
+        # Si la vela penetró demasiado la zona, es Aceptación, no Rechazo.
+        penetration_threshold = 0.30 # 30% del ATR
+        
         if is_long:
+            # Cuánto bajó la mecha por debajo del VAL
+            penetration = val - row['low']
+            if penetration > (row['ATR'] * penetration_threshold):
+                # print(f"DEBUG: Filtro Long activado en {row['timestamp']}. Penetracion excesiva.")
+                continue # Skip trade
+            
             if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
                 entry_signal = 'LONG'
+                
         elif is_short:
+            # Cuánto subió la mecha por encima del VAH
+            penetration = row['high'] - vah
+            if penetration > (row['ATR'] * penetration_threshold):
+                # print(f"DEBUG: Filtro Short activado en {row['timestamp']}. Penetracion excesiva.")
+                continue # Skip trade
+
             if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
                 entry_signal = 'SHORT'
                 
         if entry_signal:
-            # Pasar ZONE LEVEL (VAL para Long, VAH para Short)
             zone_level = val if entry_signal == 'LONG' else vah
-            
             res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
             
             trade_data = {
@@ -254,7 +248,7 @@ def run_lab_test_v4_4():
     df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.4 - STRUCTURAL HYBRID)")
+    print("ESTADÍSTICAS FINALES (V4.5 - THE GATEKEEPER)")
     print("="*50)
     
     scratches_cost = df_scratch['r'].mean() if not df_scratch.empty else 0.0
@@ -276,4 +270,4 @@ def run_lab_test_v4_4():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_4()
+    run_lab_test_v4_5()
