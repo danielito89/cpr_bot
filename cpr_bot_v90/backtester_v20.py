@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V300 (Trend Scalper - EMA/RSI Pullback)
+# NIVEL: V302 (NY Momentum Scalp)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -9,26 +9,26 @@ import pandas as pd
 import numpy as np
 import asyncio
 import logging
-import talib 
 import argparse
+import talib # Asegúrate de tener esto instalado, si no, avísame.
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
-TIMEFRAME = '15m' # <--- CLAVE: 15 MINUTOS PARA SCALP V300
+TIMEFRAME = '15m' # <--- SCALPING REQUIERE 15M
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
 try:
-    # IMPORTAMOS EL RISK MANAGER DE SCALP V300
-    from bot_core.risk_scalp import RiskManager
+    # IMPORTAMOS EL RISK MANAGER DE MOMENTUM V302
+    from bot_core.risk_momentum import RiskManager
     from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
 except ImportError as e:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
-        from cpr_bot_v90.bot_core.risk_scalp import RiskManager
+        from cpr_bot_v90.bot_core.risk_momentum import RiskManager
         from cpr_bot_v90.bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
     except ImportError:
         print(f"❌ Error importando bot_core: {e}")
@@ -218,8 +218,9 @@ class BacktesterV19:
             target_start = pd.to_datetime(self.start_date)
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
-
-            # --- INDICADORES V302 (MOMENTUM) ---
+            
+            # --- INDICADORES MOMENTUM V302 ---
+            
             # 1. ADX (Fuerza de Tendencia)
             df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14).shift(1)
             
@@ -227,27 +228,7 @@ class BacktesterV19:
             df['donchian_high'] = df['high'].rolling(4).max().shift(1)
             df['donchian_low'] = df['low'].rolling(4).min().shift(1)
             
-            # 3. ATR (Para SL/TP)
-            tr = pd.concat([...], axis=1).max(axis=1) # (Tu cálculo actual de TR)
-            df['atr'] = tr.rolling(14).mean().shift(1)
-
-            # --- INDICADORES SCALP V300 ---
-            
-            # 1. EMAs para Tendencia
-            df['ema_50'] = df['close'].ewm(span=50).mean().shift(1)
-            df['ema_200'] = df['close'].ewm(span=200).mean().shift(1)
-            
-            # 2. RSI (14)
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).fillna(0)
-            loss = (-delta.where(delta < 0, 0)).fillna(0)
-            avg_gain = gain.rolling(window=14).mean()
-            avg_loss = loss.rolling(window=14).mean()
-            rs = avg_gain / avg_loss
-            df['rsi'] = 100 - (100 / (1 + rs))
-            df['rsi'] = df['rsi'].shift(1) # Shift para no ver el futuro
-
-            # 3. ATR (Para SL/TP)
+            # 3. ATR (Para SL/TP) - FORMULA COMPLETA
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
@@ -263,7 +244,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V300 (Scalp Pullback)")
+        print(f"\n🛡️ INICIANDO BACKTEST V302 (NY Momentum Scalp)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date} | TF: {self.timeframe}")
         print("-" * 60)
         
@@ -304,7 +285,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V300 (Scalp Pullback) - {self.symbol}")
+        print(f"📊 REPORTE V302 (NY Momentum Scalp) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
