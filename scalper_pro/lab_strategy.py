@@ -82,7 +82,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V5.6 - THE RECLAIM SPECIALIST)
+# 3. GESTIÓN (V5.7 - EDGE SNIPER)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -142,7 +142,6 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
-            # CVD GUARD
             if not tp1_hit and curr_high >= tp1_price:
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
@@ -161,7 +160,6 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
-            # CVD GUARD
             if not tp1_hit and curr_low <= tp1_price:
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
@@ -181,15 +179,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V5.6 - STRONG CLOSE)
+# 4. EJECUCIÓN (V5.7 - LOCATION FILTER)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 14 <= hour <= 16
 
-def run_v5_6_strong_close_test():
-    print("--- ORANGE PI LAB: V5.6 (STRONG CLOSE FILTER) ---")
+def run_v5_7_edge_sniper_test():
+    print("--- ORANGE PI LAB: V5.7 (EDGE SNIPER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -220,38 +218,42 @@ def run_v5_6_strong_close_test():
         
         penetration_threshold = 0.50 
         
-        # --- NUEVO FILTRO: STRONG CLOSE (TIMING) ---
-        # Exigimos que la vela cierre en el tercio favorable de su rango.
-        # Candle Range
+        # --- FILTRO V5.7: VA EDGE ONLY (25%) ---
+        va_range = vah - val
+        edge_zone = va_range * 0.25
+        
+        # Candle Range para Strong Close
         c_range = (row['high'] - row['low'])
         if c_range == 0: continue
-        
+
         if is_long:
-            # 1. Knife Logic
+            # 1. Location (Edge Check)
+            # El precio debe haber visitado la zona baja profunda (VAL + 25%)
+            if row['low'] > (val + edge_zone): continue 
+            
+            # 2. Knife + Reclaim + Penetration
             if prev_row['close'] < val: continue 
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
+            if row['close'] <= val: continue 
             
-            # 2. Reclaim Real
-            if row['close'] <= val: continue # Debe cerrar dentro de la zona (reclamar)
-
-            # 3. Strong Close (Top 40%)
-            close_position = (row['close'] - row['low']) / c_range
-            if close_position < 0.60: continue # Rechazo débil, ignorar.
+            # 3. Strong Close
+            if ((row['close'] - row['low']) / c_range) < 0.60: continue
 
             if row['RSI'] < 48 and row['delta_norm'] > 0:
                 entry_signal = 'LONG'
                 
         elif is_short:
-            # 1. Knife Logic
+            # 1. Location (Edge Check)
+            # El precio debe haber visitado la zona alta profunda (VAH - 25%)
+            if row['high'] < (vah - edge_zone): continue
+
+            # 2. Knife + Reclaim + Penetration
             if prev_row['close'] > vah: continue 
             if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
-            
-            # 2. Reclaim Real
-            if row['close'] >= vah: continue # Debe cerrar dentro de la zona
+            if row['close'] >= vah: continue 
 
-            # 3. Strong Close (Bottom 40%)
-            close_position = (row['close'] - row['low']) / c_range
-            if close_position > 0.40: continue # Rechazo débil, ignorar.
+            # 3. Strong Close
+            if ((row['close'] - row['low']) / c_range) > 0.40: continue
             
             if row['RSI'] > 52 and row['delta_norm'] < 0:
                 entry_signal = 'SHORT'
@@ -293,7 +295,7 @@ def run_v5_6_strong_close_test():
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("V5.6 - STRONG CLOSE FILTER (TIMING FIX)")
+    print("V5.7 - EDGE SNIPER (FINAL CANDIDATE)")
     print("="*50)
     print(f"Total Trades:   {len(df_res)}")
     print(f"TOTAL R NETO:   {total_r_net:.2f} R")
@@ -311,4 +313,4 @@ def run_v5_6_strong_close_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_v5_6_strong_close_test()
+    run_v5_7_edge_sniper_test()
