@@ -5,10 +5,10 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. UTILIDADES Y DESCARGA
+# 1. UTILIDADES Y DESCARGA (SOLO BTC)
 # ---------------------------------------------------------
 
-def fetch_history_for_pair(symbol, timeframe='5m', total_candles=15000):
+def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=15000):
     exchange = ccxt.binance()
     limit_per_call = 1000
     print(f"📡 {symbol}: Descargando historial ({total_candles} velas)...")
@@ -25,11 +25,11 @@ def fetch_history_for_pair(symbol, timeframe='5m', total_candles=15000):
             new_batch = [x for x in new_batch if x[0] < oldest_timestamp]
             if not new_batch: break
             all_ohlcv = new_batch + all_ohlcv
+            if len(all_ohlcv) % 5000 == 0:
+                print(f"   ... {len(all_ohlcv)} velas")
             time.sleep(0.15) 
         except Exception as e:
-            print(f"Error: {e}")
             break
-            
     if len(all_ohlcv) > total_candles:
         all_ohlcv = all_ohlcv[-total_candles:]
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -41,7 +41,6 @@ def fetch_history_for_pair(symbol, timeframe='5m', total_candles=15000):
 # ---------------------------------------------------------
 
 def calculate_indicators(df):
-    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).fillna(0)
     loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -50,12 +49,10 @@ def calculate_indicators(df):
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # Delta & CVD
     range_candle = (df['high'] - df['low']).replace(0, 0.000001)
     df['delta_norm'] = ((df['close'] - df['open']) / range_candle) * df['volume']
     df['cvd'] = df['delta_norm'].cumsum()
 
-    # ATR & Threshold
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -83,12 +80,11 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN V5.2 (CVD GUARD + FEES DUROS)
+# 3. GESTIÓN (V5.3 - BTC PRODUCTION)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
     risk_per_share = atr_value * 1.5 
-    
     tp1_ratio = 1.0 
     tp2_ratio = 3.0 
     
@@ -97,7 +93,6 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     tp2_price = entry_price + (risk_per_share * tp2_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp2_ratio)
     
     tp1_hit = False
-    late_tp1_triggered = False 
     
     # 1. EARLY EXIT
     if entry_index + 1 < len(df):
@@ -136,7 +131,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         # Stagnant Checks
         if j == 4 and not tp1_hit:
             if current_r < 0.10: return {"outcome": "STAGNANT", "r_realized": -0.05, "bars": j, "info": "Bar 4"}
-            if current_r >= 0.60: tp1_hit, sl_price, late_tp1_triggered = True, entry_price, True
+            if current_r >= 0.60: tp1_hit, sl_price = True, entry_price
 
         if j == 6 and not tp1_hit:
              if current_r < 0.20: return {"outcome": "STAGNANT", "r_realized": -0.15, "bars": j, "info": "Bar 6"}
@@ -146,24 +141,17 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
             if curr_low <= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
-                info = "Late TP1 BE" if late_tp1_triggered else "SL Hit"
-                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": info}
+                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
-            # --- V5.2 CVD GUARD ---
-            # Si tocamos TP1 pero no TP2 aún, chequear CVD para decidir si nos quedamos o nos vamos.
+            # CVD GUARD
             if not tp1_hit and curr_high >= tp1_price:
-                # Chequeo de CVD: ¿Está el CVD por encima del nivel de entrada? (Momentum a favor)
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
-                
-                cvd_strong = cvd_now > cvd_entry if direction == 'LONG' else cvd_now < cvd_entry
-                
-                if cvd_strong:
+                if cvd_now > cvd_entry:
                     tp1_hit = True
-                    sl_price = entry_price # Seguimos buscando TP2
+                    sl_price = entry_price 
                 else:
-                    # CVD Débil: Cobramos 1R y nos vamos.
-                    return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Divergence Exit"}
+                    return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Divergence"}
 
             if curr_high >= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": tp2_ratio, "bars": j, "info": "Target 3R"}
@@ -172,20 +160,17 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
             if curr_high >= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
-                info = "Late TP1 BE" if late_tp1_triggered else "SL Hit"
-                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": info}
+                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
             
-            # --- V5.2 CVD GUARD ---
+            # CVD GUARD
             if not tp1_hit and curr_low <= tp1_price:
                 cvd_now = df['cvd'].iloc[entry_index + j]
                 cvd_entry = df['cvd'].iloc[entry_index]
-                cvd_strong = cvd_now < cvd_entry # Para short queremos CVD bajando
-                
-                if cvd_strong:
+                if cvd_now < cvd_entry:
                     tp1_hit = True
                     sl_price = entry_price
                 else:
-                    return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Divergence Exit"}
+                    return {"outcome": "TP1_EXIT", "r_realized": 1.0, "bars": j, "info": "CVD Divergence"}
 
             if curr_low <= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": tp2_ratio, "bars": j, "info": "Target 3R"}
@@ -197,105 +182,117 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN MULTIPAIR
+# 4. EJECUCIÓN (V5.3 - SMART FEES)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 14 <= hour <= 16
 
-def run_multipair_test():
-    print("--- ORANGE PI LAB: MULTIPAIR VALIDATOR (V5.2) ---")
-    pairs = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
+def run_production_candidate_test():
+    print("--- ORANGE PI LAB: BTC PRODUCTION CANDIDATE (V5.3) ---")
+    df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
+    print("Calculando indicadores...")
+    df = calculate_indicators(df)
     
-    global_trade_log = []
+    last_trade_index = -999
+    trade_log = []
     
-    for symbol in pairs:
-        print(f"\nProcesando {symbol}...")
-        df = fetch_history_for_pair(symbol, '5m', total_candles=15000)
-        df = calculate_indicators(df)
+    print(f"\n--- INICIANDO BACKTEST (FEES INTELIGENTES) ---")
+    
+    for i in range(500, len(df)):
+        if i - last_trade_index < 12: continue
+        row = df.iloc[i]
         
-        last_trade_index = -999
-        trade_log = []
+        if not is_core_session(row['timestamp']): continue
+        if row['ATR'] < row['ATR_Threshold']: continue 
         
-        # Filtros iguales para todos
-        for i in range(500, len(df)):
-            if i - last_trade_index < 12: continue
-            row = df.iloc[i]
+        prev_row = df.iloc[i-1]
+        if (prev_row['high'] - prev_row['low']) > (row['ATR'] * 1.2): continue 
             
-            if not is_core_session(row['timestamp']): continue
-            if row['ATR'] < row['ATR_Threshold']: continue 
-            
-            prev_row = df.iloc[i-1]
-            if (prev_row['high'] - prev_row['low']) > (row['ATR'] * 1.2): continue 
+        zones = get_volume_profile_zones(df.iloc[i-288:i])
+        if not zones: continue
+        vah, val = zones['VAH'], zones['VAL']
+        
+        entry_signal = None
+        is_long = row['low'] <= val and row['close'] > val
+        is_short = row['high'] >= vah and row['close'] < vah
+        
+        # GATEKEEPER
+        if is_long:
+            if prev_row['close'] < val: continue 
+            if (val - row['low']) > (row['ATR'] * 0.3): continue
+            if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
+                entry_signal = 'LONG'
+        elif is_short:
+            if prev_row['close'] > vah: continue
+            if (row['high'] - vah) > (row['ATR'] * 0.3): continue
+            if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
+                entry_signal = 'SHORT'
                 
-            zones = get_volume_profile_zones(df.iloc[i-288:i])
-            if not zones: continue
-            vah, val = zones['VAH'], zones['VAL']
+        if entry_signal:
+            zone_level = val if entry_signal == 'LONG' else vah
+            res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
             
-            entry_signal = None
-            is_long = row['low'] <= val and row['close'] > val
-            is_short = row['high'] >= vah and row['close'] < vah
+            # --- SMART FEES ---
+            # Scratch = 0.015 R | Full Trade = 0.045 R
+            if res['outcome'] in ['EARLY_EXIT', 'STAGNANT']:
+                fee = 0.015
+            else:
+                fee = 0.045
+                
+            final_r = res['r_realized'] - fee
             
-            if is_long:
-                if prev_row['close'] < val: continue 
-                if (val - row['low']) > (row['ATR'] * 0.3): continue
-                if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
-                    entry_signal = 'LONG'
-            elif is_short:
-                if prev_row['close'] > vah: continue
-                if (row['high'] - vah) > (row['ATR'] * 0.3): continue
-                if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
-                    entry_signal = 'SHORT'
-                    
-            if entry_signal:
-                zone_level = val if entry_signal == 'LONG' else vah
-                res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
-                
-                # FEE 0.045
-                final_r = res['r_realized'] - 0.045
-                
-                trade_data = {
-                    "symbol": symbol,
-                    "time": row['timestamp'],
-                    "type": entry_signal,
-                    "outcome": res['outcome'],
-                    "r_net": final_r,
-                    "info": res['info']
-                }
-                trade_log.append(trade_data)
-                last_trade_index = i
+            trade_data = {
+                "time": row['timestamp'],
+                "type": entry_signal,
+                "outcome": res['outcome'],
+                "r_gross": res['r_realized'],
+                "r_net": final_r,
+                "fee": fee,
+                "info": res['info']
+            }
+            trade_log.append(trade_data)
+            last_trade_index = i
 
-        print(f"-> {symbol}: {len(trade_log)} trades encontrados.")
-        global_trade_log.extend(trade_log)
-
-    # --- REPORTE GLOBAL ---
-    if not global_trade_log:
-        print("\nNo se encontraron trades en ningún par.")
+    # --- REPORTE LIMPIO ---
+    if not trade_log:
+        print("\nNo se encontraron trades.")
         return
 
-    df_all = pd.DataFrame(global_trade_log)
+    df_res = pd.DataFrame(trade_log)
+    
+    # Separación Lógica
+    df_scratches = df_res[df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])]
+    df_exec = df_res[~df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])]
+    
+    total_r_net = df_res['r_net'].sum()
+    
+    # Costo de Filtrado
+    filter_cost = df_scratches['r_net'].sum() if not df_scratches.empty else 0
+    # Profit de Ejecución
+    execution_profit = df_exec['r_net'].sum() if not df_exec.empty else 0
     
     print("\n" + "="*50)
-    print("RESULTADOS GLOBALES MULTIPAIR (V5.2)")
+    print("BTC PRODUCTION CANDIDATE (V5.3)")
     print("="*50)
-    print(f"Total Trades: {len(df_all)}")
+    print(f"Total Trades: {len(df_res)}")
+    print(f"TOTAL R NETO: {total_r_net:.2f} R")
     
-    df_exec = df_all[~df_all['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])]
+    print("-" * 50)
+    print(f"SCRATCHES (Filtro):   {len(df_scratches)}")
+    print(f"COSTO FILTRADO:       {filter_cost:.2f} R")
+    print("-" * 50)
+    print(f"TRADES EJECUTADOS:    {len(df_exec)}")
+    print(f"PROFIT EJECUCIÓN:     {execution_profit:.2f} R")
     
-    total_r = df_all['r_net'].sum()
-    expectancy_total = total_r / len(df_all)
-    expectancy_exec = df_exec['r_net'].sum() / len(df_exec) if not df_exec.empty else 0
-    
-    print(f"TOTAL R NETO (w/High Fees): {total_r:.2f} R")
-    print(f"EXPECTANCY TOTAL:         {expectancy_total:.3f} R / trade")
-    print(f"EXPECTANCY EJECUTADA:     {expectancy_exec:.3f} R / trade")
-    
-    print("\nDesglose por Par:")
-    print(df_all.groupby('symbol')['r_net'].sum())
-    
+    if not df_exec.empty:
+        exec_win_rate = len(df_exec[df_exec['r_gross'] > 0]) / len(df_exec) * 100
+        print(f"WIN RATE (Ejecutado): {exec_win_rate:.1f}%")
+        print(f"EXPECTANCY (Ejec):    {execution_profit / len(df_exec):.3f} R / trade")
+
     print("\nDistribución de Outcomes:")
-    print(df_all['outcome'].value_counts())
+    print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_multipair_test()
+    run_production_candidate_test()
