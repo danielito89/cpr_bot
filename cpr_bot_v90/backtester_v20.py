@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V401 (NY Momentum Scalp)
+# NIVEL: V500 (Trend Swing Protected)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -10,25 +10,24 @@ import numpy as np
 import asyncio
 import logging
 import argparse
-import talib # Asegúrate de tener esto instalado, si no, avísame.
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
-TIMEFRAME = '15m' # <--- SCALPING REQUIERE 15M
+TIMEFRAME = '1h' # <--- V500: SWING TRADING 1H
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
 try:
-    # IMPORTAMOS EL RISK MANAGER DE MOMENTUM V302
-    from bot_core.risk_v400 import RiskManager
+    # IMPORTAMOS EL RISK MANAGER V500
+    from bot_core.risk_swing import RiskManager
     from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
 except ImportError as e:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
-        from cpr_bot_v90.bot_core.risk_v400 import RiskManager
+        from cpr_bot_v90.bot_core.risk_swing import RiskManager
         from cpr_bot_v90.bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
     except ImportError:
         print(f"❌ Error importando bot_core: {e}")
@@ -106,7 +105,7 @@ class BacktesterV19:
         self.risk_manager = RiskManager(self.controller)
         self.commission = 0.0006
         self.base_slippage = 0.0001
-        self.tp_splits = [1.0] # Salida única para Scalping
+        self.tp_splits = [1.0] # Salida única (Trailing se encarga)
 
     def calculate_dynamic_slippage(self, price, qty, candle_volume_usdt):
         if candle_volume_usdt <= 0: return 0.05
@@ -219,24 +218,27 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- INDICADORES V401 (VWAP RECLAIM) ---
+            # --- INDICADORES V500 (TREND SWING 1H) ---
             
-            # 1. EMA 200 (Tendencia Base)
+            # 1. EMAs para Tendencia y Pullbacks
+            df['ema_50'] = df['close'].ewm(span=50).mean().shift(1)
             df['ema_200'] = df['close'].ewm(span=200).mean().shift(1)
             
-            # 2. Rolling VWAP (24 horas = 96 velas de 15m)
-            # Aproximación algorítmica robusta del VWAP sin reset diario duro
-            v = df['volume']
-            tp = (df['high'] + df['low'] + df['close']) / 3
-            df['vwap'] = (tp * v).rolling(96).sum() / v.rolling(96).sum()
-            df['vwap'] = df['vwap'].shift(1) # Shift para no ver el futuro
+            # 2. Crash Monitor (Variación en 6 horas)
+            # pct_change(6) calcula el cambio respecto a 6 velas atrás
+            df['pct_change_6h'] = df['close'].pct_change(6).shift(1)
             
-            # 3. Estructura Reciente (Para SL Estructural)
-            # Mínimo/Máximo de las últimas 10 velas (2.5 horas)
-            df['struct_low'] = df['low'].rolling(10).min().shift(1)
-            df['struct_high'] = df['high'].rolling(10).max().shift(1)
-            
-            # 4. ATR (TP/Gestión)
+            # 3. RSI (14) - Momentum
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).fillna(0)
+            loss = (-delta.where(delta < 0, 0)).fillna(0)
+            avg_gain = gain.rolling(window=14).mean()
+            avg_loss = loss.rolling(window=14).mean()
+            rs = avg_gain / avg_loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+            df['rsi'] = df['rsi'].shift(1)
+
+            # 4. ATR (Para SL/Trailing)
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
@@ -252,7 +254,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V401 (NY Momentum Scalp)")
+        print(f"\n🛡️ INICIANDO BACKTEST V500 (Trend Swing Protected)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date} | TF: {self.timeframe}")
         print("-" * 60)
         
@@ -267,7 +269,7 @@ class BacktesterV19:
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             
             if self.state.is_in_position:
-                # --- GESTIÓN ACTIVA CONECTADA ---
+                # --- V500: GESTIÓN ACTIVA (CRASH MONITOR + TRAILING) ---
                 await self.risk_manager.check_position_state()
                 self.check_exits(row) 
 
@@ -293,7 +295,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V401 (NY Momentum Scalp) - {self.symbol}")
+        print(f"📊 REPORTE V500 (Trend Swing Protected) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
