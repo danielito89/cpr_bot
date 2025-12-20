@@ -5,59 +5,40 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. UTILIDADES Y DESCARGA EXTENDIDA
+# 1. UTILIDADES Y DESCARGA
 # ---------------------------------------------------------
 
 def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=4000):
-    """
-    Descarga más datos de los que permite una sola llamada (limit 1000).
-    Hace paginación hacia atrás.
-    """
     exchange = ccxt.binance()
-    all_ohlcv = []
-    current_since = None
-    
-    # Calculamos ms aprox por vela
-    timeframe_duration_seconds = 5 * 60 
     limit_per_call = 1000
-    
     print(f"📡 Descargando historial extendido ({total_candles} velas)...")
     
-    # 1. Primera llamada (más reciente)
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit_per_call)
     all_ohlcv = ohlcv
+    timeframe_duration_seconds = 5 * 60 
     
-    # 2. Llamadas siguientes hacia atrás
     while len(all_ohlcv) < total_candles:
-        # Tomamos el timestamp de la vela más antigua que tenemos
         oldest_timestamp = all_ohlcv[0][0]
-        # Restamos el tiempo necesario para traer el bloque anterior
         since_timestamp = oldest_timestamp - (limit_per_call * timeframe_duration_seconds * 1000)
-        
         try:
             new_batch = exchange.fetch_ohlcv(symbol, timeframe, limit=limit_per_call, since=since_timestamp)
-            # Filtramos para no duplicar (tomamos solo los menores al oldest)
             new_batch = [x for x in new_batch if x[0] < oldest_timestamp]
-            
-            if not new_batch: break # No hay más datos
-            
+            if not new_batch: break
             all_ohlcv = new_batch + all_ohlcv
             print(f"   ... Cargadas {len(all_ohlcv)} velas")
-            time.sleep(0.5) # Respetar API rate limit
+            time.sleep(0.2)
         except Exception as e:
-            print(f"Error fetching: {e}")
             break
             
-    # Recortar al límite solicitado
     if len(all_ohlcv) > total_candles:
         all_ohlcv = all_ohlcv[-total_candles:]
-        
+    
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
 
 # ---------------------------------------------------------
-# 2. INDICADORES (Mismos que V4)
+# 2. INDICADORES
 # ---------------------------------------------------------
 
 def calculate_rsi_manual(series, period=14):
@@ -101,32 +82,48 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN DE TRADE (Igual que V4)
+# 3. GESTIÓN "COST CUTTER" (V4.2)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta):
     risk_per_share = atr_value * 1.5 
+    
+    # AJUSTE C: TP1 más agresivo (0.8 R)
+    tp1_ratio = 0.8
+    
     sl_price = entry_price - risk_per_share if direction == 'LONG' else entry_price + risk_per_share
-    tp1_price = entry_price + (risk_per_share * 1.0) if direction == 'LONG' else entry_price - (risk_per_share * 1.0)
+    tp1_price = entry_price + (risk_per_share * tp1_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp1_ratio)
     tp2_price = entry_price + (risk_per_share * 2.0) if direction == 'LONG' else entry_price - (risk_per_share * 2.0)
     
     tp1_hit = False
     
-    # 1. EARLY EXIT CHECK
+    # 1. SMART EARLY EXIT (AJUSTE A)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
         tolerance = abs(entry_delta) * 0.10
         
-        early_exit_triggered = False
-        if direction == 'LONG' and next_delta < -tolerance: early_exit_triggered = True
-        if direction == 'SHORT' and next_delta > tolerance: early_exit_triggered = True
+        early_exit = False
         
-        if early_exit_triggered:
+        # CONDICIÓN: Delta Malo Y Precio Malo (Close vs Entry)
+        if direction == 'LONG':
+            # Solo salimos si delta es negativo Y cerramos por debajo de la entrada (perdiendo)
+            if next_delta < -tolerance and next_candle['close'] < entry_price:
+                early_exit = True
+        
+        if direction == 'SHORT':
+            # Solo salimos si delta es positivo Y cerramos por encima de la entrada (perdiendo)
+            if next_delta > tolerance and next_candle['close'] > entry_price:
+                early_exit = True
+        
+        if early_exit:
             exit_price = next_candle['close']
             pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
             r_realized = pnl / risk_per_share
-            return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": "Delta Reversal"}
+            
+            # (Opcional visual) Capeamos el reporte en -1R porque si es peor, es un SL técnico, no un scratch.
+            # Pero para ser honestos con la data, dejamos el valor real.
+            return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": "Delta+Price Fail"}
 
     # 2. GESTIÓN NORMAL
     for j in range(1, 9):
@@ -139,19 +136,23 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
+            
             if curr_high >= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
+            
             if not tp1_hit and curr_high >= tp1_price:
                 tp1_hit = True
-                sl_price = entry_price 
+                sl_price = entry_price # Breakeven Trigger
                 
         else: # SHORT
             if curr_high >= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
+            
             if curr_low <= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
+            
             if not tp1_hit and curr_low <= tp1_price:
                 tp1_hit = True
                 sl_price = entry_price 
@@ -160,27 +161,23 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     exit_price = df.iloc[entry_index + 8]['close'] if entry_index + 8 < len(df) else df.iloc[-1]['close']
     pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
     r_realized = pnl / risk_per_share
-    if tp1_hit: r_realized = max(r_realized, 0.5) 
+    
+    # Si cobramos TP1 (0.8R), y luego salimos por tiempo, asumimos que salimos un poco mejor que BE.
+    # Promedio conservador: 0.4R (mitad de TP1)
+    if tp1_hit: r_realized = max(r_realized, 0.4) 
     
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN CON FILTROS DE SESIÓN Y COOLDOWN INTELIGENTE
+# 4. EJECUCIÓN
 # ---------------------------------------------------------
 
 def is_ny_session(timestamp):
-    """
-    Retorna True si la hora es NY Open AM (aprox 13:00 - 17:00 UTC).
-    Ajusta según tu necesidad. Binance suele entregar UTC.
-    """
     hour = timestamp.hour
-    # Ventana de alta volatilidad: 13:00 a 17:00 UTC
     return 13 <= hour <= 17
 
-def run_lab_test_v4_1():
-    print("--- ORANGE PI LAB: STRATEGY V4.1 (SESSION + SMART COOLDOWN) ---")
-    
-    # 1. Descarga Extendida
+def run_lab_test_v4_2():
+    print("--- ORANGE PI LAB: STRATEGY V4.2 (COST CUTTER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=4000)
     
     print("Calculando indicadores...")
@@ -190,30 +187,26 @@ def run_lab_test_v4_1():
     
     last_trade_index = -999
     standard_cooldown = 12 
-    smart_cooldown = 2    # Si fue Early Exit, permitimos entrar rápido
+    smart_cooldown = 2
     current_cooldown = standard_cooldown
     
     trade_log = []
     
-    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS (SOLO NY SESSION) ---")
+    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS (NY SESSION + SMART EXIT) ---")
     
     for i in range(300, len(df)):
-        # Cooldown dinámico
         if i - last_trade_index < current_cooldown: continue
-        
         row = df.iloc[i]
         
-        # FILTRO DE SESIÓN (CRÍTICO)
         if not is_ny_session(row['timestamp']): continue
-        
         if row['ATR'] < 50: continue 
         
-        past_data = df.iloc[i-288:i]
-        zones = get_volume_profile_zones(past_data)
+        zones = get_volume_profile_zones(df.iloc[i-288:i])
         if not zones: continue
         vah, val = zones['VAH'], zones['VAL']
         
         entry_signal = None
+        # V3 Lógica de Entrada
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
@@ -239,46 +232,42 @@ def run_lab_test_v4_1():
             
             print(f"[{row['timestamp']}] {entry_signal:<5} | {res['outcome']:<10} | R: {res['r_realized']:.2f}")
             
-            # SMART COOLDOWN LOGIC
             last_trade_index = i
             if res['outcome'] == 'EARLY_EXIT':
-                current_cooldown = smart_cooldown # Reset rápido
+                current_cooldown = smart_cooldown
             else:
                 current_cooldown = standard_cooldown
 
-    # --- REPORTE PROFESIONAL ---
+    # --- REPORTE ---
     if not trade_log:
-        print("\nNo se encontraron trades en horario NY.")
+        print("\nNo se encontraron trades.")
         return
 
     df_res = pd.DataFrame(trade_log)
-    
-    # Separar Scratches de Real Trades
-    df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     df_scratch = df_res[df_res['outcome'] == 'EARLY_EXIT']
+    df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.1)")
+    print("ESTADÍSTICAS FINALES (V4.2 - COST CUTTER)")
     print("="*50)
-    print(f"Total Oportunidades: {len(df_res)}")
-    print(f"Scratches (Early Exit): {len(df_scratch)} (Costo prom: {df_scratch['r'].mean():.2f} R)")
-    print("-" * 50)
     
-    if len(df_valid) > 0:
-        total_r = df_valid['r'].sum() + df_scratch['r'].sum() # PnL total incluye costos de scratches
+    scratches_cost = df_scratch['r'].mean() if not df_scratch.empty else 0.0
+    print(f"Scratches: {len(df_scratch)} (Costo prom: {scratches_cost:.2f} R)")
+    
+    total_r = df_res['r'].sum()
+    expectancy = total_r / len(df_res)
+    
+    print("-" * 50)
+    if not df_valid.empty:
         win_rate = len(df_valid[df_valid['r'] > 0]) / len(df_valid) * 100
-        avg_bars = df_valid['bars'].mean()
-        
         print(f"TRADES VÁLIDOS:       {len(df_valid)}")
         print(f"WIN RATE (Válidos):   {win_rate:.1f}%")
-        print(f"DURACIÓN PROM:        {avg_bars:.1f} velas")
-        print(f"TOTAL R NETO:         {total_r:.2f} R")
-        print(f"EXPECTANCY TOTAL:     {total_r / len(df_res):.2f} R / intento")
-    else:
-        print("No hubo trades válidos (solo scratches).")
-        
-    print("\nDistribución de Resultados:")
+    
+    print(f"TOTAL R NETO:         {total_r:.2f} R")
+    print(f"EXPECTANCY TOTAL:     {expectancy:.2f} R / intento")
+    print("-" * 50)
+    print("Distribución:")
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_1()
+    run_lab_test_v4_2()
