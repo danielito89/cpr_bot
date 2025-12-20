@@ -82,13 +82,11 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN "COST CUTTER" (V4.2)
+# 3. GESTIÓN "DAMAGE CONTROL" (V4.3)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta):
     risk_per_share = atr_value * 1.5 
-    
-    # AJUSTE C: TP1 más agresivo (0.8 R)
     tp1_ratio = 0.8
     
     sl_price = entry_price - risk_per_share if direction == 'LONG' else entry_price + risk_per_share
@@ -97,33 +95,34 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     
     tp1_hit = False
     
-    # 1. SMART EARLY EXIT (AJUSTE A)
+    # 1. SMART EARLY EXIT (Limitado por Daño Máximo)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
         tolerance = abs(entry_delta) * 0.10
         
-        early_exit = False
+        potential_early_exit = False
         
-        # CONDICIÓN: Delta Malo Y Precio Malo (Close vs Entry)
+        # Check condiciones técnicas (Delta + Precio)
         if direction == 'LONG':
-            # Solo salimos si delta es negativo Y cerramos por debajo de la entrada (perdiendo)
             if next_delta < -tolerance and next_candle['close'] < entry_price:
-                early_exit = True
-        
-        if direction == 'SHORT':
-            # Solo salimos si delta es positivo Y cerramos por encima de la entrada (perdiendo)
+                potential_early_exit = True
+        elif direction == 'SHORT':
             if next_delta > tolerance and next_candle['close'] > entry_price:
-                early_exit = True
+                potential_early_exit = True
         
-        if early_exit:
+        if potential_early_exit:
+            # CALCULAR DAÑO PRIMERO
             exit_price = next_candle['close']
             pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
             r_realized = pnl / risk_per_share
             
-            # (Opcional visual) Capeamos el reporte en -1R porque si es peor, es un SL técnico, no un scratch.
-            # Pero para ser honestos con la data, dejamos el valor real.
-            return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": "Delta+Price Fail"}
+            # --- AJUSTE V4.3: SOLO SALIR SI EL DAÑO ES MENOR A -0.35 R ---
+            if r_realized >= -0.35:
+                return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": "Safe Scratch (<0.35R)"}
+            else:
+                # Si el daño es mayor, ignoramos la señal y dejamos que el sistema respire.
+                pass 
 
     # 2. GESTIÓN NORMAL
     for j in range(1, 9):
@@ -136,23 +135,18 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
-            
             if curr_high >= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
-            
             if not tp1_hit and curr_high >= tp1_price:
                 tp1_hit = True
-                sl_price = entry_price # Breakeven Trigger
-                
+                sl_price = entry_price 
         else: # SHORT
             if curr_high >= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
-            
             if curr_low <= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
-            
             if not tp1_hit and curr_low <= tp1_price:
                 tp1_hit = True
                 sl_price = entry_price 
@@ -161,9 +155,6 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     exit_price = df.iloc[entry_index + 8]['close'] if entry_index + 8 < len(df) else df.iloc[-1]['close']
     pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
     r_realized = pnl / risk_per_share
-    
-    # Si cobramos TP1 (0.8R), y luego salimos por tiempo, asumimos que salimos un poco mejor que BE.
-    # Promedio conservador: 0.4R (mitad de TP1)
     if tp1_hit: r_realized = max(r_realized, 0.4) 
     
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": "Time Out"}
@@ -176,8 +167,8 @@ def is_ny_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 17
 
-def run_lab_test_v4_2():
-    print("--- ORANGE PI LAB: STRATEGY V4.2 (COST CUTTER) ---")
+def run_lab_test_v4_3():
+    print("--- ORANGE PI LAB: STRATEGY V4.3 (DAMAGE CONTROL) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=4000)
     
     print("Calculando indicadores...")
@@ -192,7 +183,7 @@ def run_lab_test_v4_2():
     
     trade_log = []
     
-    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS (NY SESSION + SMART EXIT) ---")
+    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
@@ -206,7 +197,6 @@ def run_lab_test_v4_2():
         vah, val = zones['VAH'], zones['VAL']
         
         entry_signal = None
-        # V3 Lógica de Entrada
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
@@ -248,7 +238,7 @@ def run_lab_test_v4_2():
     df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.2 - COST CUTTER)")
+    print("ESTADÍSTICAS FINALES (V4.3 - DAMAGE CONTROL)")
     print("="*50)
     
     scratches_cost = df_scratch['r'].mean() if not df_scratch.empty else 0.0
@@ -270,4 +260,4 @@ def run_lab_test_v4_2():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_2()
+    run_lab_test_v4_3()
