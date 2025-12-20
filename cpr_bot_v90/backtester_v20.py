@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V500 (Trend Swing Protected)
+# NIVEL: v600 (Trend Swing Protected)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -16,12 +16,12 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
-TIMEFRAME = '1h' # <--- V500: SWING TRADING 1H
+TIMEFRAME = '1h' # <--- v600: SWING TRADING 1H
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
 try:
-    # IMPORTAMOS EL RISK MANAGER V500
+    # IMPORTAMOS EL RISK MANAGER v600
     from bot_core.risk_swing import RiskManager
     from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
 except ImportError as e:
@@ -218,25 +218,23 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- INDICADORES V500 (TREND SWING 1H) ---
+            # --- INDICADORES V600 (HYBRID) ---
             
-            # 1. EMAs para Tendencia y Pullbacks
-            df['ema_50'] = df['close'].ewm(span=50).mean().shift(1)
-            df['ema_200'] = df['close'].ewm(span=200).mean().shift(1)
+            # 1. Simulación de Tendencia 4H en 1H
+            df['ema_trend_fast'] = df['close'].ewm(span=200).mean().shift(1) # Equivale a EMA 50 en 4H
+            df['ema_trend_slow'] = df['close'].ewm(span=800).mean().shift(1) # Equivale a EMA 200 en 4H
             
-            # 2. Crash Monitor (Variación en 6 horas)
-            # pct_change(6) calcula el cambio respecto a 6 velas atrás
-            df['pct_change_6h'] = df['close'].pct_change(6).shift(1)
+            # 2. Estructura para Trampas (V230 logic)
+            df['last_swing_high'] = df['high'].rolling(5).max().shift(1) # Swing corto
+            df['last_swing_low'] = df['low'].rolling(5).min().shift(1)
             
-            # 3. RSI (14) - Momentum
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).fillna(0)
-            loss = (-delta.where(delta < 0, 0)).fillna(0)
-            avg_gain = gain.rolling(window=14).mean()
-            avg_loss = loss.rolling(window=14).mean()
-            rs = avg_gain / avg_loss
-            df['rsi'] = 100 - (100 / (1 + rs))
-            df['rsi'] = df['rsi'].shift(1)
+            # 3. ATR
+            tr = pd.concat([
+                df['high'] - df['low'], 
+                (df['high'] - df['close'].shift(1)).abs(), 
+                (df['low'] - df['close'].shift(1)).abs()
+            ], axis=1).max(axis=1)
+            df['atr'] = tr.rolling(14).mean().shift(1)
 
             # 4. ATR (Para SL/Trailing)
             tr = pd.concat([
@@ -254,7 +252,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V500 (Trend Swing Protected)")
+        print(f"\n🛡️ INICIANDO BACKTEST v600 (Hybrid)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date} | TF: {self.timeframe}")
         print("-" * 60)
         
@@ -269,7 +267,7 @@ class BacktesterV19:
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             
             if self.state.is_in_position:
-                # --- V500: GESTIÓN ACTIVA (CRASH MONITOR + TRAILING) ---
+                # --- v600: GESTIÓN ACTIVA (CRASH MONITOR + TRAILING) ---
                 await self.risk_manager.check_position_state()
                 self.check_exits(row) 
 
@@ -295,7 +293,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V500 (Trend Swing Protected) - {self.symbol}")
+        print(f"📊 REPORTE v600 (Trend Swing Protected) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
