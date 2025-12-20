@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. UTILIDADES
+# 1. UTILIDADES Y DESCARGA
 # ---------------------------------------------------------
 
 def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=15000):
@@ -38,7 +38,7 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
     return df
 
 # ---------------------------------------------------------
-# 2. INDICADORES + ENERGY FILTER
+# 2. INDICADORES
 # ---------------------------------------------------------
 
 def calculate_indicators(df):
@@ -63,10 +63,6 @@ def calculate_indicators(df):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=14).mean()
     
-    # --- V4.7: ENERGY FILTER (ATR MA) ---
-    # Promedio de volatilidad de las últimas 50 velas (aprox 4 horas)
-    df['ATR_MA'] = df['ATR'].rolling(window=50).mean()
-    
     return df
 
 def get_volume_profile_zones(df, lookback_bars=288):
@@ -88,7 +84,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V4.6 - THE ACCELERATOR) - INTACTA
+# 3. GESTIÓN (BASE V4.6 - THE ACCELERATOR)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -132,7 +128,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         row = df.iloc[entry_index + j]
         curr_low, curr_high, curr_close = row['low'], row['high'], row['close']
         
-        # Accelerator Check (Bar 4)
+        # Accelerator
         if j == 4 and not tp1_hit:
             current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
             current_r = current_pnl / risk_per_share
@@ -172,18 +168,18 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": info_msg}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V4.7 - ENERGY FILTER)
+# 4. EJECUCIÓN (V4.8 - ANTI-EXPANSION)
 # ---------------------------------------------------------
 
 def is_ny_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 17
 
-def run_lab_test_v4_7():
-    print("--- ORANGE PI LAB: STRATEGY V4.7 (ENERGY FILTER) ---")
+def run_lab_test_v4_8():
+    print("--- ORANGE PI LAB: STRATEGY V4.8 (ANTI-EXPANSION) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
     
-    print("Calculando indicadores (incluyendo ATR MA)...")
+    print("Calculando indicadores...")
     df = calculate_indicators(df)
     
     last_trade_index = -999
@@ -193,17 +189,21 @@ def run_lab_test_v4_7():
     
     trade_log = []
     
-    print(f"\n--- BACKTEST EXTENDIDO CON FILTRO DE ENERGÍA ---")
+    print(f"\n--- BACKTEST CON FILTRO ANTI-EXPANSIÓN ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         if not is_ny_session(row['timestamp']): continue
+        if row['ATR'] < 50: continue 
         
-        # --- FILTRO V4.7: MARKET ENERGY ---
-        # Solo operamos si la volatilidad actual es superior a la media
-        # Si ATR < ATR_MA, el mercado está durmiendo.
-        if row['ATR'] < row['ATR_MA']: 
+        # --- FILTRO V4.8: ANTI-EXPANSION ---
+        # Si la vela anterior fue explosiva (> 1.2x ATR), es momentum fuerte en contra.
+        prev_row = df.iloc[i-1]
+        prev_range = prev_row['high'] - prev_row['low']
+        
+        if prev_range > (row['ATR'] * 1.2):
+            # print(f"DEBUG: Trade Skipped en {row['timestamp']}. Expansión Previa: {prev_range:.1f} > 1.2*ATR")
             continue 
             
         zones = get_volume_profile_zones(df.iloc[i-288:i])
@@ -247,14 +247,14 @@ def run_lab_test_v4_7():
 
     # --- REPORTE ---
     if not trade_log:
-        print("\nNo se encontraron trades con este filtro de energía.")
+        print("\nNo se encontraron trades.")
         return
 
     df_res = pd.DataFrame(trade_log)
     df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.7)")
+    print("ESTADÍSTICAS FINALES (V4.8)")
     print("="*50)
     print(f"Total Trades: {len(df_res)}")
     scratches = len(df_res[df_res['outcome'] == 'EARLY_EXIT'])
@@ -278,4 +278,4 @@ def run_lab_test_v4_7():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_7()
+    run_lab_test_v4_8()
