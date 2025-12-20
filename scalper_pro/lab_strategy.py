@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 # ---------------------------------------------------------
-# 1. CÁLCULOS (Igual que antes)
+# 1. INDICADORES (Núcleo matemático)
 # ---------------------------------------------------------
 
 def calculate_rsi_manual(series, period=14):
@@ -28,16 +28,6 @@ def calculate_atr(df, period=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(window=period).mean()
 
-def is_rejection_candle(row, factor=1.5):
-    body = abs(row['close'] - row['open'])
-    if body == 0: body = 0.000001
-    wick_top = row['high'] - max(row['close'], row['open'])
-    wick_bottom = min(row['close'], row['open']) - row['low']
-    
-    if wick_top > (body * factor): return 1
-    elif wick_bottom > (body * factor): return -1
-    return 0
-
 def get_volume_profile_zones(df, lookback_bars=288):
     subset = df.iloc[-lookback_bars:].copy()
     price_min = subset['low'].min()
@@ -56,93 +46,121 @@ def get_volume_profile_zones(df, lookback_bars=288):
     
     vah = va_df['bin'].apply(lambda x: x.right).max()
     val = va_df['bin'].apply(lambda x: x.left).min()
-    poc = vp.loc[vp['volume'].idxmax(), 'bin'].mid
-    return {'VAH': vah, 'VAL': val, 'POC': poc}
+    return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 2. GESTIÓN DE POSICIÓN ACTIVA (NUEVO MOTOR)
+# 2. GESTIÓN PROFESIONAL POR R-MULTIPLES
 # ---------------------------------------------------------
 
-def manage_trade_simulation(df, entry_index, entry_price, direction, atr_value):
+def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta):
     """
-    Simula la gestión profesional: Early Exit, TP Parcial y Break Even.
+    Retorna un diccionario con el resultado matemático del trade.
+    R = Beneficio / Riesgo Inicial
     """
-    # Configuración de Gestión
-    sl_pips = atr_value * 1.5
-    tp1_pips = atr_value * 1.0  # Primer TP (Caja rápida)
-    tp2_pips = atr_value * 2.0  # Segundo TP (Run)
+    risk_per_share = atr_value * 1.5 # Distancia al Stop Loss (1R)
     
-    # Precios iniciales
-    stop_loss = entry_price - sl_pips if direction == 'LONG' else entry_price + sl_pips
-    tp1 = entry_price + tp1_pips if direction == 'LONG' else entry_price - tp1_pips
-    tp2 = entry_price + tp2_pips if direction == 'LONG' else entry_price - tp2_pips
+    sl_price = entry_price - risk_per_share if direction == 'LONG' else entry_price + risk_per_share
+    tp1_price = entry_price + (risk_per_share * 1.0) if direction == 'LONG' else entry_price - (risk_per_share * 1.0) # TP1 = 1R (aprox 1.5 ATR)
+    tp2_price = entry_price + (risk_per_share * 2.0) if direction == 'LONG' else entry_price - (risk_per_share * 2.0) # TP2 = 2R
     
     tp1_hit = False
+    max_r_reached = 0.0
     
-    # 1. EARLY EXIT CHECK (Vela siguiente inmediata)
-    # Si entramos y la siguiente vela tiene delta contrario fuerte, salimos.
+    # 1. EARLY EXIT CHECK (Suavizado)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
+        next_delta = next_candle['delta_norm']
         
-        # Si es LONG y el delta siguiente es negativo -> SALIR
-        if direction == 'LONG' and next_candle['delta_norm'] < 0:
-            return f"⚠️ EARLY EXIT (Next Delta Negative). Close: {next_candle['close']:.1f}"
-            
-        # Si es SHORT y el delta siguiente es positivo -> SALIR
-        if direction == 'SHORT' and next_candle['delta_norm'] > 0:
-            return f"⚠️ EARLY EXIT (Next Delta Positive). Close: {next_candle['close']:.1f}"
+        # Tolerancia: 10% del delta de entrada
+        tolerance = abs(entry_delta) * 0.10
+        
+        early_exit_triggered = False
+        if direction == 'LONG' and next_delta < -tolerance: early_exit_triggered = True
+        if direction == 'SHORT' and next_delta > tolerance: early_exit_triggered = True
+        
+        if early_exit_triggered:
+            # Calcular R realizada (será negativa pequeña, ej: -0.1R)
+            exit_price = next_candle['close']
+            pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
+            r_realized = pnl / risk_per_share
+            return {
+                "outcome": "EARLY_EXIT",
+                "r_realized": r_realized,
+                "bars": 1,
+                "info": f"Delta Reversal > {tolerance:.2f}"
+            }
 
-    # 2. LOOP DE GESTIÓN (8 Velas = 40 min Time Stop)
+    # 2. GESTIÓN DEL TRADE (8 Barras Time Stop)
     for j in range(1, 9):
         if entry_index + j >= len(df): break
-        current_candle = df.iloc[entry_index + j]
+        row = df.iloc[entry_index + j]
+        
+        # Precios actuales
+        curr_low = row['low']
+        curr_high = row['high']
+        curr_close = row['close']
         
         # --- Lógica LONG ---
         if direction == 'LONG':
-            # Chequear Stop Loss
-            if current_candle['low'] <= stop_loss:
-                if tp1_hit: return "✅ WIN PARCIAL (TP1 Hit, luego BE)"
-                return "❌ LOSS (SL Hit)"
-            
-            # Chequear TP2 (Full Win)
-            if current_candle['high'] >= tp2:
-                return "🏆 FULL WIN (TP2 Hit)"
-                
-            # Chequear TP1
-            if not tp1_hit and current_candle['high'] >= tp1:
+            # Stop Loss (Full -1R o BE)
+            if curr_low <= sl_price:
+                r_result = 0.0 if tp1_hit else -1.0
+                outcome = "BE_STOP" if tp1_hit else "SL_HIT"
+                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "Stop Loss tocado"}
+
+            # TP2 (Full Win +2R)
+            if curr_high >= tp2_price:
+                # Asumimos que salimos con todo o promedio. 
+                # Simplificación: Si toca TP2, es un Home Run de 2R.
+                return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2 alcanzado"}
+
+            # TP1 (Parcial +1R y mover a BE)
+            if not tp1_hit and curr_high >= tp1_price:
                 tp1_hit = True
-                stop_loss = entry_price # MOVER A BREAK EVEN
-                # No retornamos, seguimos buscando TP2 pero protegidos
+                sl_price = entry_price # Stop a Breakeven
                 
         # --- Lógica SHORT ---
         else:
-            # Chequear Stop Loss
-            if current_candle['high'] >= stop_loss:
-                if tp1_hit: return "✅ WIN PARCIAL (TP1 Hit, luego BE)"
-                return "❌ LOSS (SL Hit)"
-            
-            # Chequear TP2 (Full Win)
-            if current_candle['low'] <= tp2:
-                return "🏆 FULL WIN (TP2 Hit)"
-                
-            # Chequear TP1
-            if not tp1_hit and current_candle['low'] <= tp1:
+            if curr_high >= sl_price:
+                r_result = 0.0 if tp1_hit else -1.0
+                outcome = "BE_STOP" if tp1_hit else "SL_HIT"
+                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "Stop Loss tocado"}
+
+            if curr_low <= tp2_price:
+                return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2 alcanzado"}
+
+            if not tp1_hit and curr_low <= tp1_price:
                 tp1_hit = True
-                stop_loss = entry_price # MOVER A BREAK EVEN
+                sl_price = entry_price 
 
     # 3. TIME STOP
-    if tp1_hit:
-        return "✅ WIN PARCIAL (Time Stop post TP1)"
-    else:
-        return "➖ TIME OUT (Cierre por tiempo)"
+    exit_price = df.iloc[entry_index + 8]['close'] if entry_index + 8 < len(df) else df.iloc[-1]['close']
+    pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
+    r_realized = pnl / risk_per_share
+    
+    # Si ya habíamos cobrado TP1, el trade es ganador pase lo que pase. 
+    # Simplificación: Promediamos la R (1R asegurada + flotante).
+    if tp1_hit: r_realized = max(r_realized, 0.5) 
+    
+    return {
+        "outcome": "TIME_STOP",
+        "r_realized": r_realized,
+        "bars": 8,
+        "info": "Cierre por tiempo"
+    }
 
-def run_lab_test_v3():
-    print("--- ORANGE PI LAB: STRATEGY V3 (ACTIVE MANAGEMENT) ---")
+# ---------------------------------------------------------
+# 3. EJECUCIÓN PRINCIPAL
+# ---------------------------------------------------------
+
+def run_lab_test_v4():
+    print("--- ORANGE PI LAB: STRATEGY V4 (R-MULTIPLES) ---")
     exchange = ccxt.binance()
     symbol = 'BTC/USDT'
-    limit = 1000 
-
-    print(f"Descargando datos recientes de {symbol}...")
+    # IMPORTANTE: Aumentamos el límite para tener estadística real
+    limit = 1500 # Aprox 5 días
+    
+    print(f"Descargando {limit} velas de {symbol}...")
     ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -151,55 +169,74 @@ def run_lab_test_v3():
     df = calculate_normalized_delta_cvd(df)
     df['ATR'] = calculate_atr(df)
     
-    print("--- INICIANDO BACKTEST CON GESTIÓN PROFESIONAL ---")
-    
     last_trade_index = -999
-    cooldown_bars = 12 
-    trades_found = 0
+    cooldown_bars = 12
+    trade_log = []
+    
+    print("--- INICIANDO ANÁLISIS ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < cooldown_bars: continue
-        current_row = df.iloc[i]
+        row = df.iloc[i]
         
-        # Filtro de volatilidad mínima
-        if current_row['ATR'] < 50: continue # Si ATR < 50 USDT en BTC, el mercado está muerto.
-
-        past_data = df.iloc[i-288:i]
-        zones = get_volume_profile_zones(past_data)
+        if row['ATR'] < 50: continue 
+        
+        # Zonas
+        zones = get_volume_profile_zones(df.iloc[i-288:i])
         if not zones: continue
-        
         vah, val = zones['VAH'], zones['VAL']
-        
-        # Condiciones de Entrada (Mismas que V2.2)
-        is_long_zone = current_row['low'] <= val and current_row['close'] > val
-        is_short_zone = current_row['high'] >= vah and current_row['close'] < vah
         
         entry_signal = None
         
-        if is_long_zone:
-            cond_rsi = current_row['RSI'] < 45
-            cond_delta = current_row['delta_norm'] > 0
-            cond_cvd = df['cvd'].iloc[i] > df['cvd'].iloc[i-3]
-            if cond_rsi and cond_delta and cond_cvd: entry_signal = 'LONG'
-
-        elif is_short_zone:
-            cond_rsi = current_row['RSI'] > 55
-            cond_delta = current_row['delta_norm'] < 0
-            cond_cvd = df['cvd'].iloc[i] < df['cvd'].iloc[i-3]
-            if cond_rsi and cond_delta and cond_cvd: entry_signal = 'SHORT'
-            
+        # Lógica V3
+        is_long = row['low'] <= val and row['close'] > val
+        is_short = row['high'] >= vah and row['close'] < vah
+        
+        if is_long:
+            if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
+                entry_signal = 'LONG'
+        elif is_short:
+            if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
+                entry_signal = 'SHORT'
+                
         if entry_signal:
-            result_str = manage_trade_simulation(df, i, current_row['close'], entry_signal, current_row['ATR'])
+            res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'])
             
-            print(f"[{current_row['timestamp']}] {entry_signal} @ {current_row['close']:.1f}")
-            print(f"   Ref: Zone={'VAL' if entry_signal=='LONG' else 'VAH'} | ATR={current_row['ATR']:.1f}")
-            print(f"   Resultado: {result_str}")
-            print("-" * 50)
+            # Guardamos Log
+            trade_data = {
+                "time": row['timestamp'],
+                "type": entry_signal,
+                "price": row['close'],
+                "outcome": res['outcome'],
+                "r": res['r_realized'],
+                "info": res['info']
+            }
+            trade_log.append(trade_data)
             
+            print(f"[{row['timestamp']}] {entry_signal:<5} | {res['outcome']:<10} | R: {res['r_realized']:.2f} | {res['info']}")
             last_trade_index = i
-            trades_found += 1
 
-    print(f"\nTotal trades simulados: {trades_found}")
+    # --- ESTADÍSTICAS FINALES ---
+    print("\n" + "="*40)
+    print("RESULTADOS V4 (EXPECTANCY)")
+    print("="*40)
+    
+    if not trade_log:
+        print("No se encontraron trades suficientes.")
+    else:
+        df_res = pd.DataFrame(trade_log)
+        total_r = df_res['r'].sum()
+        count = len(df_res)
+        win_rate = len(df_res[df_res['r'] > 0]) / count * 100
+        expectancy = total_r / count
+        
+        print(f"Total Trades:    {count}")
+        print(f"Total R:         {total_r:.2f} R")
+        print(f"Expectancy:      {expectancy:.2f} R por trade")
+        print(f"Win Rate (>0R):  {win_rate:.1f}%")
+        print("-" * 40)
+        print("Detalle de Outcomes:")
+        print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v3()
+    run_lab_test_v4()
