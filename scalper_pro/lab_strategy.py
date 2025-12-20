@@ -79,7 +79,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V4.9 - THE SNIPER)
+# 3. GESTIÓN (V4.9.1 - BALANCED SNIPER)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -123,19 +123,18 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         row = df.iloc[entry_index + j]
         curr_low, curr_high, curr_close = row['low'], row['high'], row['close']
         
-        # --- AJUSTE A: SMART TIME STOP (BAR 3) ---
-        if j == 3 and not tp1_hit:
-            current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
-            current_r = current_pnl / risk_per_share
-            # Si no ha avanzado al menos 0.15 R (momentum nulo), CORTAR.
-            if current_r < 0.15:
-                 return {"outcome": "STAGNANT", "r_realized": current_r, "bars": j, "info": "No Momentum (Bar 3)"}
-
-        # Accelerator Check (Bar 4)
+        # --- BAR 4 CHECK: STAGNANT vs ACCELERATOR ---
         if j == 4 and not tp1_hit:
             current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
             current_r = current_pnl / risk_per_share
-            if current_r >= 0.5:
+            
+            # A) STAGNANT CHECK (Si R < 0.10, cortar con pérdida fija -0.10)
+            if current_r < 0.10:
+                return {"outcome": "STAGNANT", "r_realized": -0.10, "bars": j, "info": "No Momentum (Bar 4)"}
+            
+            # B) ACCELERATOR CHECK (Si R >= 0.50, TP1 Hit)
+            # Nota: Si está entre 0.10 y 0.50, sigue vivo.
+            if current_r >= 0.50:
                 tp1_hit = True
                 sl_price = entry_price 
                 late_tp1_triggered = True 
@@ -172,16 +171,16 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": info_msg}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V4.9 - FINAL SNIPER)
+# 4. EJECUCIÓN (V4.9.1 - FINAL BALANCE)
 # ---------------------------------------------------------
 
-# --- AJUSTE C: MICRO SESIÓN ---
+# --- AJUSTE B: SESIÓN EXPANDIDA ---
 def is_core_session(timestamp):
     hour = timestamp.hour
-    return 14 <= hour <= 16 # 14:00 - 16:59 (3 horas de oro)
+    return 14 <= hour <= 17 # 14:00 - 17:59 (4 horas)
 
-def run_lab_test_v4_9():
-    print("--- ORANGE PI LAB: STRATEGY V4.9 (THE SNIPER) ---")
+def run_lab_test_v4_9_1():
+    print("--- ORANGE PI LAB: STRATEGY V4.9.1 (BALANCED SNIPER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -192,13 +191,13 @@ def run_lab_test_v4_9():
     current_cooldown = standard_cooldown
     trade_log = []
     
-    print(f"\n--- BACKTEST: CORE SESSION + SMART TIME STOP ---")
+    print(f"\n--- BACKTEST: EXTENDED SESSION + BAR 4 STOP ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         
-        # Filtro de Sesión Estricto
+        # Filtro de Sesión Expandido
         if not is_core_session(row['timestamp']): continue
         if row['ATR'] < 50: continue 
         
@@ -215,21 +214,17 @@ def run_lab_test_v4_9():
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
-        # GATEKEEPER + AJUSTE B (FALLING KNIFE)
+        # GATEKEEPER + FALLING KNIFE
         penetration_threshold = 0.30 
         
         if is_long:
-            # Filtro B: Si cerró abajo, es fuerza bajista.
             if prev_row['close'] < val: continue 
-            
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
             if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
                 entry_signal = 'LONG'
                 
         elif is_short:
-            # Filtro B: Si cerró arriba, es fuerza alcista.
             if prev_row['close'] > vah: continue
-            
             if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
             if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
                 entry_signal = 'SHORT'
@@ -256,25 +251,24 @@ def run_lab_test_v4_9():
 
     # --- REPORTE ---
     if not trade_log:
-        print("\nNo se encontraron trades en la Core Session.")
+        print("\nNo se encontraron trades.")
         return
 
     df_res = pd.DataFrame(trade_log)
-    df_valid = df_res[~df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])] # Contamos Stagnant como scratch técnico
+    df_valid = df_res[~df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])] 
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.9)")
+    print("ESTADÍSTICAS FINALES (V4.9.1)")
     print("="*50)
     print(f"Total Trades: {len(df_res)}")
     
     scratches = len(df_res[df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])])
     print(f"Scratches/Stagnant: {scratches}")
     
-    if not df_res.empty: # Calculamos sobre el total para expectancy real
+    if not df_res.empty:
         total_r = df_res['r'].sum()
         expectancy = total_r / len(df_res)
         
-        # Winrate de lo que NO fue scratch
         if not df_valid.empty:
             win_rate = len(df_valid[df_valid['r'] > 0]) / len(df_valid) * 100
         else:
@@ -293,4 +287,4 @@ def run_lab_test_v4_9():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_9()
+    run_lab_test_v4_9_1()
