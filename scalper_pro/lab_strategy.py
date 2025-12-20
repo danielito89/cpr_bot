@@ -2,82 +2,73 @@ import ccxt
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timedelta
 
 # ---------------------------------------------------------
-# 1. CÁLCULOS MATEMÁTICOS MANUALES (Sin librerías extra)
+# 1. CÁLCULOS MATEMÁTICOS OPTIMIZADOS
 # ---------------------------------------------------------
 
 def calculate_rsi_manual(series, period=14):
-    """Calcula RSI usando Wilder's Smoothing sin pandas_ta"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).fillna(0)
     loss = (-delta.where(delta < 0, 0)).fillna(0)
-
     avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
-def calculate_delta_cvd(df):
-    """Calcula Delta (aprox) y CVD acumulado"""
-    # Si Close >= Open, asumimos que predominó la compra (1), si no venta (-1)
-    # Nota: Para mayor precision se puede usar (Close - Open) / (High - Low) * Vol
-    df['direction'] = np.where(df['close'] >= df['open'], 1, -1)
-    df['delta'] = df['volume'] * df['direction']
-    df['cvd'] = df['delta'].cumsum() # Cumulative Volume Delta
+def calculate_normalized_delta_cvd(df):
+    """
+    Mejora V2.2: Delta Ponderado por rango de vela.
+    Penaliza Dojis y premia velas con cuerpo grande y poca mecha.
+    """
+    # Evitar división por cero
+    range_candle = (df['high'] - df['low']).replace(0, 0.000001)
+    
+    # Delta = (Cuerpo / Rango Total) * Volumen
+    # Si la vela es todo cuerpo, Delta = Volumen. Si es Doji, Delta ~ 0.
+    df['delta_norm'] = ((df['close'] - df['open']) / range_candle) * df['volume']
+    
+    # CVD acumulado
+    df['cvd'] = df['delta_norm'].cumsum()
     return df
 
-def is_rejection_candle(row, factor=2.0):
-    """Detecta si la vela tiene una mecha grande rechazando una zona"""
+def calculate_atr(df, period=14):
+    """True Range para Volatilidad y Stop Loss dinámico"""
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
+def is_rejection_candle(row, factor=1.5):
+    """Factor ajustado a 1.5 para ser un poco más permisivo con la confirmación de cierre"""
     body = abs(row['close'] - row['open'])
     wick_top = row['high'] - max(row['close'], row['open'])
     wick_bottom = min(row['close'], row['open']) - row['low']
-    
-    # Evitar división por cero en velas doji
     if body == 0: body = 0.000001
     
-    # Retorna 1 si rechazo arriba (Bearish), -1 si rechazo abajo (Bullish), 0 neutro
-    if wick_top > (body * factor):
-        return 1 # Rechazo bajista (wick arriba largo)
-    elif wick_bottom > (body * factor):
-        return -1 # Rechazo alcista (wick abajo largo)
+    if wick_top > (body * factor): return 1 # Bearish Wick
+    elif wick_bottom > (body * factor): return -1 # Bullish Wick
     return 0
 
 def get_volume_profile_zones(df, lookback_bars=288):
-    """
-    Calcula VAH y VAL basado en las últimas 'lookback_bars'.
-    288 barras de 5m = 24 horas.
-    """
-    # Tomamos el slice de datos para el perfil
-    subset = df.iloc[-lookback_bars:]
-    
-    # Definimos rangos de precio (bins)
+    subset = df.iloc[-lookback_bars:].copy()
     price_min = subset['low'].min()
     price_max = subset['high'].max()
     
-    if price_min == price_max: return None # Error data insuficiente
+    if price_min == price_max: return None
     
-    bins = np.linspace(price_min, price_max, 100) # 100 niveles de precio
-    
-    # Asignamos volumen a los bins
-    subset = subset.copy()
+    bins = np.linspace(price_min, price_max, 100)
     subset['bin'] = pd.cut(subset['close'], bins=bins)
     vp = subset.groupby('bin', observed=False)['volume'].sum().reset_index()
     
-    # Ordenamos por volumen para encontrar el Value Area (70%)
     total_volume = vp['volume'].sum()
     value_area_vol = total_volume * 0.70
     
     vp_sorted = vp.sort_values(by='volume', ascending=False)
     vp_sorted['cum_vol'] = vp_sorted['volume'].cumsum()
-    
-    # Filtramos las barras dentro del Value Area
     va_df = vp_sorted[vp_sorted['cum_vol'] <= value_area_vol]
     
-    # Extraemos límites
     if va_df.empty: return None
     
     vah = va_df['bin'].apply(lambda x: x.right).max()
@@ -87,77 +78,111 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val, 'POC': poc}
 
 # ---------------------------------------------------------
-# 2. DESCARGA DE DATOS Y SIMULACIÓN
+# 2. SIMULACIÓN DE ESTRATEGIA + RESULTADO
 # ---------------------------------------------------------
 
-def run_lab_test():
-    print("--- INICIANDO LABORATORIO EN ORANGE PI ---")
+def check_trade_result(df, entry_index, entry_price, direction, atr_value):
+    """
+    Mira el futuro para ver si el trade funcionó.
+    SL = 1.5 * ATR
+    TP = 2.0 * ATR
+    """
+    sl_dist = atr_value * 1.5
+    tp_dist = atr_value * 2.0
+    
+    stop_loss = entry_price - sl_dist if direction == 'LONG' else entry_price + sl_dist
+    take_profit = entry_price + tp_dist if direction == 'LONG' else entry_price - tp_dist
+    
+    # Revisar las siguientes 24 velas (2 horas)
+    for j in range(1, 25):
+        if entry_index + j >= len(df): break
+        
+        future_row = df.iloc[entry_index + j]
+        
+        if direction == 'LONG':
+            if future_row['low'] <= stop_loss: return "❌ LOSS"
+            if future_row['high'] >= take_profit: return "✅ WIN"
+        else: # SHORT
+            if future_row['high'] >= stop_loss: return "❌ LOSS"
+            if future_row['low'] <= take_profit: return "✅ WIN"
+            
+    return "➖ TIME OUT"
+
+def run_lab_test_v2():
+    print("--- ORANGE PI LAB: STRATEGY V2.2 (REFINED) ---")
     exchange = ccxt.binance()
     symbol = 'BTC/USDT'
-    timeframe = '5m'
-    limit = 1000 # Últimas 1000 velas (aprox 3.5 días)
+    limit = 1000 
 
-    print(f"Descargando {limit} velas de {symbol}...")
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-    
+    print(f"Descargando datos recientes de {symbol}...")
+    ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     
-    # 1. Calcular Indicadores Técnicos
-    print("Calculando Indicadores (Manuales)...")
+    # Indicadores
     df['RSI'] = calculate_rsi_manual(df['close'], 14)
-    df = calculate_delta_cvd(df)
+    df = calculate_normalized_delta_cvd(df)
+    df['ATR'] = calculate_atr(df)
     
-    # Variables de estado para simulación
-    in_position = False
-    balance = 1000 # Simulacion USD
+    print("--- INICIANDO BACKTEST QUIRÚRGICO ---")
     
-    print("\n--- INICIANDO BACKTEST LÓGICO V2 ---")
+    last_trade_index = -999
+    cooldown_bars = 12 # 1 hora de espera entre trades
     
-    # Simulamos vela a vela (empezando desde la barra 300 para tener datos previos para el Perfil)
+    trades_found = 0
+    
     for i in range(300, len(df)):
+        # Cooldown check
+        if i - last_trade_index < cooldown_bars: continue
+        
         current_row = df.iloc[i]
-        prev_row = df.iloc[i-1]
         
-        # Calculamos el Perfil de Volumen usando las 24h PREVIAS a la vela actual
-        # (Para no hacer trampa viendo el futuro)
-        # 288 velas de 5m = 24h
-        past_data = df.iloc[i-288:i] 
+        # Filtro de Volatilidad: Si ATR es muy bajo, ignorar (mercado muerto)
+        # if current_row['ATR'] < df['ATR'].mean() * 0.5: continue 
+        
+        past_data = df.iloc[i-288:i]
         zones = get_volume_profile_zones(past_data)
-        
         if not zones: continue
         
-        vah = zones['VAH']
-        val = zones['VAL']
-        
-        # --- LÓGICA DE ENTRADA (STRATEGY V2) ---
-        
+        vah, val = zones['VAH'], zones['VAL']
         rejection = is_rejection_candle(current_row)
         
-        # 1. SEÑAL LONG: Precio toca VAL + RSI Bajo + Delta Positivo + Rechazo
-        if current_row['low'] <= val and not in_position:
-            # Condiciones
-            cond_rsi = current_row['RSI'] < 40 # Sobreventa o cerca
-            cond_delta = current_row['delta'] > 0 # Entra compra en el soporte
-            cond_rejection = rejection == -1 # Wick largo hacia abajo
-            # Divergencia CVD (Simple): El precio baja pero CVD sube en ultimas 3 velas
-            cond_cvd = df['cvd'].iloc[i] > df['cvd'].iloc[i-3] 
-            
-            if cond_rsi and cond_delta and cond_rejection:
-                print(f"[{current_row['timestamp']}] 🟢 LONG SIGNAL @ {current_row['close']}")
-                print(f"   Razón: Toque VAL ({val:.2f}) + Rechazo + Delta Positivo")
-                # Aquí iría la lógica de Take Profit / Stop Loss
+        # --- LÓGICA REFINADA ---
         
-        # 2. SEÑAL SHORT: Precio toca VAH + RSI Alto + Delta Negativo + Rechazo
-        elif current_row['high'] >= vah and not in_position:
-            # Condiciones
-            cond_rsi = current_row['RSI'] > 60 # Sobrecompra o cerca
-            cond_delta = current_row['delta'] < 0 # Entra venta en resistencia
-            cond_rejection = rejection == 1 # Wick largo hacia arriba
+        # LONG: Toca VAL pero CIERRA encima de VAL (No knife catch)
+        is_long_zone = current_row['low'] <= val and current_row['close'] > val
+        
+        if is_long_zone:
+            cond_rsi = current_row['RSI'] < 45 # Un poco más relajado al usar confirmación de cierre
+            cond_delta = current_row['delta_norm'] > 0
+            cond_cvd = df['cvd'].iloc[i] > df['cvd'].iloc[i-3] # CVD subiendo
             
-            if cond_rsi and cond_delta and cond_rejection:
-                print(f"[{current_row['timestamp']}] 🔴 SHORT SIGNAL @ {current_row['close']}")
-                print(f"   Razón: Toque VAH ({vah:.2f}) + Rechazo + Delta Negativo")
+            if cond_rsi and cond_delta and cond_cvd: # Rejection es opcional si exigimos cierre > val
+                res = check_trade_result(df, i, current_row['close'], 'LONG', current_row['ATR'])
+                print(f"[{current_row['timestamp']}] 🚀 LONG  @ {current_row['close']:.1f} | Result: {res}")
+                print(f"    Vals: RSI={current_row['RSI']:.1f} | CVD_Slope=UP | Zone=VAL ({val:.1f})")
+                last_trade_index = i
+                trades_found += 1
+
+        # SHORT: Toca VAH pero CIERRA debajo de VAH
+        is_short_zone = current_row['high'] >= vah and current_row['close'] < vah
+        
+        if is_short_zone:
+            cond_rsi = current_row['RSI'] > 55
+            cond_delta = current_row['delta_norm'] < 0
+            cond_cvd = df['cvd'].iloc[i] < df['cvd'].iloc[i-3] # CVD bajando
+            
+            if cond_rsi and cond_delta and cond_cvd:
+                res = check_trade_result(df, i, current_row['close'], 'SHORT', current_row['ATR'])
+                print(f"[{current_row['timestamp']}] 🔴 SHORT @ {current_row['close']:.1f} | Result: {res}")
+                print(f"    Vals: RSI={current_row['RSI']:.1f} | CVD_Slope=DOWN | Zone=VAH ({vah:.1f})")
+                last_trade_index = i
+                trades_found += 1
+
+    if trades_found == 0:
+        print("No se encontraron trades con estos filtros estrictos.")
+    else:
+        print(f"\nTotal trades simulados: {trades_found}")
 
 if __name__ == "__main__":
-    run_lab_test()
+    run_lab_test_v2()
