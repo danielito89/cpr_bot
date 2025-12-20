@@ -30,7 +30,6 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
             time.sleep(0.15) 
         except Exception as e:
             break
-            
     if len(all_ohlcv) > total_candles:
         all_ohlcv = all_ohlcv[-total_candles:]
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -42,7 +41,6 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
 # ---------------------------------------------------------
 
 def calculate_indicators(df):
-    # RSI Manual
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).fillna(0)
     loss = (-delta.where(delta < 0, 0)).fillna(0)
@@ -51,18 +49,15 @@ def calculate_indicators(df):
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # Delta & CVD
     range_candle = (df['high'] - df['low']).replace(0, 0.000001)
     df['delta_norm'] = ((df['close'] - df['open']) / range_candle) * df['volume']
     df['cvd'] = df['delta_norm'].cumsum()
 
-    # ATR
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=14).mean()
-    
     return df
 
 def get_volume_profile_zones(df, lookback_bars=288):
@@ -84,7 +79,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (BASE V4.6 - THE ACCELERATOR)
+# 3. GESTIÓN (V4.9 - THE SNIPER)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -128,7 +123,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         row = df.iloc[entry_index + j]
         curr_low, curr_high, curr_close = row['low'], row['high'], row['close']
         
-        # Accelerator
+        # --- AJUSTE A: SMART TIME STOP (BAR 3) ---
+        if j == 3 and not tp1_hit:
+            current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
+            current_r = current_pnl / risk_per_share
+            # Si no ha avanzado al menos 0.15 R (momentum nulo), CORTAR.
+            if current_r < 0.15:
+                 return {"outcome": "STAGNANT", "r_realized": current_r, "bars": j, "info": "No Momentum (Bar 3)"}
+
+        # Accelerator Check (Bar 4)
         if j == 4 and not tp1_hit:
             current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
             current_r = current_pnl / risk_per_share
@@ -137,6 +140,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 sl_price = entry_price 
                 late_tp1_triggered = True 
         
+        # SL / TP Logic
         if direction == 'LONG':
             if curr_low <= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
@@ -168,17 +172,17 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": info_msg}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V4.8 - ANTI-EXPANSION)
+# 4. EJECUCIÓN (V4.9 - FINAL SNIPER)
 # ---------------------------------------------------------
 
-def is_ny_session(timestamp):
+# --- AJUSTE C: MICRO SESIÓN ---
+def is_core_session(timestamp):
     hour = timestamp.hour
-    return 13 <= hour <= 17
+    return 14 <= hour <= 16 # 14:00 - 16:59 (3 horas de oro)
 
-def run_lab_test_v4_8():
-    print("--- ORANGE PI LAB: STRATEGY V4.8 (ANTI-EXPANSION) ---")
+def run_lab_test_v4_9():
+    print("--- ORANGE PI LAB: STRATEGY V4.9 (THE SNIPER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
-    
     print("Calculando indicadores...")
     df = calculate_indicators(df)
     
@@ -186,25 +190,22 @@ def run_lab_test_v4_8():
     standard_cooldown = 12 
     smart_cooldown = 2
     current_cooldown = standard_cooldown
-    
     trade_log = []
     
-    print(f"\n--- BACKTEST CON FILTRO ANTI-EXPANSIÓN ---")
+    print(f"\n--- BACKTEST: CORE SESSION + SMART TIME STOP ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
-        if not is_ny_session(row['timestamp']): continue
+        
+        # Filtro de Sesión Estricto
+        if not is_core_session(row['timestamp']): continue
         if row['ATR'] < 50: continue 
         
-        # --- FILTRO V4.8: ANTI-EXPANSION ---
-        # Si la vela anterior fue explosiva (> 1.2x ATR), es momentum fuerte en contra.
+        # Filtro Anti-Expansión (V4.8)
         prev_row = df.iloc[i-1]
         prev_range = prev_row['high'] - prev_row['low']
-        
-        if prev_range > (row['ATR'] * 1.2):
-            # print(f"DEBUG: Trade Skipped en {row['timestamp']}. Expansión Previa: {prev_range:.1f} > 1.2*ATR")
-            continue 
+        if prev_range > (row['ATR'] * 1.2): continue 
             
         zones = get_volume_profile_zones(df.iloc[i-288:i])
         if not zones: continue
@@ -214,13 +215,21 @@ def run_lab_test_v4_8():
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
-        # GATEKEEPER
+        # GATEKEEPER + AJUSTE B (FALLING KNIFE)
         penetration_threshold = 0.30 
+        
         if is_long:
+            # Filtro B: Si cerró abajo, es fuerza bajista.
+            if prev_row['close'] < val: continue 
+            
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
             if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
                 entry_signal = 'LONG'
+                
         elif is_short:
+            # Filtro B: Si cerró arriba, es fuerza alcista.
+            if prev_row['close'] > vah: continue
+            
             if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
             if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
                 entry_signal = 'SHORT'
@@ -240,33 +249,39 @@ def run_lab_test_v4_8():
             trade_log.append(trade_data)
             
             last_trade_index = i
-            if res['outcome'] == 'EARLY_EXIT':
+            if res['outcome'] in ['EARLY_EXIT', 'STAGNANT']:
                 current_cooldown = smart_cooldown
             else:
                 current_cooldown = standard_cooldown
 
     # --- REPORTE ---
     if not trade_log:
-        print("\nNo se encontraron trades.")
+        print("\nNo se encontraron trades en la Core Session.")
         return
 
     df_res = pd.DataFrame(trade_log)
-    df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
+    df_valid = df_res[~df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])] # Contamos Stagnant como scratch técnico
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.8)")
+    print("ESTADÍSTICAS FINALES (V4.9)")
     print("="*50)
     print(f"Total Trades: {len(df_res)}")
-    scratches = len(df_res[df_res['outcome'] == 'EARLY_EXIT'])
-    print(f"Scratches: {scratches}")
     
-    if not df_valid.empty:
+    scratches = len(df_res[df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])])
+    print(f"Scratches/Stagnant: {scratches}")
+    
+    if not df_res.empty: # Calculamos sobre el total para expectancy real
         total_r = df_res['r'].sum()
         expectancy = total_r / len(df_res)
-        win_rate = len(df_valid[df_valid['r'] > 0]) / len(df_valid) * 100
         
-        print(f"TRADES VÁLIDOS:       {len(df_valid)}")
-        print(f"WIN RATE (Válidos):   {win_rate:.1f}%")
+        # Winrate de lo que NO fue scratch
+        if not df_valid.empty:
+            win_rate = len(df_valid[df_valid['r'] > 0]) / len(df_valid) * 100
+        else:
+            win_rate = 0.0
+        
+        print(f"TRADES COMPLETOS:     {len(df_valid)}")
+        print(f"WIN RATE (Completos): {win_rate:.1f}%")
         print(f"TOTAL R NETO:         {total_r:.2f} R")
         print(f"EXPECTANCY:           {expectancy:.3f} R / trade")
         
@@ -278,4 +293,4 @@ def run_lab_test_v4_8():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_8()
+    run_lab_test_v4_9()
