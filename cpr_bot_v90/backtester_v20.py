@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V230.4 FIXED (SMC Strict + Active Mgmt Hooked)
-# USO d: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
+# NIVEL: V300 (Trend Scalper - EMA/RSI Pullback)
+# USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
 import sys
@@ -16,22 +16,24 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
-TIMEFRAME = '1h'
+TIMEFRAME = '15m' # <--- CLAVE: 15 MINUTOS PARA SCALP V300
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
 try:
-    from bot_core.risk_pullback import RiskManager
+    # IMPORTAMOS EL RISK MANAGER DE SCALP V300
+    from bot_core.risk_scalp import RiskManager
     from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
 except ImportError as e:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
-        from cpr_bot_v90.bot_core.risk_pullback import RiskManager
+        from cpr_bot_v90.bot_core.risk_scalp import RiskManager
         from cpr_bot_v90.bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
     except ImportError:
         print(f"❌ Error importando bot_core: {e}")
         sys.exit(1)
 
+# --- MOCKS PARA SIMULACIÓN ---
 class MockTelegram:
     async def _send_message(self, text): pass
 
@@ -76,7 +78,8 @@ class SimulatorState:
         self.sl_moved_to_be = False
         self.last_known_position_qty = 0.0
         self.cached_atr = 0.0
-        self.active_zones = [] 
+        
+        # Variables de estado
         self.current_row = None
         self.prev_row = None
         self.current_timestamp = 0
@@ -102,7 +105,7 @@ class BacktesterV19:
         self.risk_manager = RiskManager(self.controller)
         self.commission = 0.0006
         self.base_slippage = 0.0001
-        self.tp_splits = [1.0] # 50% TP1, 50% TP2
+        self.tp_splits = [1.0] # Salida única para Scalping
 
     def calculate_dynamic_slippage(self, price, qty, candle_volume_usdt):
         if candle_volume_usdt <= 0: return 0.05
@@ -173,27 +176,14 @@ class BacktesterV19:
         sl, tps = info.get('sl'), info.get('tps', [])
         hit_sl = (info['side'] == SIDE_BUY and row.low <= sl) or (info['side'] == SIDE_SELL and row.high >= sl) if sl else False
         
-        tps_hit = []
-        for i, tp in enumerate(tps):
-            if i >= info['tps_hit_count']:
-                if (info['side'] == SIDE_BUY and row.high >= tp) or (info['side'] == SIDE_SELL and row.low <= tp):
-                    tps_hit.append((i, tp))
+        hit_tp = False
+        if tps:
+            tp_price = tps[0]
+            if (info['side'] == SIDE_BUY and row.high >= tp_price) or (info['side'] == SIDE_SELL and row.low <= tp_price):
+                hit_tp = True
         
         if hit_sl: self.close_position("SL", sl, row.quote_asset_volume); return
-        
-        for idx, tp_price in tps_hit:
-            if info['quantity'] <= 0: break
-            if idx == len(tps) - 1: self.close_position("TP Final", tp_price, row.quote_asset_volume); return
-            else: self._process_partial_tp(idx, tp_price, row.quote_asset_volume)
-
-    def _process_partial_tp(self, tp_idx, price, vol_usdt):
-        info = self.state.current_position_info
-        total_initial = info.get('initial_quantity', info['quantity'])
-        split_pct = self.tp_splits[tp_idx] if tp_idx < len(self.tp_splits) else 0.0
-        # Simplificación: cerramos % del total inicial
-        qty = min(total_initial * split_pct, info['quantity'])
-        self.execute_exit(f"TP{tp_idx+1}", price, qty, vol_usdt)
-        info['tps_hit_count'] = tp_idx + 1
+        if hit_tp: self.close_position("TP", tps[0], row.quote_asset_volume); return
 
     def load_data(self):
         if self.custom_file:
@@ -228,45 +218,29 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- CÁLCULO DE ESTRUCTURA ---
-            df['is_swing_high'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(2)) & \
-                                  (df['high'] > df['high'].shift(-1)) & (df['high'] > df['high'].shift(-2))
+            # --- INDICADORES SCALP V300 ---
             
-            df['is_swing_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(2)) & \
-                                 (df['low'] < df['low'].shift(-1)) & (df['low'] < df['low'].shift(-2))
+            # 1. EMAs para Tendencia
+            df['ema_50'] = df['close'].ewm(span=50).mean().shift(1)
+            df['ema_200'] = df['close'].ewm(span=200).mean().shift(1)
             
-            df['swing_high_val'] = np.where(df['is_swing_high'], df['high'], np.nan)
-            df['swing_low_val'] = np.where(df['is_swing_low'], df['low'], np.nan)
-            
-            df['last_swing_high'] = df['swing_high_val'].shift(2).ffill()
-            df['last_swing_low'] = df['swing_low_val'].shift(2).ffill()
-            
-            valid_highs = df['swing_high_val'].shift(2).dropna()
-            prev_valid_highs = valid_highs.shift(1)
-            df['prev_swing_high'] = prev_valid_highs.reindex(df.index).ffill()
-            
-            valid_lows = df['swing_low_val'].shift(2).dropna()
-            prev_valid_lows = valid_lows.shift(1)
-            df['prev_swing_low'] = prev_valid_lows.reindex(df.index).ffill()
+            # 2. RSI (14)
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).fillna(0)
+            loss = (-delta.where(delta < 0, 0)).fillna(0)
+            avg_gain = gain.rolling(window=14).mean()
+            avg_loss = loss.rolling(window=14).mean()
+            rs = avg_gain / avg_loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+            df['rsi'] = df['rsi'].shift(1) # Shift para no ver el futuro
 
+            # 3. ATR (Para SL/TP)
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
                 (df['low'] - df['close'].shift(1)).abs()
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
-
-            df['body_size'] = (df['close'] - df['open']).abs()
-            df['avg_body'] = df['body_size'].rolling(20).mean()
-            df['is_impulse'] = (
-                (df['body_size'] > (df['avg_body'] * 2.5)) & 
-                ((df['high'] - df['low']) > (df['atr'] * 1.2))
-            )
-            
-            df['prev_open'] = df['open'].shift(1)
-            df['prev_close'] = df['close'].shift(1)
-            df['prev_high'] = df['high'].shift(1)
-            df['prev_low'] = df['low'].shift(1)
             
             return df, target_start
         except Exception as e:
@@ -276,8 +250,8 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V230.4 (SMC Flow State)")
-        print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date}")
+        print(f"\n🛡️ INICIANDO BACKTEST V300 (Scalp Pullback)")
+        print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date} | TF: {self.timeframe}")
         print("-" * 60)
         
         for current_time, row in df.iterrows():
@@ -291,7 +265,7 @@ class BacktesterV19:
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             
             if self.state.is_in_position:
-                # --- V230.4 CRÍTICO: CONECTAR LA GESTIÓN ACTIVA ---
+                # --- GESTIÓN ACTIVA CONECTADA ---
                 await self.risk_manager.check_position_state()
                 self.check_exits(row) 
 
@@ -317,7 +291,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V230.4 (SMC Flow State) - {self.symbol}")
+        print(f"📊 REPORTE V300 (Scalp Pullback) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
