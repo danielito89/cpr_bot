@@ -82,7 +82,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V5.7 - EDGE SNIPER)
+# 3. GESTIÓN (V5.8 - KINETIC SNIPER)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -179,15 +179,15 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 11, "info": "Time Out"}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V5.7 - LOCATION FILTER)
+# 4. EJECUCIÓN (V5.8 - KINETIC FILTER)
 # ---------------------------------------------------------
 
 def is_core_session(timestamp):
     hour = timestamp.hour
     return 14 <= hour <= 16
 
-def run_v5_7_edge_sniper_test():
-    print("--- ORANGE PI LAB: V5.7 (EDGE SNIPER) ---")
+def run_v5_8_kinetic_test():
+    print("--- ORANGE PI LAB: V5.8 (KINETIC SNIPER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=50000)
     print("Calculando indicadores...")
     df = calculate_indicators(df)
@@ -196,15 +196,15 @@ def run_v5_7_edge_sniper_test():
     current_cooldown = 12 
     trade_log = []
     
-    print(f"\n--- INICIANDO BACKTEST ---")
+    print(f"\n--- INICIANDO BACKTEST (IMPULSE CHECK) ---")
     
     for i in range(500, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         
+        # Filtros Base
         if not is_core_session(row['timestamp']): continue
         if row['ATR'] < row['ATR_Threshold']: continue 
-        
         prev_row = df.iloc[i-1]
         if (prev_row['high'] - prev_row['low']) > (row['ATR'] * 1.2): continue 
             
@@ -212,47 +212,46 @@ def run_v5_7_edge_sniper_test():
         if not zones: continue
         vah, val = zones['VAH'], zones['VAL']
         
+        # --- FILTRO V5.8: IMPULSE CHECK ---
+        # Miramos 6 velas atrás (30 min) para ver si hubo un movimiento fuerte
+        lookback_impulse = 6
+        price_6_ago = df.iloc[i-lookback_impulse]['open']
+        price_now = row['close']
+        impulse_move = abs(price_now - price_6_ago)
+        
+        # El impulso previo debe ser AL MENOS 1.5 veces el ATR actual.
+        # Si el mercado llegó "arrastrándose", no operamos.
+        if impulse_move < (row['ATR'] * 1.5): 
+            # print("Trade Skipped: Low Kinetic Energy")
+            continue
+
         entry_signal = None
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
         penetration_threshold = 0.50 
         
-        # --- FILTRO V5.7: VA EDGE ONLY (25%) ---
+        # VA Edge Only
         va_range = vah - val
         edge_zone = va_range * 0.25
-        
-        # Candle Range para Strong Close
         c_range = (row['high'] - row['low'])
         if c_range == 0: continue
 
         if is_long:
-            # 1. Location (Edge Check)
-            # El precio debe haber visitado la zona baja profunda (VAL + 25%)
             if row['low'] > (val + edge_zone): continue 
-            
-            # 2. Knife + Reclaim + Penetration
             if prev_row['close'] < val: continue 
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
             if row['close'] <= val: continue 
-            
-            # 3. Strong Close
             if ((row['close'] - row['low']) / c_range) < 0.60: continue
 
             if row['RSI'] < 48 and row['delta_norm'] > 0:
                 entry_signal = 'LONG'
                 
         elif is_short:
-            # 1. Location (Edge Check)
-            # El precio debe haber visitado la zona alta profunda (VAH - 25%)
             if row['high'] < (vah - edge_zone): continue
-
-            # 2. Knife + Reclaim + Penetration
             if prev_row['close'] > vah: continue 
             if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
             if row['close'] >= vah: continue 
-
-            # 3. Strong Close
             if ((row['close'] - row['low']) / c_range) > 0.40: continue
             
             if row['RSI'] > 52 and row['delta_norm'] < 0:
@@ -295,7 +294,7 @@ def run_v5_7_edge_sniper_test():
     total_r_net = df_res['r_net'].sum()
     
     print("\n" + "="*50)
-    print("V5.7 - EDGE SNIPER (FINAL CANDIDATE)")
+    print("V5.8 - KINETIC SNIPER (IMPULSE FILTER)")
     print("="*50)
     print(f"Total Trades:   {len(df_res)}")
     print(f"TOTAL R NETO:   {total_r_net:.2f} R")
@@ -313,4 +312,4 @@ def run_v5_7_edge_sniper_test():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_v5_7_edge_sniper_test()
+    run_v5_8_kinetic_test()
