@@ -10,89 +10,123 @@ class RiskManager:
         self.orders_manager = bot_controller.orders_manager
         self.config = bot_controller 
         
-        # Config V303: NY Momentum Sniper
+        # Config V303.2: NY Momentum Sniper (One Shot)
         self.risk_per_trade = 0.015   # 1.5%
         self.max_leverage = 5.0      
-        self.min_rr = 1.5             # Exigimos recorrido
+        self.min_rr = 1.5             
         
         # Filtros de Sesión
         self.ny_session_start = 13
         self.ny_session_end = 20
         
-        # Cooldown REAL (Timestamp)
+        # --- FIX LETAL #2: LÍMITE DIARIO DURO ---
+        self.current_day = None
+        self.trades_today = 0
+        self.max_daily_trades = 1 # SOLO 1 BALA
+
+        # Cooldown de seguridad (por si acaso)
         self.next_allowed_trade_ts = 0
 
     async def seek_new_trade(self, _):
         row = self.state.current_row
-        # Convertir timestamp a objeto datetime para check de hora
         current_dt = datetime.fromtimestamp(self.state.current_timestamp)
         
-        # 1. FILTRO DE SESIÓN (NY Only)
+        # 1. GESTIÓN DE LÍMITE DIARIO
+        day = current_dt.date()
+        if self.current_day != day:
+            self.current_day = day
+            self.trades_today = 0 # Nuevo día, recargamos la bala
+            
+        # Si ya gastamos la bala de hoy, adiós.
+        if self.trades_today >= self.max_daily_trades:
+            return
+
+        # 2. FILTRO DE SESIÓN (NY Only)
         if not (self.ny_session_start <= current_dt.hour < self.ny_session_end):
             return
 
-        # 2. COOLDOWN ABSOLUTO (V303 FIX)
-        # Si estamos "castigados" por tiempo, no operamos.
+        # 3. COOLDOWN ABSOLUTO
         if self.state.current_timestamp < self.next_allowed_trade_ts:
             return
 
         current_price = row.close
         atr = self.state.cached_atr
         
-        # Indicadores V303
+        # Indicadores
         donchian_high = getattr(row, 'donchian_high', 0)
         donchian_low = getattr(row, 'donchian_low', 0)
         atr_ma = getattr(row, 'atr_ma', 0)
         
         if not atr or donchian_high == 0 or atr_ma == 0: return
 
-        # 3. FILTRO DE EXPANSIÓN (V303 FIX)
-        # Solo entramos si la volatilidad está por encima de su media.
-        # Esto evita entrar en rangos muertos.
-        if atr < (atr_ma * 1.05): return
+        # 4. FILTROS DE CALIDAD (Expansión y Rango)
+        if atr < (atr_ma * 1.05): return # Exigimos expansión de volatilidad
         
-        # 4. FILTRO DE VELA MUERTA (V303 FIX)
-        # Si la vela actual es microscópica, no hay momentum real.
         range_pct = (row.high - row.low) / row.close
-        if range_pct < 0.003: return 
+        if range_pct < 0.003: return # Evitamos velas doji/muertas
 
         async with self.bot.lock:
             if self.state.is_in_position: return
             
             best_setup = None
             
-            # --- SETUP LONG (Breakout Estructural 2H) ---
+            # --- SETUP LONG ---
+            # Ruptura del máximo de 2 horas
             is_breakout_up = current_price > donchian_high
             
-            # Confirmación: Cierre fuerte
-            # El cierre debe estar en el tercio superior de la vela
-            strong_close = row.close > (row.low + (row.high - row.low) * 0.66)
+            # Fuerza de cierre (Evitar mechas largas arriba)
+            body_strength = (row.close - row.low) / (row.high - row.low + 0.00001)
+            strong_close = body_strength > 0.6
             
             if is_breakout_up and strong_close:
-                entry = current_price
-                # SL: 1.0 ATR (Espacio justo)
-                stop_loss = entry - (atr * 1.0)
+                # --- FIX LETAL #3: CÁLCULO DESDE LA RUPTURA ---
+                # No calculamos desde el cierre (que puede ser eufórico),
+                # sino desde el nivel de ruptura + un filtro.
+                breakout_level = donchian_high
                 
-                # TP ASIMÉTRICO (V303 FIX): 1.8R
+                # Entry teórico (para cálculo de TP/SL)
+                # Asumimos que entramos "mal" (al cierre o apertura sig), pero
+                # anclamos el SL a la estructura, no a nuestra mala entrada.
+                ref_price = breakout_level
+                
+                # SL: 1 ATR desde la ruptura (más estable)
+                stop_loss = ref_price - (atr * 1.0)
+                
+                # TP: 1.8 ATR desde la ruptura
+                take_profit = ref_price + (atr * 1.8)
+                
+                # Entry Real: El precio actual (para mandar la orden)
+                entry = current_price 
+                
+                # Validar si vale la pena entrar tan tarde
+                # Si el precio ya corrió más de 0.5 ATR desde la ruptura, es tarde.
+                if (entry - breakout_level) > (atr * 0.5):
+                    return 
+
                 risk = entry - stop_loss
-                take_profit = entry + (risk * 1.8)
-                
                 if risk > 0:
                     best_setup = (SIDE_BUY, entry, stop_loss, take_profit, "NY Sniper Long")
 
-            # --- SETUP SHORT (Breakdown Estructural 2H) ---
+            # --- SETUP SHORT ---
             is_breakout_down = current_price < donchian_low
             
-            # Confirmación: Cierre fuerte abajo
-            strong_close_short = row.close < (row.low + (row.high - row.low) * 0.33)
+            body_strength_short = (row.high - row.close) / (row.high - row.low + 0.00001)
+            strong_close_short = body_strength_short > 0.6
             
             if is_breakout_down and strong_close_short:
+                breakout_level = donchian_low
+                ref_price = breakout_level
+                
+                stop_loss = ref_price + (atr * 1.0)
+                take_profit = ref_price - (atr * 1.8)
+                
                 entry = current_price
-                stop_loss = entry + (atr * 1.0)
                 
+                # Filtro Late Entry
+                if (breakout_level - entry) > (atr * 0.5):
+                    return
+
                 risk = stop_loss - entry
-                take_profit = entry - (risk * 1.8)
-                
                 if risk > 0:
                     best_setup = (SIDE_SELL, entry, stop_loss, take_profit, "NY Sniper Short")
 
@@ -115,14 +149,16 @@ class RiskManager:
                 if qty > 0:
                     tps = [float(format_price(self.config.tick_size, tp))]
                     
-                    # ACTIVAR COOLDOWN: 2 HORAS (7200 segundos)
-                    self.next_allowed_trade_ts = self.state.current_timestamp + 7200
+                    # QUEMAR LA BALA DEL DÍA
+                    self.trades_today += 1
+                    # Cooldown extra de 4 horas por si acaso
+                    self.next_allowed_trade_ts = self.state.current_timestamp + 14400 
                     
-                    logging.info(f"!!! SIGNAL V303 !!! {label} | ATR Exp: {atr > atr_ma}")
+                    logging.info(f"!!! SIGNAL V303.2 !!! {label} | Daily: {self.trades_today}/1")
                     await self.orders_manager.place_bracket_order(side, qty, entry, sl, tps, label)
 
     async def check_position_state(self):
-        # Time Exit de Seguridad (si se estanca, salimos)
+        # Time Exit: 8 velas (2 horas)
         async with self.bot.lock:
             try:
                 pos = await self.bot._get_current_position()
@@ -131,11 +167,8 @@ class RiskManager:
                 entry_time = self.state.current_position_info.get('entry_time', 0)
                 current_time = self.state.current_timestamp
                 
-                # Si pasaron 8 velas (2 horas) y no tocó TP/SL -> FUERA
-                # Momentum que no paga rápido, no sirve.
                 candles_open = (current_time - entry_time) / 900 
                 
                 if candles_open >= 8:
                      await self.orders_manager.close_position_manual("Time Exit (Stagnant)")
-
             except: pass
