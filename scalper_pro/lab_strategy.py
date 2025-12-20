@@ -29,10 +29,8 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=4000
             time.sleep(0.2)
         except Exception as e:
             break
-            
     if len(all_ohlcv) > total_candles:
         all_ohlcv = all_ohlcv[-total_candles:]
-    
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
@@ -82,10 +80,13 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN "DAMAGE CONTROL" (V4.3)
+# 3. GESTIÓN "STRUCTURAL HYBRID" (V4.4)
 # ---------------------------------------------------------
 
-def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta):
+def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
+    """
+    Ahora recibe 'zone_level' para validar ruptura estructural.
+    """
     risk_per_share = atr_value * 1.5 
     tp1_ratio = 0.8
     
@@ -95,7 +96,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     
     tp1_hit = False
     
-    # 1. SMART EARLY EXIT (Limitado por Daño Máximo)
+    # 1. HYBRID EARLY EXIT (Cost Control + Structural Integrity)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
@@ -103,7 +104,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         
         potential_early_exit = False
         
-        # Check condiciones técnicas (Delta + Precio)
+        # A. Trigger Técnico (Delta + Precio en contra)
         if direction == 'LONG':
             if next_delta < -tolerance and next_candle['close'] < entry_price:
                 potential_early_exit = True
@@ -112,17 +113,28 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 potential_early_exit = True
         
         if potential_early_exit:
-            # CALCULAR DAÑO PRIMERO
+            # Calcular R Actual
             exit_price = next_candle['close']
             pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
             r_realized = pnl / risk_per_share
             
-            # --- AJUSTE V4.3: SOLO SALIR SI EL DAÑO ES MENOR A -0.35 R ---
-            if r_realized >= -0.35:
-                return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": "Safe Scratch (<0.35R)"}
+            # B. Trigger Estructural (¿Rompió el nivel?)
+            # Buffer del 10% del ATR para evitar ruido de mechas milimétricas
+            structural_break = False
+            if direction == 'LONG':
+                if next_candle['low'] < (zone_level - atr_value * 0.1):
+                    structural_break = True
+            elif direction == 'SHORT':
+                if next_candle['high'] > (zone_level + atr_value * 0.1):
+                    structural_break = True
+            
+            # --- DECISIÓN FINAL HÍBRIDA ---
+            # Salimos si es barato (>= -0.35R) O si la estructura se rompió (structural_break)
+            if r_realized >= -0.35 or structural_break:
+                reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
+                return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
             else:
-                # Si el daño es mayor, ignoramos la señal y dejamos que el sistema respire.
-                pass 
+                pass # Es caro y la estructura aguanta -> HOLD.
 
     # 2. GESTIÓN NORMAL
     for j in range(1, 9):
@@ -167,8 +179,8 @@ def is_ny_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 17
 
-def run_lab_test_v4_3():
-    print("--- ORANGE PI LAB: STRATEGY V4.3 (DAMAGE CONTROL) ---")
+def run_lab_test_v4_4():
+    print("--- ORANGE PI LAB: STRATEGY V4.4 (STRUCTURAL HYBRID) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=4000)
     
     print("Calculando indicadores...")
@@ -183,7 +195,7 @@ def run_lab_test_v4_3():
     
     trade_log = []
     
-    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS ---")
+    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS (NY SESSION) ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
@@ -208,7 +220,10 @@ def run_lab_test_v4_3():
                 entry_signal = 'SHORT'
                 
         if entry_signal:
-            res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'])
+            # Pasar ZONE LEVEL (VAL para Long, VAH para Short)
+            zone_level = val if entry_signal == 'LONG' else vah
+            
+            res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
             
             trade_data = {
                 "time": row['timestamp'],
@@ -216,11 +231,12 @@ def run_lab_test_v4_3():
                 "price": row['close'],
                 "outcome": res['outcome'],
                 "r": res['r_realized'],
-                "bars": res['bars']
+                "bars": res['bars'],
+                "info": res['info']
             }
             trade_log.append(trade_data)
             
-            print(f"[{row['timestamp']}] {entry_signal:<5} | {res['outcome']:<10} | R: {res['r_realized']:.2f}")
+            print(f"[{row['timestamp']}] {entry_signal:<5} | {res['outcome']:<10} | R: {res['r_realized']:.2f} | {res['info']}")
             
             last_trade_index = i
             if res['outcome'] == 'EARLY_EXIT':
@@ -238,7 +254,7 @@ def run_lab_test_v4_3():
     df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.3 - DAMAGE CONTROL)")
+    print("ESTADÍSTICAS FINALES (V4.4 - STRUCTURAL HYBRID)")
     print("="*50)
     
     scratches_cost = df_scratch['r'].mean() if not df_scratch.empty else 0.0
@@ -260,4 +276,4 @@ def run_lab_test_v4_3():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_3()
+    run_lab_test_v4_4()
