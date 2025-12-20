@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V303 (NY Momentum Scalp)
+# NIVEL: V401 (NY Momentum Scalp)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -219,31 +219,24 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- INDICADORES V400 (LIQUIDITY SCALP) ---
+            # --- INDICADORES V401 (VWAP RECLAIM) ---
             
-            # 1. Simulación de Tendencia 1H en 15m
-            # EMA 50 (1H) ~= EMA 200 (15m)
-            # EMA 200 (1H) ~= EMA 800 (15m)
-            df['trend_fast'] = df['close'].ewm(span=200).mean().shift(1)
-            df['trend_slow'] = df['close'].ewm(span=800).mean().shift(1)
+            # 1. EMA 200 (Tendencia Base)
+            df['ema_200'] = df['close'].ewm(span=200).mean().shift(1)
             
-            # 2. Zona de Valor (EMA 50 local)
-            df['ema_local'] = df['close'].ewm(span=50).mean().shift(1)
+            # 2. Rolling VWAP (24 horas = 96 velas de 15m)
+            # Aproximación algorítmica robusta del VWAP sin reset diario duro
+            v = df['volume']
+            tp = (df['high'] + df['low'] + df['close']) / 3
+            df['vwap'] = (tp * v).rolling(96).sum() / v.rolling(96).sum()
+            df['vwap'] = df['vwap'].shift(1) # Shift para no ver el futuro
             
-            # 3. RSI (14)
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).fillna(0)
-            loss = (-delta.where(delta < 0, 0)).fillna(0)
-            avg_gain = gain.rolling(window=14).mean()
-            avg_loss = loss.rolling(window=14).mean()
-            rs = avg_gain / avg_loss
-            df['rsi'] = 100 - (100 / (1 + rs))
-            df['rsi'] = df['rsi'].shift(1)
-
-            # 4. Volumen Relativo (Para detectar secado de volumen en el dip)
-            df['vol_ma'] = df['volume'].rolling(20).mean().shift(1)
+            # 3. Estructura Reciente (Para SL Estructural)
+            # Mínimo/Máximo de las últimas 10 velas (2.5 horas)
+            df['struct_low'] = df['low'].rolling(10).min().shift(1)
+            df['struct_high'] = df['high'].rolling(10).max().shift(1)
             
-            # 5. ATR (SL/TP)
+            # 4. ATR (TP/Gestión)
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
@@ -259,7 +252,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V303 (NY Momentum Scalp)")
+        print(f"\n🛡️ INICIANDO BACKTEST V401 (NY Momentum Scalp)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date} | TF: {self.timeframe}")
         print("-" * 60)
         
@@ -300,7 +293,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V303 (NY Momentum Scalp) - {self.symbol}")
+        print(f"📊 REPORTE V401 (NY Momentum Scalp) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
