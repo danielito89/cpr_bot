@@ -23,12 +23,12 @@ CAPITAL_INICIAL = 1000
 
 try:
     # IMPORTAMOS EL RISK MANAGER DE MOMENTUM V302
-    from bot_core.risk_momentum import RiskManager
+    from bot_core.risk_v400 import RiskManager
     from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
 except ImportError as e:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
-        from cpr_bot_v90.bot_core.risk_momentum import RiskManager
+        from cpr_bot_v90.bot_core.risk_v400 import RiskManager
         from cpr_bot_v90.bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
     except ImportError:
         print(f"❌ Error importando bot_core: {e}")
@@ -219,20 +219,37 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
-            # --- INDICADORES V303 (NY SNIPER) ---
+            # --- INDICADORES V400 (LIQUIDITY SCALP) ---
             
-            # 1. Donchian Channel (8 velas = 2 horas) -> Estructura más sólida
-            df['donchian_high'] = df['high'].rolling(8).max().shift(1)
-            df['donchian_low'] = df['low'].rolling(8).min().shift(1)
+            # 1. Simulación de Tendencia 1H en 15m
+            # EMA 50 (1H) ~= EMA 200 (15m)
+            # EMA 200 (1H) ~= EMA 800 (15m)
+            df['trend_fast'] = df['close'].ewm(span=200).mean().shift(1)
+            df['trend_slow'] = df['close'].ewm(span=800).mean().shift(1)
             
-            # 2. ATR & ATR MA (Para detectar expansión)
+            # 2. Zona de Valor (EMA 50 local)
+            df['ema_local'] = df['close'].ewm(span=50).mean().shift(1)
+            
+            # 3. RSI (14)
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).fillna(0)
+            loss = (-delta.where(delta < 0, 0)).fillna(0)
+            avg_gain = gain.rolling(window=14).mean()
+            avg_loss = loss.rolling(window=14).mean()
+            rs = avg_gain / avg_loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+            df['rsi'] = df['rsi'].shift(1)
+
+            # 4. Volumen Relativo (Para detectar secado de volumen en el dip)
+            df['vol_ma'] = df['volume'].rolling(20).mean().shift(1)
+            
+            # 5. ATR (SL/TP)
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
                 (df['low'] - df['close'].shift(1)).abs()
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
-            df['atr_ma'] = df['atr'].rolling(20).mean().shift(1) # Media del ATR
             
             return df, target_start
         except Exception as e:
