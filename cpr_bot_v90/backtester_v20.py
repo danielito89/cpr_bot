@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: v600 (Trend Swing Protected)
+# NIVEL: V600 (Hybrid Trend + Trap)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -16,18 +16,18 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 DEFAULT_SYMBOL = "ETHUSDT"
 DEFAULT_START_DATE = "2022-01-01"
-TIMEFRAME = '1h' # <--- v600: SWING TRADING 1H
+TIMEFRAME = '1h' # <--- V600 USA 1H
 BUFFER_DAYS = 200
 CAPITAL_INICIAL = 1000
 
 try:
-    # IMPORTAMOS EL RISK MANAGER v600
-    from bot_core.risk_swing import RiskManager
+    # IMPORTAMOS EL RISK MANAGER V600
+    from bot_core.risk_hybrid import RiskManager
     from bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
 except ImportError as e:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
-        from cpr_bot_v90.bot_core.risk_swing import RiskManager
+        from cpr_bot_v90.bot_core.risk_hybrid import RiskManager
         from cpr_bot_v90.bot_core.utils import format_price, format_qty, SIDE_BUY, SIDE_SELL
     except ImportError:
         print(f"❌ Error importando bot_core: {e}")
@@ -105,7 +105,7 @@ class BacktesterV19:
         self.risk_manager = RiskManager(self.controller)
         self.commission = 0.0006
         self.base_slippage = 0.0001
-        self.tp_splits = [1.0] # Salida única (Trailing se encarga)
+        self.tp_splits = [1.0]
 
     def calculate_dynamic_slippage(self, price, qty, candle_volume_usdt):
         if candle_volume_usdt <= 0: return 0.05
@@ -221,22 +221,16 @@ class BacktesterV19:
             # --- INDICADORES V600 (HYBRID) ---
             
             # 1. Simulación de Tendencia 4H en 1H
-            df['ema_trend_fast'] = df['close'].ewm(span=200).mean().shift(1) # Equivale a EMA 50 en 4H
-            df['ema_trend_slow'] = df['close'].ewm(span=800).mean().shift(1) # Equivale a EMA 200 en 4H
+            # EMA 50 en 4H ~= EMA 200 en 1H
+            # EMA 200 en 4H ~= EMA 800 en 1H
+            df['ema_trend_fast'] = df['close'].ewm(span=200).mean().shift(1)
+            df['ema_trend_slow'] = df['close'].ewm(span=800).mean().shift(1)
             
-            # 2. Estructura para Trampas (V230 logic)
-            df['last_swing_high'] = df['high'].rolling(5).max().shift(1) # Swing corto
+            # 2. Estructura para Trampas (Swing de 5 velas)
+            df['last_swing_high'] = df['high'].rolling(5).max().shift(1)
             df['last_swing_low'] = df['low'].rolling(5).min().shift(1)
             
             # 3. ATR
-            tr = pd.concat([
-                df['high'] - df['low'], 
-                (df['high'] - df['close'].shift(1)).abs(), 
-                (df['low'] - df['close'].shift(1)).abs()
-            ], axis=1).max(axis=1)
-            df['atr'] = tr.rolling(14).mean().shift(1)
-
-            # 4. ATR (Para SL/Trailing)
             tr = pd.concat([
                 df['high'] - df['low'], 
                 (df['high'] - df['close'].shift(1)).abs(), 
@@ -252,7 +246,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST v600 (Hybrid)")
+        print(f"\n🛡️ INICIANDO BACKTEST v600 (Hybrid Trend + Trap)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date} | TF: {self.timeframe}")
         print("-" * 60)
         
@@ -267,7 +261,7 @@ class BacktesterV19:
             if self.state.pending_order and not self.state.is_in_position: self.execute_pending_order(row)
             
             if self.state.is_in_position:
-                # --- v600: GESTIÓN ACTIVA (CRASH MONITOR + TRAILING) ---
+                # --- V600: GESTIÓN ACTIVA CONECTADA ---
                 await self.risk_manager.check_position_state()
                 self.check_exits(row) 
 
@@ -293,7 +287,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE v600 (Trend Swing Protected) - {self.symbol}")
+        print(f"📊 REPORTE V600 (Hybrid Trend + Trap) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
