@@ -5,18 +5,19 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. UTILIDADES Y DESCARGA
+# 1. UTILIDADES Y DESCARGA MASIVA
 # ---------------------------------------------------------
 
-def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=4000):
+def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=15000):
     exchange = ccxt.binance()
     limit_per_call = 1000
-    print(f"📡 Descargando historial extendido ({total_candles} velas)...")
+    print(f"📡 Descargando historial masivo ({total_candles} velas)...")
     
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit_per_call)
     all_ohlcv = ohlcv
     timeframe_duration_seconds = 5 * 60 
     
+    # Barra de progreso simple
     while len(all_ohlcv) < total_candles:
         oldest_timestamp = all_ohlcv[0][0]
         since_timestamp = oldest_timestamp - (limit_per_call * timeframe_duration_seconds * 1000)
@@ -25,10 +26,14 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=4000
             new_batch = [x for x in new_batch if x[0] < oldest_timestamp]
             if not new_batch: break
             all_ohlcv = new_batch + all_ohlcv
-            print(f"   ... Cargadas {len(all_ohlcv)} velas")
-            time.sleep(0.2)
+            
+            if len(all_ohlcv) % 2000 == 0:
+                print(f"   ... {len(all_ohlcv)} velas cargadas")
+            time.sleep(0.15) # Rate limit friendly
         except Exception as e:
+            print(f"Error: {e}")
             break
+            
     if len(all_ohlcv) > total_candles:
         all_ohlcv = all_ohlcv[-total_candles:]
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -80,7 +85,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V4.4 - STRUCTURAL HYBRID) - SIN CAMBIOS
+# 3. GESTIÓN (V4.6 - THE ACCELERATOR)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -89,9 +94,11 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     sl_price = entry_price - risk_per_share if direction == 'LONG' else entry_price + risk_per_share
     tp1_price = entry_price + (risk_per_share * tp1_ratio) if direction == 'LONG' else entry_price - (risk_per_share * tp1_ratio)
     tp2_price = entry_price + (risk_per_share * 2.0) if direction == 'LONG' else entry_price - (risk_per_share * 2.0)
-    tp1_hit = False
     
-    # HYBRID EARLY EXIT
+    tp1_hit = False
+    late_tp1_triggered = False # Flag para diferenciar en el log
+    
+    # 1. HYBRID EARLY EXIT (V4.4)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
@@ -107,7 +114,6 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
             exit_price = next_candle['close']
             pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
             r_realized = pnl / risk_per_share
-            
             structural_break = False
             if direction == 'LONG':
                 if next_candle['low'] < (zone_level - atr_value * 0.1): structural_break = True
@@ -118,50 +124,79 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
                 return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
 
-    # NORMAL MANAGEMENT
+    # 2. GESTIÓN NORMAL + V4.6 ACCELERATOR
     for j in range(1, 9):
         if entry_index + j >= len(df): break
         row = df.iloc[entry_index + j]
-        curr_low, curr_high = row['low'], row['high']
+        curr_low, curr_high, curr_close = row['low'], row['high'], row['close']
         
+        # --- V4.6: MID-GAME ACCELERATOR (Bar 4) ---
+        if j == 4 and not tp1_hit:
+            # Calcular R flotante al cierre de la vela 4
+            current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
+            current_r = current_pnl / risk_per_share
+            
+            if current_r >= 0.5:
+                tp1_hit = True
+                sl_price = entry_price # Move to BE
+                late_tp1_triggered = True # Marcamos que fue por aceleración
+                # No retornamos, seguimos buscando TP2 pero protegidos
+        
+        # --- Lógica Estándar ---
         if direction == 'LONG':
             if curr_low <= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
-                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
+                # Si fue por Late TP1, es un BE positivo técnicamente (o small win)
+                info = "Late TP1 BE" if late_tp1_triggered else "SL Hit"
+                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": info}
+            
             if curr_high >= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
+            
             if not tp1_hit and curr_high >= tp1_price:
                 tp1_hit = True
                 sl_price = entry_price 
-        else:
+                
+        else: # SHORT
             if curr_high >= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
-                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": "SL Hit"}
+                info = "Late TP1 BE" if late_tp1_triggered else "SL Hit"
+                return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": info}
+            
             if curr_low <= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
+            
             if not tp1_hit and curr_low <= tp1_price:
                 tp1_hit = True
                 sl_price = entry_price 
 
+    # 3. TIME STOP
     exit_price = df.iloc[entry_index + 8]['close'] if entry_index + 8 < len(df) else df.iloc[-1]['close']
     pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
     r_realized = pnl / risk_per_share
-    if tp1_hit: r_realized = max(r_realized, 0.4) 
-    return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": "Time Out"}
+    
+    # Si cobramos TP1 (Normal o Late), aseguramos ganancia
+    if tp1_hit: 
+        min_win = 0.5 if late_tp1_triggered else 0.4 
+        r_realized = max(r_realized, min_win)
+    
+    info_msg = "Time Out (Late TP1)" if late_tp1_triggered else "Time Out"
+    return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": info_msg}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V4.5 - THE GATEKEEPER)
+# 4. EJECUCIÓN (V4.6 - FINAL BACKTEST)
 # ---------------------------------------------------------
 
 def is_ny_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 17
 
-def run_lab_test_v4_5():
-    print("--- ORANGE PI LAB: STRATEGY V4.5 (GATEKEEPER) ---")
-    df = fetch_extended_history('BTC/USDT', '5m', total_candles=4000)
+def run_lab_test_v4_6():
+    print("--- ORANGE PI LAB: STRATEGY V4.6 (THE ACCELERATOR) ---")
+    # Descarga MASIVA para validación final
+    df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
     
     print("Calculando indicadores...")
     df['RSI'] = calculate_rsi_manual(df['close'], 14)
@@ -175,7 +210,7 @@ def run_lab_test_v4_5():
     
     trade_log = []
     
-    print(f"\n--- ANALIZANDO ÚLTIMOS {len(df)} PERIODOS (NY SESSION + PENETRATION FILTER) ---")
+    print(f"\n--- BACKTEST EXTENDIDO ({len(df)} Velas) ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
@@ -191,27 +226,14 @@ def run_lab_test_v4_5():
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
-        # --- FILTRO V4.5: PENETRATION CHECK ---
-        # Si la vela penetró demasiado la zona, es Aceptación, no Rechazo.
-        penetration_threshold = 0.30 # 30% del ATR
-        
+        # GATEKEEPER (V4.5)
+        penetration_threshold = 0.30 
         if is_long:
-            # Cuánto bajó la mecha por debajo del VAL
-            penetration = val - row['low']
-            if penetration > (row['ATR'] * penetration_threshold):
-                # print(f"DEBUG: Filtro Long activado en {row['timestamp']}. Penetracion excesiva.")
-                continue # Skip trade
-            
+            if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
             if row['RSI'] < 45 and row['delta_norm'] > 0 and df['cvd'].iloc[i] > df['cvd'].iloc[i-3]:
                 entry_signal = 'LONG'
-                
         elif is_short:
-            # Cuánto subió la mecha por encima del VAH
-            penetration = row['high'] - vah
-            if penetration > (row['ATR'] * penetration_threshold):
-                # print(f"DEBUG: Filtro Short activado en {row['timestamp']}. Penetracion excesiva.")
-                continue # Skip trade
-
+            if (row['high'] - vah) > (row['ATR'] * penetration_threshold): continue
             if row['RSI'] > 55 and row['delta_norm'] < 0 and df['cvd'].iloc[i] < df['cvd'].iloc[i-3]:
                 entry_signal = 'SHORT'
                 
@@ -225,12 +247,12 @@ def run_lab_test_v4_5():
                 "price": row['close'],
                 "outcome": res['outcome'],
                 "r": res['r_realized'],
-                "bars": res['bars'],
                 "info": res['info']
             }
             trade_log.append(trade_data)
             
-            print(f"[{row['timestamp']}] {entry_signal:<5} | {res['outcome']:<10} | R: {res['r_realized']:.2f} | {res['info']}")
+            # Print simplificado para no saturar consola con 15k velas
+            # print(f"[{row['timestamp']}] {entry_signal:<5} | {res['outcome']:<10} | R: {res['r_realized']:.2f}")
             
             last_trade_index = i
             if res['outcome'] == 'EARLY_EXIT':
@@ -238,36 +260,40 @@ def run_lab_test_v4_5():
             else:
                 current_cooldown = standard_cooldown
 
-    # --- REPORTE ---
+    # --- REPORTE MASIVO ---
     if not trade_log:
         print("\nNo se encontraron trades.")
         return
 
     df_res = pd.DataFrame(trade_log)
-    df_scratch = df_res[df_res['outcome'] == 'EARLY_EXIT']
     df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.5 - THE GATEKEEPER)")
+    print("ESTADÍSTICAS FINALES (EXTENDED BACKTEST)")
     print("="*50)
+    print(f"Data Range: {df['timestamp'].iloc[0]} -> {df['timestamp'].iloc[-1]}")
+    print(f"Total Trades: {len(df_res)}")
     
-    scratches_cost = df_scratch['r'].mean() if not df_scratch.empty else 0.0
-    print(f"Scratches: {len(df_scratch)} (Costo prom: {scratches_cost:.2f} R)")
+    scratches = len(df_res[df_res['outcome'] == 'EARLY_EXIT'])
+    print(f"Scratches: {scratches}")
     
-    total_r = df_res['r'].sum()
-    expectancy = total_r / len(df_res)
-    
-    print("-" * 50)
     if not df_valid.empty:
+        total_r = df_res['r'].sum()
+        expectancy = total_r / len(df_res)
         win_rate = len(df_valid[df_valid['r'] > 0]) / len(df_valid) * 100
+        
         print(f"TRADES VÁLIDOS:       {len(df_valid)}")
         print(f"WIN RATE (Válidos):   {win_rate:.1f}%")
+        print(f"TOTAL R NETO:         {total_r:.2f} R")
+        print(f"EXPECTANCY:           {expectancy:.3f} R / trade")
+        
+        # Equity Curve simple
+        print("\nEvolución de R Acumulado (Últimos 10 trades):")
+        print(df_res['r'].tail(10).cumsum())
     
-    print(f"TOTAL R NETO:         {total_r:.2f} R")
-    print(f"EXPECTANCY TOTAL:     {expectancy:.2f} R / intento")
     print("-" * 50)
-    print("Distribución:")
+    print("Distribución de Outcomes:")
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_5()
+    run_lab_test_v4_6()
