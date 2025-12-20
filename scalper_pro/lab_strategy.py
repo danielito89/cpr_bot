@@ -37,7 +37,7 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
     return df
 
 # ---------------------------------------------------------
-# 2. INDICADORES
+# 2. INDICADORES + ATR DINÁMICO
 # ---------------------------------------------------------
 
 def calculate_indicators(df):
@@ -58,6 +58,11 @@ def calculate_indicators(df):
     low_close = np.abs(df['low'] - df['close'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(window=14).mean()
+    
+    # --- V5.0: ATR DINÁMICO (PERCENTIL) ---
+    # Calculamos el umbral dinámico (Percentil 40 de las últimas 500 velas)
+    df['ATR_Threshold'] = df['ATR'].rolling(window=500).quantile(0.4)
+    
     return df
 
 def get_volume_profile_zones(df, lookback_bars=288):
@@ -79,7 +84,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V4.9.1 - BALANCED SNIPER)
+# 3. GESTIÓN (V5.0 - THE ROBUST ONE)
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -92,7 +97,7 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     tp1_hit = False
     late_tp1_triggered = False 
     
-    # 1. EARLY EXIT
+    # 1. EARLY EXIT (V4.4 Logic)
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
@@ -123,22 +128,26 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
         row = df.iloc[entry_index + j]
         curr_low, curr_high, curr_close = row['low'], row['high'], row['close']
         
-        # --- BAR 4 CHECK: STAGNANT vs ACCELERATOR ---
+        current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
+        current_r = current_pnl / risk_per_share
+
+        # --- AJUSTE C: STAGNANT ESCALONADO ---
+        
+        # BAR 4: Salida barata (-0.05R)
         if j == 4 and not tp1_hit:
-            current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
-            current_r = current_pnl / risk_per_share
-            
-            # A) STAGNANT CHECK (Si R < 0.10, cortar con pérdida fija -0.10)
             if current_r < 0.10:
-                return {"outcome": "STAGNANT", "r_realized": -0.10, "bars": j, "info": "No Momentum (Bar 4)"}
-            
-            # B) ACCELERATOR CHECK (Si R >= 0.50, TP1 Hit)
-            # Nota: Si está entre 0.10 y 0.50, sigue vivo.
+                return {"outcome": "STAGNANT", "r_realized": -0.05, "bars": j, "info": "Stagnant Bar 4"}
+            # Accelerator
             if current_r >= 0.50:
                 tp1_hit = True
                 sl_price = entry_price 
                 late_tp1_triggered = True 
         
+        # BAR 6: Salida media (-0.15R) - Si sobrevivió la 4 pero sigue sin arrancar
+        if j == 6 and not tp1_hit:
+             if current_r < 0.20: # Exigimos un poco más de avance en barra 6
+                return {"outcome": "STAGNANT", "r_realized": -0.15, "bars": j, "info": "Stagnant Bar 6"}
+
         # SL / TP Logic
         if direction == 'LONG':
             if curr_low <= sl_price:
@@ -171,18 +180,18 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": info_msg}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V4.9.1 - FINAL BALANCE)
+# 4. EJECUCIÓN (V5.0 - FINAL)
 # ---------------------------------------------------------
 
-# --- AJUSTE B: SESIÓN EXPANDIDA ---
+# AJUSTE A: SESIÓN ESTRICTA (CALIDAD)
 def is_core_session(timestamp):
     hour = timestamp.hour
-    return 14 <= hour <= 17 # 14:00 - 17:59 (4 horas)
+    return 14 <= hour <= 16 # 14:00 - 16:59 (3 horas de oro)
 
-def run_lab_test_v4_9_1():
-    print("--- ORANGE PI LAB: STRATEGY V4.9.1 (BALANCED SNIPER) ---")
+def run_lab_test_v5_0():
+    print("--- ORANGE PI LAB: STRATEGY V5.0 (THE ROBUST ONE) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
-    print("Calculando indicadores...")
+    print("Calculando indicadores (incl. ATR Percentil)...")
     df = calculate_indicators(df)
     
     last_trade_index = -999
@@ -191,15 +200,19 @@ def run_lab_test_v4_9_1():
     current_cooldown = standard_cooldown
     trade_log = []
     
-    print(f"\n--- BACKTEST: EXTENDED SESSION + BAR 4 STOP ---")
+    print(f"\n--- BACKTEST FINAL: FEES SIMULADOS INCLUIDOS ---")
     
-    for i in range(300, len(df)):
+    for i in range(500, len(df)): # Empezamos en 500 para tener data del ATR Percentil
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         
-        # Filtro de Sesión Expandido
+        # Filtro de Sesión Estricto
         if not is_core_session(row['timestamp']): continue
-        if row['ATR'] < 50: continue 
+        
+        # AJUSTE B: ATR DINÁMICO
+        # Si el ATR actual es menor que el percentil 40 histórico -> Mercado Muerto
+        if row['ATR'] < row['ATR_Threshold']: 
+            continue 
         
         # Filtro Anti-Expansión (V4.8)
         prev_row = df.iloc[i-1]
@@ -233,12 +246,18 @@ def run_lab_test_v4_9_1():
             zone_level = val if entry_signal == 'LONG' else vah
             res = manage_trade_r_logic(df, i, row['close'], entry_signal, row['ATR'], row['delta_norm'], zone_level)
             
+            # --- SIMULACIÓN DE FEES + SLIPPAGE ---
+            # Restamos 0.03 R a cada trade (aprox 0.04% fee + slippage sobre riesgo)
+            fee_cost_r = 0.03
+            final_r = res['r_realized'] - fee_cost_r
+            
             trade_data = {
                 "time": row['timestamp'],
                 "type": entry_signal,
                 "price": row['close'],
                 "outcome": res['outcome'],
-                "r": res['r_realized'],
+                "r_gross": res['r_realized'],
+                "r_net": final_r, # Usamos el Neto para las stats
                 "info": res['info']
             }
             trade_log.append(trade_data)
@@ -258,7 +277,7 @@ def run_lab_test_v4_9_1():
     df_valid = df_res[~df_res['outcome'].isin(['EARLY_EXIT', 'STAGNANT'])] 
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (V4.9.1)")
+    print("ESTADÍSTICAS FINALES (V5.0 - ROBUST)")
     print("="*50)
     print(f"Total Trades: {len(df_res)}")
     
@@ -266,25 +285,26 @@ def run_lab_test_v4_9_1():
     print(f"Scratches/Stagnant: {scratches}")
     
     if not df_res.empty:
-        total_r = df_res['r'].sum()
-        expectancy = total_r / len(df_res)
+        # USAMOS R NETO (DESPUÉS DE FEES)
+        total_r_net = df_res['r_net'].sum()
+        expectancy_net = total_r_net / len(df_res)
         
         if not df_valid.empty:
-            win_rate = len(df_valid[df_valid['r'] > 0]) / len(df_valid) * 100
+            win_rate = len(df_valid[df_valid['r_gross'] > 0]) / len(df_valid) * 100
         else:
             win_rate = 0.0
         
         print(f"TRADES COMPLETOS:     {len(df_valid)}")
         print(f"WIN RATE (Completos): {win_rate:.1f}%")
-        print(f"TOTAL R NETO:         {total_r:.2f} R")
-        print(f"EXPECTANCY:           {expectancy:.3f} R / trade")
+        print(f"TOTAL R NETO (w/Fees):{total_r_net:.2f} R")
+        print(f"EXPECTANCY NETO:      {expectancy_net:.3f} R / trade")
         
-        print("\nEvolución de R Acumulado (Últimos 10):")
-        print(df_res['r'].tail(10).cumsum())
+        print("\nEvolución de R Acumulado (Neto):")
+        print(df_res['r_net'].cumsum().tail(10))
     
     print("-" * 50)
     print("Distribución de Outcomes:")
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_9_1()
+    run_lab_test_v5_0()
