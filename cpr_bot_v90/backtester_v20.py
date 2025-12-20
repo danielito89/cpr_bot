@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # backtester_v20.py
-# NIVEL: V302 (NY Momentum Scalp)
+# NIVEL: V303 (NY Momentum Scalp)
 # USO: python cpr_bot_v90/backtester_v20.py --symbol ETHUSDT --start 2022-01-01
 
 import os
@@ -219,6 +219,20 @@ class BacktesterV19:
             start_buffer = target_start - timedelta(days=BUFFER_DAYS)
             df = df[df.index >= start_buffer].copy()
             
+            # --- INDICADORES V303 (NY SNIPER) ---
+            
+            # 1. Donchian Channel (8 velas = 2 horas) -> Estructura más sólida
+            df['donchian_high'] = df['high'].rolling(8).max().shift(1)
+            df['donchian_low'] = df['low'].rolling(8).min().shift(1)
+            
+            # 2. ATR & ATR MA (Para detectar expansión)
+            tr = pd.concat([
+                df['high'] - df['low'], 
+                (df['high'] - df['close'].shift(1)).abs(), 
+                (df['low'] - df['close'].shift(1)).abs()
+            ], axis=1).max(axis=1)
+            df['atr'] = tr.rolling(14).mean().shift(1)
+            df['atr_ma'] = df['atr'].rolling(20).mean().shift(1) # Media del ATR
             # --- INDICADORES MOMENTUM V302 ---
             
             # 1. ADX (Fuerza de Tendencia)
@@ -244,7 +258,7 @@ class BacktesterV19:
     async def run(self):
         df, target_start = self.load_data()
         if df is None: return
-        print(f"\n🛡️ INICIANDO BACKTEST V302 (NY Momentum Scalp)")
+        print(f"\n🛡️ INICIANDO BACKTEST V303 (NY Momentum Scalp)")
         print(f"🎯 Par: {self.symbol} | Inicio: {self.start_date} | TF: {self.timeframe}")
         print("-" * 60)
         
@@ -285,7 +299,7 @@ class BacktesterV19:
         csv_filename = f"trades_{self.symbol}_{self.start_date}.csv"
         df_t.to_csv(csv_filename, index=False)
         print("\n" + "="*60)
-        print(f"📊 REPORTE V302 (NY Momentum Scalp) - {self.symbol}")
+        print(f"📊 REPORTE V303 (NY Momentum Scalp) - {self.symbol}")
         print("="*60)
         print(f"💰 Balance Final:     ${self.state.balance:,.2f}")
         print(f"🚀 Retorno Total:     {((self.state.balance-CAPITAL_INICIAL)/CAPITAL_INICIAL)*100:.2f}%")
