@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. UTILIDADES Y DESCARGA MASIVA
+# 1. UTILIDADES
 # ---------------------------------------------------------
 
 def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=15000):
@@ -17,7 +17,6 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
     all_ohlcv = ohlcv
     timeframe_duration_seconds = 5 * 60 
     
-    # Barra de progreso simple
     while len(all_ohlcv) < total_candles:
         oldest_timestamp = all_ohlcv[0][0]
         since_timestamp = oldest_timestamp - (limit_per_call * timeframe_duration_seconds * 1000)
@@ -26,12 +25,10 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
             new_batch = [x for x in new_batch if x[0] < oldest_timestamp]
             if not new_batch: break
             all_ohlcv = new_batch + all_ohlcv
-            
             if len(all_ohlcv) % 2000 == 0:
                 print(f"   ... {len(all_ohlcv)} velas cargadas")
-            time.sleep(0.15) # Rate limit friendly
+            time.sleep(0.15) 
         except Exception as e:
-            print(f"Error: {e}")
             break
             
     if len(all_ohlcv) > total_candles:
@@ -41,30 +38,36 @@ def fetch_extended_history(symbol='BTC/USDT', timeframe='5m', total_candles=1500
     return df
 
 # ---------------------------------------------------------
-# 2. INDICADORES
+# 2. INDICADORES + ENERGY FILTER
 # ---------------------------------------------------------
 
-def calculate_rsi_manual(series, period=14):
-    delta = series.diff()
+def calculate_indicators(df):
+    # RSI Manual
+    delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).fillna(0)
     loss = (-delta.where(delta < 0, 0)).fillna(0)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    df['RSI'] = 100 - (100 / (1 + rs))
 
-def calculate_normalized_delta_cvd(df):
+    # Delta & CVD
     range_candle = (df['high'] - df['low']).replace(0, 0.000001)
     df['delta_norm'] = ((df['close'] - df['open']) / range_candle) * df['volume']
     df['cvd'] = df['delta_norm'].cumsum()
-    return df
 
-def calculate_atr(df, period=14):
+    # ATR
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+    df['ATR'] = tr.rolling(window=14).mean()
+    
+    # --- V4.7: ENERGY FILTER (ATR MA) ---
+    # Promedio de volatilidad de las últimas 50 velas (aprox 4 horas)
+    df['ATR_MA'] = df['ATR'].rolling(window=50).mean()
+    
+    return df
 
 def get_volume_profile_zones(df, lookback_bars=288):
     subset = df.iloc[-lookback_bars:].copy()
@@ -85,7 +88,7 @@ def get_volume_profile_zones(df, lookback_bars=288):
     return {'VAH': vah, 'VAL': val}
 
 # ---------------------------------------------------------
-# 3. GESTIÓN (V4.6 - THE ACCELERATOR)
+# 3. GESTIÓN (V4.6 - THE ACCELERATOR) - INTACTA
 # ---------------------------------------------------------
 
 def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, entry_delta, zone_level):
@@ -96,15 +99,14 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
     tp2_price = entry_price + (risk_per_share * 2.0) if direction == 'LONG' else entry_price - (risk_per_share * 2.0)
     
     tp1_hit = False
-    late_tp1_triggered = False # Flag para diferenciar en el log
+    late_tp1_triggered = False 
     
-    # 1. HYBRID EARLY EXIT (V4.4)
+    # 1. EARLY EXIT
     if entry_index + 1 < len(df):
         next_candle = df.iloc[entry_index + 1]
         next_delta = next_candle['delta_norm']
         tolerance = abs(entry_delta) * 0.10
         potential_early_exit = False
-        
         if direction == 'LONG':
             if next_delta < -tolerance and next_candle['close'] < entry_price: potential_early_exit = True
         elif direction == 'SHORT':
@@ -124,84 +126,65 @@ def manage_trade_r_logic(df, entry_index, entry_price, direction, atr_value, ent
                 reason = "Safe Scratch" if r_realized >= -0.35 else "Structural Break"
                 return {"outcome": "EARLY_EXIT", "r_realized": r_realized, "bars": 1, "info": reason}
 
-    # 2. GESTIÓN NORMAL + V4.6 ACCELERATOR
+    # 2. MANAGEMENT
     for j in range(1, 9):
         if entry_index + j >= len(df): break
         row = df.iloc[entry_index + j]
         curr_low, curr_high, curr_close = row['low'], row['high'], row['close']
         
-        # --- V4.6: MID-GAME ACCELERATOR (Bar 4) ---
+        # Accelerator Check (Bar 4)
         if j == 4 and not tp1_hit:
-            # Calcular R flotante al cierre de la vela 4
             current_pnl = (curr_close - entry_price) if direction == 'LONG' else (entry_price - curr_close)
             current_r = current_pnl / risk_per_share
-            
             if current_r >= 0.5:
                 tp1_hit = True
-                sl_price = entry_price # Move to BE
-                late_tp1_triggered = True # Marcamos que fue por aceleración
-                # No retornamos, seguimos buscando TP2 pero protegidos
+                sl_price = entry_price 
+                late_tp1_triggered = True 
         
-        # --- Lógica Estándar ---
         if direction == 'LONG':
             if curr_low <= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
-                # Si fue por Late TP1, es un BE positivo técnicamente (o small win)
                 info = "Late TP1 BE" if late_tp1_triggered else "SL Hit"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": info}
-            
             if curr_high >= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
-            
             if not tp1_hit and curr_high >= tp1_price:
                 tp1_hit = True
                 sl_price = entry_price 
-                
-        else: # SHORT
+        else:
             if curr_high >= sl_price:
                 r_result = 0.0 if tp1_hit else -1.0
                 outcome = "BE_STOP" if tp1_hit else "SL_HIT"
                 info = "Late TP1 BE" if late_tp1_triggered else "SL Hit"
                 return {"outcome": outcome, "r_realized": r_result, "bars": j, "info": info}
-            
             if curr_low <= tp2_price:
                 return {"outcome": "TP2_HIT", "r_realized": 2.0, "bars": j, "info": "Target 2"}
-            
             if not tp1_hit and curr_low <= tp1_price:
                 tp1_hit = True
                 sl_price = entry_price 
 
-    # 3. TIME STOP
     exit_price = df.iloc[entry_index + 8]['close'] if entry_index + 8 < len(df) else df.iloc[-1]['close']
     pnl = (exit_price - entry_price) if direction == 'LONG' else (entry_price - exit_price)
     r_realized = pnl / risk_per_share
-    
-    # Si cobramos TP1 (Normal o Late), aseguramos ganancia
-    if tp1_hit: 
-        min_win = 0.5 if late_tp1_triggered else 0.4 
-        r_realized = max(r_realized, min_win)
-    
+    if tp1_hit: r_realized = max(r_realized, 0.4) 
     info_msg = "Time Out (Late TP1)" if late_tp1_triggered else "Time Out"
     return {"outcome": "TIME_STOP", "r_realized": r_realized, "bars": 8, "info": info_msg}
 
 # ---------------------------------------------------------
-# 4. EJECUCIÓN (V4.6 - FINAL BACKTEST)
+# 4. EJECUCIÓN (V4.7 - ENERGY FILTER)
 # ---------------------------------------------------------
 
 def is_ny_session(timestamp):
     hour = timestamp.hour
     return 13 <= hour <= 17
 
-def run_lab_test_v4_6():
-    print("--- ORANGE PI LAB: STRATEGY V4.6 (THE ACCELERATOR) ---")
-    # Descarga MASIVA para validación final
+def run_lab_test_v4_7():
+    print("--- ORANGE PI LAB: STRATEGY V4.7 (ENERGY FILTER) ---")
     df = fetch_extended_history('BTC/USDT', '5m', total_candles=15000)
     
-    print("Calculando indicadores...")
-    df['RSI'] = calculate_rsi_manual(df['close'], 14)
-    df = calculate_normalized_delta_cvd(df)
-    df['ATR'] = calculate_atr(df)
+    print("Calculando indicadores (incluyendo ATR MA)...")
+    df = calculate_indicators(df)
     
     last_trade_index = -999
     standard_cooldown = 12 
@@ -210,14 +193,19 @@ def run_lab_test_v4_6():
     
     trade_log = []
     
-    print(f"\n--- BACKTEST EXTENDIDO ({len(df)} Velas) ---")
+    print(f"\n--- BACKTEST EXTENDIDO CON FILTRO DE ENERGÍA ---")
     
     for i in range(300, len(df)):
         if i - last_trade_index < current_cooldown: continue
         row = df.iloc[i]
         if not is_ny_session(row['timestamp']): continue
-        if row['ATR'] < 50: continue 
         
+        # --- FILTRO V4.7: MARKET ENERGY ---
+        # Solo operamos si la volatilidad actual es superior a la media
+        # Si ATR < ATR_MA, el mercado está durmiendo.
+        if row['ATR'] < row['ATR_MA']: 
+            continue 
+            
         zones = get_volume_profile_zones(df.iloc[i-288:i])
         if not zones: continue
         vah, val = zones['VAH'], zones['VAL']
@@ -226,7 +214,7 @@ def run_lab_test_v4_6():
         is_long = row['low'] <= val and row['close'] > val
         is_short = row['high'] >= vah and row['close'] < vah
         
-        # GATEKEEPER (V4.5)
+        # GATEKEEPER
         penetration_threshold = 0.30 
         if is_long:
             if (val - row['low']) > (row['ATR'] * penetration_threshold): continue
@@ -251,29 +239,24 @@ def run_lab_test_v4_6():
             }
             trade_log.append(trade_data)
             
-            # Print simplificado para no saturar consola con 15k velas
-            # print(f"[{row['timestamp']}] {entry_signal:<5} | {res['outcome']:<10} | R: {res['r_realized']:.2f}")
-            
             last_trade_index = i
             if res['outcome'] == 'EARLY_EXIT':
                 current_cooldown = smart_cooldown
             else:
                 current_cooldown = standard_cooldown
 
-    # --- REPORTE MASIVO ---
+    # --- REPORTE ---
     if not trade_log:
-        print("\nNo se encontraron trades.")
+        print("\nNo se encontraron trades con este filtro de energía.")
         return
 
     df_res = pd.DataFrame(trade_log)
     df_valid = df_res[df_res['outcome'] != 'EARLY_EXIT']
     
     print("\n" + "="*50)
-    print("ESTADÍSTICAS FINALES (EXTENDED BACKTEST)")
+    print("ESTADÍSTICAS FINALES (V4.7)")
     print("="*50)
-    print(f"Data Range: {df['timestamp'].iloc[0]} -> {df['timestamp'].iloc[-1]}")
     print(f"Total Trades: {len(df_res)}")
-    
     scratches = len(df_res[df_res['outcome'] == 'EARLY_EXIT'])
     print(f"Scratches: {scratches}")
     
@@ -287,8 +270,7 @@ def run_lab_test_v4_6():
         print(f"TOTAL R NETO:         {total_r:.2f} R")
         print(f"EXPECTANCY:           {expectancy:.3f} R / trade")
         
-        # Equity Curve simple
-        print("\nEvolución de R Acumulado (Últimos 10 trades):")
+        print("\nEvolución de R Acumulado (Últimos 10):")
         print(df_res['r'].tail(10).cumsum())
     
     print("-" * 50)
@@ -296,4 +278,4 @@ def run_lab_test_v4_6():
     print(df_res['outcome'].value_counts())
 
 if __name__ == "__main__":
-    run_lab_test_v4_6()
+    run_lab_test_v4_7()
