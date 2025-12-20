@@ -233,22 +233,6 @@ class BacktesterV19:
             ], axis=1).max(axis=1)
             df['atr'] = tr.rolling(14).mean().shift(1)
             df['atr_ma'] = df['atr'].rolling(20).mean().shift(1) # Media del ATR
-            # --- INDICADORES MOMENTUM V302 ---
-            
-            # 1. ADX (Fuerza de Tendencia)
-            df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14).shift(1)
-            
-            # 2. Donchian Channel (High/Low de ultimas 4 velas = 1 hora)
-            df['donchian_high'] = df['high'].rolling(4).max().shift(1)
-            df['donchian_low'] = df['low'].rolling(4).min().shift(1)
-            
-            # 3. ATR (Para SL/TP) - FORMULA COMPLETA
-            tr = pd.concat([
-                df['high'] - df['low'], 
-                (df['high'] - df['close'].shift(1)).abs(), 
-                (df['low'] - df['close'].shift(1)).abs()
-            ], axis=1).max(axis=1)
-            df['atr'] = tr.rolling(14).mean().shift(1)
             
             return df, target_start
         except Exception as e:
