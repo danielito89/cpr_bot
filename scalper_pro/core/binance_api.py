@@ -73,6 +73,8 @@ class BinanceAPI:
             return None
 
     def place_order(self, side, amount, order_type='market', price=None, params={}):
+        # Buscar 'symbol' en params, si no está usar el de config
+        symbol = params.get('symbol', config.SYMBOL)
         """
         Ejecuta una orden.
         side: 'buy' o 'sell'

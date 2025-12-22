@@ -1,3 +1,4 @@
+# addons/state_manager.py
 import json
 import os
 
@@ -11,17 +12,24 @@ class StateManager:
 
     def save_state(self, data):
         with open(self.file, 'w') as f:
-            json.dump(data, f)
+            json.dump(data, f, indent=4)
 
     def load_state(self):
         with open(self.file, 'r') as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except:
+                return {}
 
-    # FIX #1: Agregamos argumento 'side'
-    def set_entry(self, price, time_str, sl, side): 
-        data = {
+    def get_pair_state(self, symbol):
+        data = self.load_state()
+        return data.get(symbol, {"in_position": False})
+
+    def set_entry(self, symbol, price, time_str, sl, side): 
+        data = self.load_state()
+        data[symbol] = {
             "in_position": True,
-            "side": side,  # <-- ALMACENADO EXPLÍCITAMENTE
+            "side": side,
             "entry_price": price,
             "entry_time": str(time_str),
             "stop_loss": sl,
@@ -30,19 +38,22 @@ class StateManager:
         }
         self.save_state(data)
 
-    def clear_state(self):
-        self.save_state({"in_position": False})
-
-    def update_bars_held(self):
+    def clear_pair_state(self, symbol):
         data = self.load_state()
-        if data.get("in_position"):
-            data["bars_held"] += 1
+        if symbol in data:
+            data[symbol] = {"in_position": False}
             self.save_state(data)
-            return data["bars_held"]
+
+    def update_bars_held(self, symbol):
+        data = self.load_state()
+        if symbol in data and data[symbol].get("in_position"):
+            data[symbol]["bars_held"] += 1
+            self.save_state(data)
+            return data[symbol]["bars_held"]
         return 0
     
-    def set_tp1_hit(self):
+    def set_tp1_hit(self, symbol):
         data = self.load_state()
-        if data.get("in_position"):
-            data["tp1_hit"] = True
+        if symbol in data and data[symbol].get("in_position"):
+            data[symbol]["tp1_hit"] = True
             self.save_state(data)
