@@ -2,7 +2,7 @@
 import json
 import os
 
-STATE_FILE = "bot_state.json"
+STATE_FILE = "hydra_state.json"
 
 class StateManager:
     def __init__(self):
@@ -16,10 +16,8 @@ class StateManager:
 
     def load_state(self):
         with open(self.file, 'r') as f:
-            try:
-                return json.load(f)
-            except:
-                return {}
+            try: return json.load(f)
+            except: return {}
 
     def get_pair_state(self, symbol):
         data = self.load_state()
@@ -41,7 +39,7 @@ class StateManager:
     def clear_pair_state(self, symbol):
         data = self.load_state()
         if symbol in data:
-            data[symbol] = {"in_position": False}
+            del data[symbol] # Borramos la entrada del par
             self.save_state(data)
 
     def update_bars_held(self, symbol):
@@ -54,6 +52,6 @@ class StateManager:
     
     def set_tp1_hit(self, symbol):
         data = self.load_state()
-        if symbol in data and data[symbol].get("in_position"):
+        if symbol in data:
             data[symbol]["tp1_hit"] = True
             self.save_state(data)

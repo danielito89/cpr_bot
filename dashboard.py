@@ -1,115 +1,207 @@
 from flask import Flask, render_template_string
 import subprocess
+import json
+import os
 import time
+from datetime import datetime
 
 app = Flask(__name__)
 
-# ---------------- CONFIGURACIÓN DE LOGS ----------------
+# --- CONFIGURACIÓN ---
+# Ajusta la ruta si tu usuario es diferente (ej: /home/orangepi/...)
+BASE_PATH = "/home/ubuntu/bot_cpr" 
+STATE_FILE = os.path.join(BASE_PATH, "scalper_pro", "hydra_state.json")
+SERVICE_NAME = "scalper_pro.service"
 
-# 1. Crash Bot (Rojo)
-CMD_LOG_CRASH = "journalctl -u cpr_crash.service -n 20 --no-pager"
-
-# 2. Golden Cross (Verde)
-CMD_LOG_GOLDEN = "journalctl -u cpr_bot.service -n 20 --no-pager"
-
-# 3. Scalper Pro V6.4 (Naranja - Nuevo)
-# Nota: Usamos el nombre del servicio que creamos: scalper_pro.service
-CMD_LOG_SCALP = "journalctl -u scalper_pro.service -n 20 --no-pager"
-
-# ---------------- HTML TEMPLATE ----------------
+# --- HTML TEMPLATE (DARK MODE PRO) ---
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>CPR Command Center</title>
+    <title>HYDRA COMMAND CENTER</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="30">
+    <meta http-equiv="refresh" content="10">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        body { background-color: #0d1117; color: #c9d1d9; font-family: 'Consolas', 'Monaco', monospace; padding: 20px; }
-        .header { text-align: center; margin-bottom: 30px; border-bottom: 1px solid #30363d; padding-bottom: 20px; }
-        .card { background: #161b22; border: 1px solid #30363d; padding: 20px; margin-bottom: 20px; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        h2 { margin-top: 0; border-bottom: 1px solid #30363d; padding-bottom: 10px; font-size: 1.1rem; display: flex; align-items: center; justify-content: space-between; }
+        :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --green: #2ea043; --red: #da3633; --orange: #d29922; }
+        body { background-color: var(--bg); color: var(--text); font-family: 'JetBrains Mono', monospace; padding: 20px; margin: 0; }
         
-        .status-dot { height: 12px; width: 12px; border-radius: 50%; display: inline-block; margin-right: 10px; }
-        .green-dot { background-color: #2ea043; box-shadow: 0 0 8px #2ea043; }
-        .red-dot { background-color: #da3633; box-shadow: 0 0 8px #da3633; }
-        .orange-dot { background-color: #f6ae2d; box-shadow: 0 0 8px #f6ae2d; }
+        /* Grid Layout */
+        .container { max-width: 1200px; margin: 0 auto; display: grid; gap: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; }
         
-        pre { background: #0d1117; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 11px; color: #8b949e; border: 1px solid #30363d; white-space: pre-wrap; word-wrap: break-word; line-height: 1.4; }
+        /* Stats Bar */
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; }
+        .stat-card { background: var(--card); border: 1px solid var(--border); padding: 15px; border-radius: 6px; text-align: center; }
+        .stat-value { font-size: 1.5rem; font-weight: bold; color: var(--accent); }
+        .stat-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; }
+        .warning { color: var(--orange); } .danger { color: var(--red); }
+
+        /* Active Positions Table */
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+        th { color: #8b949e; font-size: 0.8rem; text-transform: uppercase; }
+        .badge { padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
+        .badge-long { background: rgba(46, 160, 67, 0.15); color: var(--green); border: 1px solid var(--green); }
+        .badge-short { background: rgba(218, 54, 51, 0.15); color: var(--red); border: 1px solid var(--red); }
+
+        /* Logs */
+        .log-box { background: #000; padding: 15px; border-radius: 6px; border: 1px solid var(--border); height: 400px; overflow-y: auto; font-size: 0.85rem; color: #8b949e; white-space: pre-wrap; }
         
-        .footer { text-align: center; font-size: 0.8rem; color: #484f58; margin-top: 30px; }
-        .tag { font-size: 0.7em; padding: 2px 6px; border-radius: 4px; background: #21262d; border: 1px solid #30363d; }
+        h2 { font-size: 1rem; margin-top: 0; color: var(--text); display: flex; align-items: center; gap: 10px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .dot-green { background: var(--green); box-shadow: 0 0 8px var(--green); }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🏥 CPR MONITOR <span style="color:#58a6ff;">LITE</span></h1>
-        <div style="font-size: 0.9em; color: #8b949e;">Sistema de Gestión de Bots</div>
-    </div>
+    <div class="container">
+        
+        <div class="header">
+            <div>
+                <h1 style="margin:0; font-size:1.5rem;">🐲 HYDRA <span style="color:var(--accent)">COMMAND CENTER</span></h1>
+                <div style="font-size:0.8rem; color:#8b949e; margin-top:5px;">System Integrity: ONLINE | Mode: MULTIPAIR</div>
+            </div>
+            <div style="text-align:right;">
+                <div style="font-size:1.2rem;">{{ time_now }}</div>
+                <div style="font-size:0.8rem; color:#8b949e;">UTC TIME</div>
+            </div>
+        </div>
 
-    <div class="card" style="border-left: 4px solid #f6ae2d;">
-        <h2>
-            <span><span class="status-dot orange-dot"></span> SCALPER PRO V6.4</span>
-            <span class="tag">ACTIVE TRADING</span>
-        </h2>
-        <pre>{{ log_scalp }}</pre>
-    </div>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value {{ cpu_color }}">{{ cpu_usage }}</div>
+                <div class="stat-label">CPU LOAD</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value {{ ram_color }}">{{ ram_usage }}</div>
+                <div class="stat-label">RAM USAGE</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value {{ swap_color }}">{{ swap_usage }}</div>
+                <div class="stat-label">SWAP USAGE</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" style="color:var(--text)">{{ active_positions_count }}</div>
+                <div class="stat-label">ACTIVE POSITIONS</div>
+            </div>
+        </div>
 
-    <div class="card" style="border-left: 4px solid #da3633;">
-        <h2>
-            <span><span class="status-dot red-dot"></span> CRASH BOT</span>
-            <span class="tag">HEDGING</span>
-        </h2>
-        <pre>{{ log_crash }}</pre>
-    </div>
+        <div style="background:var(--card); border:1px solid var(--border); padding:20px; border-radius:6px;">
+            <h2><span class="dot dot-green"></span> LIVE POSITIONS (FROM STATE)</h2>
+            {% if positions %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>PAIR</th>
+                        <th>SIDE</th>
+                        <th>ENTRY</th>
+                        <th>STOP LOSS</th>
+                        <th>DURATION</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in positions %}
+                    <tr>
+                        <td style="font-weight:bold; color:#fff;">{{ p.symbol }}</td>
+                        <td><span class="badge {{ 'badge-long' if p.side == 'LONG' else 'badge-short' }}">{{ p.side }}</span></td>
+                        <td>${{ p.entry }}</td>
+                        <td>${{ p.sl }}</td>
+                        <td>{{ p.bars }} bars</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div style="padding:20px; text-align:center; color:#8b949e; font-style:italic;">
+                Scanning markets... No active positions.
+            </div>
+            {% endif %}
+        </div>
 
-    <div class="card" style="border-left: 4px solid #2ea043;">
-        <h2>
-            <span><span class="status-dot green-dot"></span> GOLDEN CROSS BOT</span>
-            <span class="tag">TREND</span>
-        </h2>
-        <pre>{{ log_golden }}</pre>
-    </div>
-    
-    <div class="footer">
-        Server Time: {{ last_update }} | Refresh: 30s
+        <div>
+            <h2>TERMINAL OUTPUT</h2>
+            <div class="log-box">{{ logs }}</div>
+        </div>
+
     </div>
 </body>
 </html>
 """
 
-# ---------------- LÓGICA BACKEND ----------------
+# --- BACKEND LOGIC ---
 
-def get_logs(cmd):
+def get_sys_stats():
+    """Obtiene métricas del servidor sin dependencias externas"""
     try:
-        # Ejecutamos el comando de sistema para leer logs
-        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=2)
-        decoded = output.decode('utf-8').strip()
-        if not decoded:
-            return "⚠️ El servicio está corriendo pero no hay logs recientes."
-        return decoded
-    except subprocess.TimeoutExpired:
-        return "⚠️ Timeout leyendo logs (Sistema ocupado)"
-    except subprocess.CalledProcessError:
-        return "⚠️ Servicio detenido o no encontrado."
-    except Exception as e:
-        return f"⚠️ Error: {str(e)}"
+        # Load Avg
+        load = os.getloadavg()[0]
+        
+        # RAM & Swap (Parsing free -m)
+        out = subprocess.check_output("free -m", shell=True).decode()
+        lines = out.split('\n')
+        
+        # Memoria
+        mem_line = [x for x in lines[1].split() if x]
+        total_mem = int(mem_line[1])
+        used_mem = int(mem_line[2])
+        ram_pct = int((used_mem / total_mem) * 100)
+        
+        # Swap
+        swap_line = [x for x in lines[2].split() if x]
+        total_swap = int(swap_line[1])
+        used_swap = int(swap_line[2])
+        swap_pct = int((used_swap / total_swap) * 100) if total_swap > 0 else 0
+        
+        return {
+            'cpu': f"{load:.2f}",
+            'cpu_color': 'danger' if load > 2.0 else 'warning' if load > 1.0 else '',
+            'ram': f"{ram_pct}%",
+            'ram_color': 'danger' if ram_pct > 90 else 'warning' if ram_pct > 75 else '',
+            'swap': f"{swap_pct}%",
+            'swap_color': 'danger' if swap_pct > 50 else 'warning' if swap_pct > 20 else ''
+        }
+    except:
+        return {'cpu': 'ERR', 'ram': 'ERR', 'swap': 'ERR', 'cpu_color':'', 'ram_color':'', 'swap_color':''}
+
+def get_positions_from_state():
+    """Lee el archivo JSON del bot para ver posiciones reales"""
+    positions = []
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                data = json.load(f)
+                for symbol, info in data.items():
+                    if info.get('in_position'):
+                        positions.append({
+                            'symbol': symbol,
+                            'side': info.get('side', 'UNK'),
+                            'entry': info.get('entry_price'),
+                            'sl': f"{info.get('stop_loss'):.4f}", # Format price
+                            'bars': info.get('bars_held')
+                        })
+        except: pass
+    return positions
+
+def get_logs():
+    try:
+        cmd = f"journalctl -u {SERVICE_NAME} -n 30 --no-pager"
+        return subprocess.check_output(cmd, shell=True).decode().strip()
+    except: return "Error reading logs."
 
 @app.route('/')
 def index():
-    # Solo leemos logs, nada de API externa (Super Rápido)
-    log_scalp = get_logs(CMD_LOG_SCALP)
-    log_crash = get_logs(CMD_LOG_CRASH)
-    log_golden = get_logs(CMD_LOG_GOLDEN)
-    
-    now = time.strftime("%H:%M:%S UTC")
+    stats = get_sys_stats()
+    positions = get_positions_from_state()
+    logs = get_logs()
     
     return render_template_string(HTML, 
-                                  log_scalp=log_scalp, 
-                                  log_crash=log_crash, 
-                                  log_golden=log_golden,
-                                  last_update=now)
+                                  cpu_usage=stats['cpu'], cpu_color=stats['cpu_color'],
+                                  ram_usage=stats['ram'], ram_color=stats['ram_color'],
+                                  swap_usage=stats['swap'], swap_color=stats['swap_color'],
+                                  active_positions_count=len(positions),
+                                  positions=positions,
+                                  logs=logs,
+                                  time_now=datetime.utcnow().strftime('%H:%M:%S'))
 
 if __name__ == '__main__':
-    # Escucha en todas las interfaces para que entres desde tu celular/PC
     app.run(host='0.0.0.0', port=5000)
