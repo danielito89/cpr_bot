@@ -163,14 +163,14 @@ def execute_logic(exchange, data):
 
     # --- FIX 1: GARBAGE COLLECTOR (LIMPIEZA DE SL HUÉRFANOS) ---
     # Si no tenemos posición, nos aseguramos de que no haya órdenes basura
-    if pos_amt == 0:
-        try:
-            open_orders = exchange.fetch_open_orders(symbol)
-            if len(open_orders) > 0:
-                print(f"   🧹 Limpiando {len(open_orders)} órdenes huérfanas en {symbol}...")
-                exchange.cancel_all_orders(symbol)
-        except Exception as e:
-            print(f"⚠️ Error limpiando órdenes: {e}")
+    #if pos_amt == 0:
+    #    try:
+    #        open_orders = exchange.fetch_open_orders(symbol)
+    #        if len(open_orders) > 0:
+    #            print(f"   🧹 Limpiando {len(open_orders)} órdenes huérfanas en {symbol}...")
+    #            exchange.cancel_all_orders(symbol)
+    #    except Exception as e:
+    #        print(f"⚠️ Error limpiando órdenes: {e}")
 
     # --- LÓGICA DE ENTRADA (LONG) ---
     if data['signal_buy'] and pos_amt == 0:

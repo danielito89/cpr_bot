@@ -143,15 +143,15 @@ def manage_position(exchange, state):
         current_amt = float(pos['contracts']) if pos['contracts'] else 0.0
         
         # --- FIX C: GESTIÓN DE CIERRE TOTAL ---
-        if current_amt == 0:
-            print(f"✅ Posición {symbol} cerrada. Limpiando todo.")
-            try: exchange.cancel_all_orders(symbol)
-            except: pass
-            state['active_symbol'] = None
-            state['lowest_price'] = 0
-            state['last_amt'] = 0.0
-            save_state(state)
-            return state
+        #if current_amt == 0:
+        #    print(f"✅ Posición {symbol} cerrada. Limpiando todo.")
+        #    try: exchange.cancel_all_orders(symbol)
+        #    except: pass
+        #    state['active_symbol'] = None
+        #    state['lowest_price'] = 0
+        #    state['last_amt'] = 0.0
+        #    save_state(state)
+        #    return state
 
         # --- FIX C: SINCRONIZACIÓN (TP HIT) ---
         # Si la cantidad bajó (se ejecutó un TP), hay que ajustar el SL
