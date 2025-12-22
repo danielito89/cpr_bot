@@ -6,24 +6,19 @@ import os
 from datetime import datetime
 import pandas as pd
 
-# --- IMPORTACIÓN DE MÓDULOS PROPIOS ---
 import config
 from core.binance_api import BinanceAPI
 from core.data_processor import DataProcessor
 from core.risk_manager import RiskManager
-from core.production_controller import ProductionController # <--- NUEVO
+from core.production_controller import ProductionController
 from strategies.strategy_v6_4 import StrategyV6_4
 from addons.state_manager import StateManager
 from addons.telegram_bot import TelegramBot
 
-# ==========================================
-# CONFIGURACIÓN DEL SISTEMA
-# ==========================================
 def main():
-    print(f"\n🛡️ INICIANDO SCALPER PRO V6.4 (SAFE MODE) - {config.SYMBOL} 🛡️")
-    print(f"🌍 Modo: {'DRY RUN' if config.DRY_RUN else 'LIVE'}")
-
-    # 1. INICIALIZACIÓN DE CLASES
+    print(f"\n🛡️ INICIANDO SCALPER PRO V6.4 (AUDITED) - {config.SYMBOL} 🛡️")
+    
+    # 1. INICIALIZACIÓN
     try:
         api = BinanceAPI()
         processor = DataProcessor()
@@ -32,121 +27,97 @@ def main():
         strategy = StrategyV6_4()
         state = StateManager()
         tg = TelegramBot(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID)
-        
-        # Inicializar el Controlador de Producción
         controller = ProductionController(api, state, tg, config)
         
-        start_msg = (
-            f"🤖 *Bot Iniciado (V6.4 Safe)*\n"
-            f"Par: `{config.SYMBOL}`\n"
-            f"Saldo: `${balance:.2f}`\n"
-            f"🛡️ *Production Controller: ACTIVE*"
-        )
-        tg.send_msg(start_msg)
-        print("✅ Sistemas cargados correctamente.")
-
+        tg.send_msg(f"🤖 *Bot V6.4 Audited Iniciado*\nSaldo: `${balance:.2f}`\nController: `ACTIVE`")
     except Exception as e:
-        print(f"❌ Error Crítico al iniciar: {e}")
+        print(f"❌ Error Init: {e}")
         sys.exit(1)
 
-    # 2. VARIABLES DE CONTROL
+    # VARIABLES DE CONTROL
     daily_pnl_r = 0.0
     consecutive_losses = 0
     last_reset_day = datetime.utcnow().day
     kill_switch_active = False
     last_heartbeat = time.time()
 
-    # ==========================================
-    # BUCLE PRINCIPAL (INFINITO)
-    # ==========================================
+    # CONSTANTES DE FEES (Estimado slippage + comisión)
+    ESTIMATED_FEE_R = 0.05 
+
     while True:
         try:
             now = datetime.utcnow()
             
-            # --- A. HEARTBEAT (Cada 4 horas) ---
+            # --- HEARTBEAT & RESET ---
             if time.time() - last_heartbeat > (4 * 60 * 60):
                 try:
-                    curr_bal = api.get_balance_usdt()
-                    hb_msg = f"💓 *Heartbeat*\nSaldo: `${curr_bal:.2f}`\nPnL Hoy: `{daily_pnl_r:.2f}R`"
-                    tg.send_msg(hb_msg)
+                    curr = api.get_balance_usdt()
+                    tg.send_msg(f"💓 *Heartbeat*\nSaldo: `${curr:.2f}`\nPnL Hoy: `{daily_pnl_r:.2f}R`")
                     last_heartbeat = time.time()
                 except: pass
 
-            # --- B. RESET DIARIO ---
             if now.day != last_reset_day:
                 daily_pnl_r = 0.0
                 consecutive_losses = 0
                 kill_switch_active = False
-                controller.errors_count = 0 # Resetear errores de API
+                controller.errors_count = 0 
                 last_reset_day = now.day
-                tg.send_msg(f"🗓️ *Nuevo Día UTC* - Métricas reseteadas.")
+                tg.send_msg("🗓️ *Nuevo Día UTC* - Reset.")
 
-            # --- C. VERIFICACIÓN DE KILL SWITCH ---
-            # Delegamos esto al controlador, pero mantenemos el flag local para el loop
             if kill_switch_active:
-                print(f"💀 Kill Switch Activo. Hora: {now.strftime('%H:%M')}")
-                time.sleep(300) 
+                print(f"💀 Kill Switch Activo. {now.strftime('%H:%M')}")
+                time.sleep(300)
                 continue
 
-            # --- D. SINCRONIZACIÓN (Segundo 05) ---
             if now.second != 5 or now.minute % 5 != 0:
                 time.sleep(1)
                 continue
 
             print(f"\n--- 🕒 CICLO: {now.strftime('%H:%M:%S')} ---")
             
-            # -------------------------------------------------
-            # E. AUDITORÍA DE SEGURIDAD (Reconciliación)
-            # -------------------------------------------------
-            # Esto verifica Zombies y Fantasmas ANTES de operar
-            is_healthy = controller.audit_positions()
-            
-            if not is_healthy:
-                print("⚠️ Auditoría detectó discrepancias. Corrigiendo y saltando ciclo.")
+            # --- AUDITORÍA ---
+            if not controller.audit_positions():
+                print("⚠️ Auditoría falló. Saltando ciclo.")
                 time.sleep(10)
                 continue
 
-            # -------------------------------------------------
-            # F. DATOS Y LÓGICA
-            # -------------------------------------------------
+            # --- DATOS ---
             df = api.fetch_ohlcv(limit=500)
             if df is None:
                 controller.errors_count += 1
                 time.sleep(10)
                 continue
             
-            # Si descargó bien, bajamos contador de errores
             if controller.errors_count > 0: controller.errors_count -= 1
 
             df = processor.calculate_indicators(df)
             zones = processor.get_volume_profile_zones(df)
             
             if zones is None:
-                print("⚠️ Datos insuficientes para Volume Profile.")
+                print("⚠️ Zonas insuficientes.")
                 time.sleep(55)
                 continue
 
             current_pos = api.get_position()
             bot_state = state.load_state()
 
-            # --- GESTIÓN DE POSICIÓN ---
+            # --- GESTIÓN ---
             if current_pos and bot_state.get("in_position"):
                 entry_price = float(bot_state['entry_price'])
                 current_price = float(df.iloc[-1]['close'])
                 bars_held = state.update_bars_held()
                 
-                # R Calc
                 sl_dist = abs(entry_price - bot_state['stop_loss'])
-                if sl_dist == 0: sl_dist = entry_price * 0.01 # Evitar div/0
+                if sl_dist == 0: sl_dist = entry_price * 0.01
                 
                 if current_pos['side'] == 'LONG':
                     pnl_r = (current_price - entry_price) / sl_dist
                 else:
                     pnl_r = (entry_price - current_price) / sl_dist
                 
-                print(f"📊 Gestión: {bars_held} velas. R: {pnl_r:.2f}. PnL USD: {current_pos['pnl']:.2f}")
+                print(f"📊 {bars_held} velas. R: {pnl_r:.2f}")
 
-                # REGLAS DE SALIDA (V6.4)
+                # REGLAS DE SALIDA
                 should_close = False
                 reason = ""
 
@@ -157,27 +128,43 @@ def main():
                 if pnl_r >= 3.0: should_close = True; reason = "🎯 TP2 HIT"
                 if pnl_r <= -1.1: should_close = True; reason = "🛑 Hard SL"
 
+                # FIX #4: Gestión TP1 Activa (Mover SL Físico)
                 if pnl_r >= 1.0 and not bot_state.get("tp1_hit"):
                     state.set_tp1_hit()
-                    print("💰 TP1 alcanzado.")
+                    print("💰 TP1 alcanzado. Moviendo SL a BE...")
+                    
+                    # Cancelar SL anterior
+                    api.exchange.cancel_all_orders(config.SYMBOL)
+                    
+                    # Nuevo SL en Entrada + un poquito para pagar fees
+                    be_price = entry_price * (1.001 if current_pos['side'] == 'LONG' else 0.999)
+                    sl_side = 'sell' if current_pos['side'] == 'LONG' else 'buy'
+                    
+                    # FIX #3: Usamos closePosition=True para el nuevo SL de protección
+                    api.place_order(sl_side, current_pos['amount'], 'market', 
+                        {'stopPrice': be_price, 'type': 'STOP_MARKET', 'closePosition': True})
+                    
+                    tg.send_msg(f"🛡️ *TP1 Hit*: SL movido a Break Even ({be_price})")
 
                 if should_close:
                     print(f"⚡ Cerrando: {reason}")
                     api.close_position(current_pos)
                     state.clear_state()
                     
-                    daily_pnl_r += pnl_r
-                    if pnl_r < -0.8: consecutive_losses += 1
-                    elif pnl_r > 0.5: consecutive_losses = 0
+                    # FIX #2: Ajuste de PnL real (Fee Penalty)
+                    realized_r_estimate = pnl_r - ESTIMATED_FEE_R
+                    daily_pnl_r += realized_r_estimate
                     
-                    icon = "✅" if pnl_r > 0 else "❌"
-                    tg.send_msg(f"{icon} *Cierre*\nRes: `{pnl_r:.2f}R`\nMotivo: {reason}\nDia: `{daily_pnl_r:.2f}R`")
+                    if realized_r_estimate < -0.8: consecutive_losses += 1
+                    elif realized_r_estimate > 0.5: consecutive_losses = 0
+                    
+                    icon = "✅" if realized_r_estimate > 0 else "❌"
+                    tg.send_msg(f"{icon} *Cierre*\nRes: `{realized_r_estimate:.2f}R`\nMotivo: {reason}\nDia: `{daily_pnl_r:.2f}R`")
 
-                    # Chequear Kill Switch post-trade
                     if controller.check_kill_switch(daily_pnl_r, consecutive_losses):
                         kill_switch_active = True
 
-            # --- BUSCAR ENTRADA ---
+            # --- ENTRADA ---
             elif not current_pos and not bot_state.get("in_position"):
                 trade = strategy.get_signal(df, zones)
                 
@@ -189,22 +176,27 @@ def main():
                     if qty_btc > 0:
                         order = api.place_order('buy' if trade['type']=='LONG' else 'sell', qty_btc)
                         if order:
-                            # SL Order
                             sl_side = 'sell' if trade['type']=='LONG' else 'buy'
-                            api.place_order(sl_side, qty_btc, 'market', {'stopPrice': trade['stop_loss'], 'type': 'STOP_MARKET', 'reduceOnly': True})
                             
-                            # TP Calculado para Telegram
-                            tp_price = trade['entry_price'] + (trade['atr']*3) if trade['type']=='LONG' else trade['entry_price'] - (trade['atr']*3)
-
-                            state.set_entry(trade['entry_price'], trade['time'], trade['stop_loss'], 0, 0)
-                            
-                            msg = (
-                                f"🚀 *Entrada {trade['type']}*\n"
-                                f"P: `{trade['entry_price']}`\n"
-                                f"SL: `{trade['stop_loss']:.2f}`\n"
-                                f"TP: `{tp_price:.2f}`"
+                            # FIX #3: SL Inicial con closePosition=True
+                            # Nota: stopPrice es obligatorio. closePosition=True indica "cerrar todo lo que haya"
+                            api.place_order(
+                                sl_side, 
+                                qty_btc, # Cantidad es ignorada si closePosition=True, pero ccxt la pide
+                                'market', 
+                                {
+                                    'stopPrice': trade['stop_loss'], 
+                                    'type': 'STOP_MARKET', 
+                                    'closePosition': True 
+                                }
                             )
-                            tg.send_msg(msg)
+                            
+                            # FIX #1: Guardar side explícitamente
+                            state.set_entry(trade['entry_price'], trade['time'], trade['stop_loss'], trade['type'])
+                            
+                            tp_price = trade['entry_price'] + (trade['atr']*3) if trade['type']=='LONG' else trade['entry_price'] - (trade['atr']*3)
+                            
+                            tg.send_msg(f"🚀 *Entrada {trade['type']}*\nP: `{trade['entry_price']}`\nSL: `{trade['stop_loss']:.2f}`\nTP: `{tp_price:.2f}`")
 
             print("💤 Esperando...")
             time.sleep(55)

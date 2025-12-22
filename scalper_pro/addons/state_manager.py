@@ -1,4 +1,3 @@
-# addons/state_manager.py
 import json
 import os
 
@@ -18,14 +17,14 @@ class StateManager:
         with open(self.file, 'r') as f:
             return json.load(f)
 
-    def set_entry(self, price, time_str, sl, tp1, tp2):
+    # FIX #1: Agregamos argumento 'side'
+    def set_entry(self, price, time_str, sl, side): 
         data = {
             "in_position": True,
+            "side": side,  # <-- ALMACENADO EXPLÍCITAMENTE
             "entry_price": price,
             "entry_time": str(time_str),
             "stop_loss": sl,
-            "tp1_price": tp1,
-            "tp2_price": tp2,
             "tp1_hit": False,
             "bars_held": 0
         }
