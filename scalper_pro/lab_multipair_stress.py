@@ -17,9 +17,9 @@ TARGET_PAIRS = [
     'ETH/USDT',      # Benchmark
     'SOL/USDT',      # Alta Volatilidad
     'BNB/USDT',      # Validado
-    'DOGE/USDT',     # Meme King
-    '1000PEPE/USDT', # Meme Volatility (Ojo: usa 1000PEPE en Futuros)
-    'WIF/USDT'       # Solana Meme Trend
+    'LTC/USDT',      # HiFi
+    'AVAX/USDT',     # HiFi
+    'XRP/USDT'       # DeFi Unicorn
 ]
 
 TIMEFRAME = '5m'

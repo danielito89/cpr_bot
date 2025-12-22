@@ -14,9 +14,14 @@ class StrategyV6_4:
         self.name = "Velocity Sniper V6.4"
 
     def is_core_session(self, timestamp):
-        """Sesión 13:00 - 18:59 UTC"""
+        # 1. Filtro de Día de la Semana (0=Lunes, 4=Viernes, 5=Sáb, 6=Dom)
+        # Si es Sábado (5) o Domingo (6), retornamos False
+        if timestamp.weekday() >= 5:
+            return False
+
+        # 2. Filtro de Hora (Probando Londres + NY: 08 a 19 UTC)
         hour = timestamp.hour
-        return 13 <= hour <= 18
+        return 8 <= hour <= 18
 
     def get_signal(self, df, zones):
         """
