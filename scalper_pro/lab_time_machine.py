@@ -13,7 +13,10 @@ from strategies.strategy_v6_4 import StrategyV6_4
 
 # --- CONFIGURACIÓN DE LA MÁQUINA DEL TIEMPO ---
 TARGET_PAIRS = [
-    'BTC/USDT'            # Los Nuevos Descubrimientos
+    'BTC/USDT',
+    'AVAX/USDT',
+    'LTC/USDT',
+    'SOL/USDT'         # Los Nuevos Descubrimientos
 ]
 
 # FECHAS A TESTEAR (Formato YYYY-MM-DD)
