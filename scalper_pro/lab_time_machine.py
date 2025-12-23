@@ -18,7 +18,7 @@ TARGET_PAIRS = [
 
 # FECHAS A TESTEAR (Formato YYYY-MM-DD)
 START_DATE = "2022-01-01" 
-END_DATE   = "2022-06-31" 
+END_DATE   = "2022-06-30" 
 
 TIMEFRAME = '5m'
 
@@ -28,6 +28,10 @@ def fetch_historical_data(symbol, start_str, end_str):
     # Convertir fechas a timestamp ms
     since = exchange.parse8601(f"{start_str}T00:00:00Z")
     end_ts = exchange.parse8601(f"{end_str}T23:59:59Z")
+
+    if since is None or end_ts is None:
+        print(f"❌ Error: Formato de fecha inválido ({start_str} o {end_str}).")
+        return None
     
     print(f"\n⏳ Viajando a {start_str} para {symbol}...", end=' ')
     
