@@ -1,112 +1,97 @@
-# strategies/strategy_v6_4.py
 import pandas as pd
-import numpy as np
-from datetime import datetime
-import sys
-import os
-
-# Importar configuración
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from datetime import datetime
 
 class StrategyV6_4:
     def __init__(self):
-        self.name = "Velocity Sniper V6.4"
+        self.name = "V6.5 Velocity Sniper (Multi-Profile)"
 
     def is_core_session(self, timestamp):
-        # 1. Filtro de Día de la Semana (0=Lunes, 4=Viernes, 5=Sáb, 6=Dom)
-        # Si es Sábado (5) o Domingo (6), retornamos False
+        """
+        Filtro de Régimen Temporal:
+        1. Solo Lunes a Viernes (0-4)
+        2. Solo Horario Bancario Extendido (08:00 - 19:00 UTC)
+        """
+        # 1. Filtro de Días (Sábado=5, Domingo=6)
         if timestamp.weekday() >= 5:
             return False
 
-        # 2. Filtro de Hora (Probando Londres + NY: 08 a 19 UTC)
+        # 2. Filtro de Hora (Londres + NY)
         hour = timestamp.hour
         return 8 <= hour <= 18
 
-    def get_signal(self, df, zones):
+    def get_signal(self, df, zones, params):
         """
-        Analiza las últimas velas cerradas para buscar entrada.
-        Retorna: dict con datos de entrada o None
+        Calcula señales basadas en Volume Profile + Estructura.
+        Recibe 'params' dinámicos según el perfil (SNIPER vs FLOW).
         """
-        if df is None or df.empty or zones is None:
+        if df.empty or not zones:
             return None
 
-        # Trabajamos con la última vela CERRADA (iloc[-1])
-        # y la anterior a esa (iloc[-2]) que sería la vela de Setup.
-        row = df.iloc[-1]       # Vela de Confirmación
-        prev_row = df.iloc[-2]  # Vela de Setup (Rejection)
+        # Datos actuales y previos
+        row = df.iloc[-1]
+        prev = df.iloc[-2]
         
-        # 1. Filtros Globales (Sesión y ATR)
+        # --- 1. FILTROS DE RÉGIMEN ---
+        
+        # A. Filtro de Tiempo
         if not self.is_core_session(row['timestamp']):
             return None
-        
-        if row['ATR'] < row['ATR_Threshold']:
-            return None # Mercado muerto
 
-        # Zonas
-        vah = zones['VAH']
+        # B. Filtro de Volumen (Dinámico por Perfil)
+        # BTC requiere 1.2, AVAX requiere 0.6
+        vol_threshold = params.get('vol_threshold', 0.9)
+        
+        if row['volume'] < (row['Vol_MA'] * vol_threshold):
+            return None
+
+        # --- 2. LÓGICA DE ESTRUCTURA (VAH/VAL) ---
+        
         val = zones['VAL']
+        vah = zones['VAH']
         
-        # 2. Análisis Vela Setup (i-1)
-        setup_long = (prev_row['low'] <= val) and (prev_row['close'] > val)
-        setup_short = (prev_row['high'] >= vah) and (prev_row['close'] < vah)
-        
-        if not (setup_long or setup_short):
-            return None
-
-        # 3. Análisis de Calidad (Vela Actual i)
-        c_range = row['high'] - row['low']
-        if c_range == 0: return None
-        
-        c_body = abs(row['close'] - row['open'])
-        body_strength = c_body / c_range
-        
-        # Filtro Convicción (> 40% cuerpo)
-        if body_strength < 0.40:
-            return None
-
-        # Filtro Expansión Mínima (> 0.25 ATR)
-        expansion = abs(row['close'] - prev_row['close'])
-        if expansion < (row['ATR'] * 0.25):
-            return None
-
-        # Filtro Volumen (> 80% del promedio)
-        if row['volume'] < (row['Vol_MA'] * 0.8):
-            return None
-
-        # 4. Decisión Final
-        signal = None
+        signal_type = None
         stop_loss = 0.0
-        
-        # --- LONG ---
-        if setup_long:
-            # Acceptance: Low > VAL | Close > Prev High | Delta > 0
-            if (row['low'] > val and 
-                row['close'] > prev_row['high'] and 
-                row['delta_norm'] > 0):
-                
-                if row['RSI'] < config.RSI_LONG_THRESHOLD:
-                    signal = 'LONG'
-                    stop_loss = row['close'] - (row['ATR'] * 1.5) # SL Estructural
 
-        # --- SHORT ---
-        elif setup_short:
-            # Acceptance: High < VAH | Close < Prev Low | Delta < 0
-            if (row['high'] < vah and 
-                row['close'] < prev_row['low'] and 
-                row['delta_norm'] < 0):
-                
-                if row['RSI'] > config.RSI_SHORT_THRESHOLD:
-                    signal = 'SHORT'
-                    stop_loss = row['close'] + (row['ATR'] * 1.5) # SL Estructural
+        # Parámetros RSI dinámicos
+        rsi_limit_long = params.get('rsi_long', 45)
+        rsi_limit_short = params.get('rsi_short', 55)
 
-        if signal:
+        # --- LONG SETUP ---
+        # 1. El precio estaba abajo o tocando el VAL
+        # 2. Recupera el nivel y cierra adentro
+        # 3. Confirma con fuerza (Close > Open y Close > High previo)
+        if prev['low'] <= val and prev['close'] > val: # Rechazo previo
+            if row['low'] > val and row['close'] > prev['high'] and row['close'] > row['open']:
+                # 4. Filtro RSI
+                if row['RSI'] < rsi_limit_long:
+                    signal_type = 'LONG'
+                    # SL Estructural o por ATR
+                    stop_loss = row['close'] - (row['ATR'] * 1.5)
+
+        # --- SHORT SETUP ---
+        # 1. El precio estaba arriba o tocando el VAH
+        # 2. Pierde el nivel y cierra adentro
+        # 3. Confirma debilidad
+        elif prev['high'] >= vah and prev['close'] < vah: # Rechazo previo
+            if row['high'] < vah and row['close'] < prev['low'] and row['close'] < row['open']:
+                # 4. Filtro RSI
+                if row['RSI'] > rsi_limit_short:
+                    signal_type = 'SHORT'
+                    stop_loss = row['close'] + (row['ATR'] * 1.5)
+
+        # --- RETORNO DE SEÑAL ---
+        if signal_type:
             return {
-                'type': signal,
+                'strategy': 'V6.5',
+                'symbol': df['symbol_name'].iloc[0] if 'symbol_name' in df.columns else "UNKNOWN",
+                'type': signal_type,
                 'entry_price': row['close'],
                 'stop_loss': stop_loss,
                 'atr': row['ATR'],
-                'time': row['timestamp']
+                'timestamp': row['timestamp'],
+                'profile_name': params.get('name', 'UNKNOWN'), # SNIPER o FLOW
+                'risk_type': params.get('risk_type', 'STANDARD') # PREMIUM o STANDARD
             }
-        
+
         return None
