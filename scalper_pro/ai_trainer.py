@@ -12,35 +12,44 @@ def train_cortex():
     try:
         df = pd.read_csv("cortex_training_data.csv")
     except:
-        print("❌ No se encontró cortex_training_data.csv. Corre el miner primero.")
+        print("❌ Faltan datos. Corre el miner primero.")
         return
 
-    # 2. Separar Features (X) y Target (y)
     X = df[['feat_volatility', 'feat_vol_ratio', 'feat_rsi', 'feat_trend_dev']]
     y = df['TARGET']
     
-    # 3. Split Test/Train
+    # 2. Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # 4. Configurar Modelo (OPTIMIZADO PARA LIGHTSAIL 1GB RAM)
-    # n_estimators=100 (Suficiente)
-    # max_depth=10 (Clave: Limita el tamaño en memoria)
-    # n_jobs=-1 (Usa todos los núcleos de la Orange Pi)
-    clf = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=-1, random_state=42)
+    # 3. Configuración del Modelo (CON CORRECCIÓN DE BALANCE)
+    print("⚙️ Configurando RandomForest con class_weight='balanced'...")
     
-    # 5. Entrenar
+    clf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=10,         # Control de Overfitting y Memoria
+        class_weight='balanced', # <--- LA CLAVE PARA QUE NO APRENDA SOLO A ESPERAR
+        n_jobs=-1,
+        random_state=42
+    )
+    
+    # 4. Entrenar
     clf.fit(X_train, y_train)
     
-    # 6. Evaluar
-    print("\n📊 REPORTE DE RENDIMIENTO:")
+    # 5. Evaluar
+    print("\n📊 REPORTE DE RENDIMIENTO (Test Set):")
     y_pred = clf.predict(X_test)
     print(classification_report(y_test, y_pred, target_names=['SNIPER', 'FLOW', 'WAIT']))
     
-    # 7. Guardar Cerebro
-    model_filename = "cortex_model_v1.joblib"
-    joblib.dump(clf, model_filename, compress=3) # Compresión alta para transferencia
-    print(f"✅ Modelo guardado: {model_filename}")
-    print("🚀 Listo para enviar a Lightsail.")
+    # Feature Importance (Para que veas qué está mirando la IA)
+    print("\n👀 Importancia de Features:")
+    importances = clf.feature_importances_
+    features = X.columns
+    for feat, imp in zip(features, importances):
+        print(f"   {feat}: {imp:.4f}")
+
+    # 6. Guardar
+    joblib.dump(clf, "cortex_model_v1.joblib", compress=3)
+    print(f"\n✅ CEREBRO GUARDADO: cortex_model_v1.joblib")
 
 if __name__ == "__main__":
     train_cortex()
