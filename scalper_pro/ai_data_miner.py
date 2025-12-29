@@ -68,10 +68,9 @@ def calculate_features_standard(df):
 
 def label_data(df):
     """
-    ETIQUETADO (Looking Ahead 12 velas / 1 Hora)
-    0 = SNIPER (Alta Volatilidad / Explosión)
-    1 = FLOW (Movimiento Sostenido)
-    2 = WAIT (Ruido / Lateral / Pérdida)
+    ETIQUETADO V7.1 (CORREGIDO)
+    El Target se basa PURAMENTE en el resultado del precio.
+    No miramos el volumen aquí para evitar 'Data Leakage'.
     """
     targets = []
     # Convertimos a numpy para velocidad
@@ -79,38 +78,57 @@ def label_data(df):
     highs = df['high'].values
     lows = df['low'].values
     atrs = df['ATR'].values
-    vol_ratios = df['feat_vol_ratio'].values
     
-    LOOK_AHEAD = 12
+    # Importante: No usamos vol_ratios aquí. 
+    # Dejamos que la IA descubra su importancia.
+    
+    LOOK_AHEAD = 12 # 1 Hora
     
     for i in range(len(df) - LOOK_AHEAD):
         entry = closes[i]
         current_atr = atrs[i]
         
-        # Futuro próximo
-        future_high = np.max(highs[i+1 : i+LOOK_AHEAD+1])
-        future_low = np.min(lows[i+1 : i+LOOK_AHEAD+1])
-        
+        # SL Estimado (1.5 ATR)
         sl_dist = current_atr * 1.5
         if sl_dist == 0: 
             targets.append(2)
             continue
-            
-        max_long_r = (future_high - entry) / sl_dist
-        max_short_r = (entry - future_low) / sl_dist
+
+        # Definimos niveles de precio objetivo
+        # Sniper Target: 3R
+        # Flow Target: 1.5R
         
-        # LOGICA V7.0: Detección de Magnitud
-        # Si explota > 3R y hay volumen, era un setup SNIPER
-        if (max_long_r > 3 or max_short_r > 3) and vol_ratios[i] > 1.0:
-            targets.append(0) 
+        # --- SIMULACIÓN DE FUTURO ---
+        # Buscamos si tocó TP antes que SL en la ventana de 12 velas
+        outcome = 2 # Default WAIT
+        
+        # Revisamos vela por vela hacia el futuro para ver qué toca primero
+        for j in range(1, LOOK_AHEAD + 1):
+            future_high = highs[i+j]
+            future_low = lows[i+j]
             
-        # Si se mueve > 1.5R decentemente, era un setup FLOW
-        elif (max_long_r > 1.5 or max_short_r > 1.5):
-            targets.append(1) 
+            # Calculamos R al High y al Low
+            r_high = (future_high - entry) / sl_dist
+            r_low = (entry - future_low) / sl_dist # Nota: Para short sería al revés, aquí simplificamos magnitud
             
-        # Si no, mejor esperar
-        else:
-            targets.append(2)
+            # LOGICA MAGNITUD ABSOLUTA (Captura movimiento fuerte en cualquier dirección)
+            # Asumimos que el bot acierta la dirección (Long/Short) por su estrategia base.
+            # Aquí evaluamos VOLATILIDAD y POTENCIAL.
+            
+            # Si el movimiento en CUALQUIER dirección supera 3R...
+            if r_high > 3 or r_low > 3:
+                outcome = 0 # SNIPER (Detectamos explosión)
+                break # Ya encontramos el target mayor, salimos
+            
+            # Si supera 1.5R...
+            elif (r_high > 1.5 or r_low > 1.5) and outcome == 2:
+                outcome = 1 # FLOW (Es candidato, pero seguimos mirando por si se vuelve Sniper)
+                # No hacemos break aquí, porque podría convertirse en Sniper en la siguiente vela
+                
+            # NOTA: En un labeling perfecto tick-by-tick chequearíamos SL.
+            # Aquí asumimos que si hay rango para 3R, es un entorno Sniper.
+            
+        targets.append(outcome)
             
     # Rellenar final
     targets.extend([2] * LOOK_AHEAD)
