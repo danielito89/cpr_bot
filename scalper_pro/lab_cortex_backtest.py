@@ -85,7 +85,6 @@ def calculate_features_for_inference(df):
 def run_simulation():
     print(f"\n🧠 INICIANDO BACKTEST CON CORTEX AI ({START_DATE} - {END_DATE})")
     
-    # 1. Cargar Cerebro
     try:
         model = joblib.load(MODEL_PATH)
         print("✅ Modelo cargado correctamente.")
@@ -94,78 +93,70 @@ def run_simulation():
         return
 
     global_log = []
+    
+    # Nombres de columnas EXACTOS del entrenamiento
+    feature_cols = ['feat_volatility', 'feat_vol_ratio', 'feat_rsi', 'feat_trend_dev']
 
     for symbol in TARGET_PAIRS:
         df = load_data(symbol)
         if df.empty: continue
         
-        # Pre-calcular features (Vectorizado para velocidad, pero consultado fila a fila)
         df = calculate_features_for_inference(df)
         
-        # Arrays numpy para velocidad
+        # Numpy arrays para velocidad en datos técnicos
         closes = df['close'].values
         opens = df['open'].values
         highs = df['high'].values
         lows = df['low'].values
         vols = df['volume'].values
         vol_mas = df['Vol_MA'].values
-        rsis = df['feat_rsi'].values # Usamos el mismo RSI
+        rsis = df['feat_rsi'].values
         vahs = df['VAH'].values
         vals = df['VAL'].values
         atrs = df['ATR'].values
         
-        # Features para IA
-        X_feats = df[['feat_volatility', 'feat_vol_ratio', 'feat_rsi', 'feat_trend_dev']].values
+        # Numpy array para features de IA
+        X_feats = df[feature_cols].values
         
         trades = []
         cooldown = 0
         
-        # --- BUCLE DE SIMULACIÓN ---
-        # Empezamos después del warmup de indicadores
         for i in range(300, len(df)-12):
             if cooldown > 0: 
                 cooldown -= 1
                 continue
             
-            # 1. CONSULTA A CORTEX (IA) 🧠
-            # Extraemos la fila de features actual
-            features_row = X_feats[i].reshape(1, -1)
+            # --- CORRECCIÓN AQUÍ ---
+            # Pasamos DataFrame con nombres en lugar de array puro
+            features_row = pd.DataFrame([X_feats[i]], columns=feature_cols)
             
-            # --- OPCIÓN PRO: PREDICT PROBA (Como sugeriste) ---
-            probs = model.predict_proba(features_row)[0] # [Prob_Sniper, Prob_Flow, Prob_Wait]
-            # Asumiendo orden de clases: 0=SNIPER, 1=FLOW, 2=WAIT (Verificar model.classes_)
+            probs = model.predict_proba(features_row)[0] 
             
-            # Lógica de Umbrales (Tus reglas de oro)
-            p_sniper = probs[0]
-            p_flow = probs[1]
-            p_wait = probs[2]
+            p_sniper = probs[0] # Asumiendo target 0
+            p_flow = probs[1]   # Asumiendo target 1
+            p_wait = probs[2]   # Asumiendo target 2
             
             profile = 'WAIT'
             
-            # REGLAS DE DECISIÓN
+            # REGLAS DE DECISIÓN (Ajustables)
             if p_wait > 0.50: 
-                profile = 'WAIT' # Kill Switch
-            elif p_sniper > 0.40: # Umbral Sniper (ajustable)
+                profile = 'WAIT'
+            elif p_sniper > 0.40: 
                 profile = 'SNIPER'
             else:
                 profile = 'FLOW'
                 
-            # Si Cortex dice WAIT, no operamos
-            if profile == 'WAIT':
-                continue
+            if profile == 'WAIT': continue
                 
-            # 2. CARGAR PARÁMETROS DEL PERFIL
             p_params = PARAMS[profile]
             
-            # 3. VERIFICAR SEÑAL TÉCNICA (V6.5)
-            # Filtro de Volumen Dinámico
             if vols[i] < (vol_mas[i] * p_params['vol_thresh']): continue
             
             signal = None
             sl_price = 0
             
             # LONG
-            if lows[i-1] <= vals[i-1] and closes[i-1] > vals[i-1]: # Rechazo
+            if lows[i-1] <= vals[i-1] and closes[i-1] > vals[i-1]:
                  if lows[i] > vals[i] and closes[i] > highs[i-1] and closes[i] > opens[i]:
                      if rsis[i] < p_params['rsi_long']:
                          signal = 'LONG'
@@ -178,19 +169,15 @@ def run_simulation():
                          signal = 'SHORT'
                          sl_price = closes[i] + (atrs[i] * 1.5)
             
-            # 4. EJECUCIÓN SIMULADA
             if signal:
                 entry = closes[i]
                 sl_dist = abs(entry - sl_price)
                 if sl_dist == 0: continue
                 
-                # Definir TP dinámico según perfil (Tus reglas: Sniper TP largo, Flow TP corto)
                 tp_mult = p_params['tp_mult']
-                
                 outcome_r = 0
                 result_type = "HOLD"
                 
-                # Forward 12 velas
                 for j in range(1, 13):
                     idx = i + j
                     if signal == 'LONG':
@@ -202,38 +189,34 @@ def run_simulation():
                         r_low = (entry - highs[idx]) / sl_dist 
                         r_curr = (entry - closes[idx]) / sl_dist
                     
-                    if r_low <= -1.1: # SL Hit (con deslizamiento)
+                    if r_low <= -1.1:
                         outcome_r = -1.1
                         result_type = "SL"
                         break
-                    
-                    if r_high >= tp_mult: # TP Dinámico Hit
+                    if r_high >= tp_mult:
                         outcome_r = tp_mult
                         result_type = "TP"
                         break
-                        
-                    if j == 12: # Time Stop
+                    if j == 12:
                         outcome_r = r_curr
                         result_type = "TIME"
                 
                 trades.append({
                     'symbol': symbol,
                     'profile': profile,
-                    'r_net': outcome_r - 0.05, # Fee
+                    'r_net': outcome_r - 0.05,
                     'type': result_type
                 })
                 cooldown = 12
         
-        # Reporte por par
         if trades:
             df_res = pd.DataFrame(trades)
             net_r = df_res['r_net'].sum()
             print(f"   -> {symbol}: {len(trades)} trades | {net_r:.2f} R | WinRate: {(df_res['r_net']>0).mean():.1%}")
             global_log.extend(trades)
         else:
-            print(f"   -> {symbol}: 0 trades (Cortex protegió todo el tiempo)")
+            print(f"   -> {symbol}: 0 trades (Cortex protegió)")
 
-    # --- REPORTE FINAL ---
     if global_log:
         df_glob = pd.DataFrame(global_log)
         print("\n" + "="*60)
@@ -244,7 +227,6 @@ def run_simulation():
         
         total_r = df_glob['r_net'].sum()
         print(f"\n💰 R NETO TOTAL: {total_r:.2f} R")
-        print("="*60)
 
 if __name__ == "__main__":
     run_simulation()
