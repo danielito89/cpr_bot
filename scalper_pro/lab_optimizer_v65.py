@@ -40,11 +40,11 @@ PROFILES = {
 # Aquí decides qué estrategia usas contra qué moneda.
 # ¡Prueba ponerle 'FLOW' a BTC para ver cómo pierde dinero! Es educativo.
 TEST_MAP = {
-    'BTC/USDT':  'SNIPER',
-    'ETH/USDT':  'SNIPER',
-    'SOL/USDT':  'FLOW',
-    'AVAX/USDT': 'SNIPER',   # La joya de la corona
-    'LTC/USDT':  'SNIPER'
+    #'BTC/USDT':  'SNIPER',
+    #'ETH/USDT':  'SNIPER',
+    #'SOL/USDT':  'FLOW',
+    'AVAX/USDT': 'SNIPER'   # La joya de la corona
+    #'LTC/USDT':  'SNIPER'
     # 'BNB/USDT': 'FLOW'   # Descomenta para probar
 }
 
