@@ -1,57 +1,49 @@
-# addons/state_manager.py
 import json
 import os
 
-STATE_FILE = "hydra_state.json"
-
 class StateManager:
-    def __init__(self):
-        self.file = STATE_FILE
-        if not os.path.exists(self.file):
-            self.save_state({})
+    def __init__(self, filename="bot_state.json"):
+        # Guardamos en la carpeta raíz del proyecto para que sea persistente
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.filepath = os.path.join(base_dir, filename)
+        self.state = self._load_state()
 
-    def save_state(self, data):
-        with open(self.file, 'w') as f:
-            json.dump(data, f, indent=4)
+    def _load_state(self):
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
 
-    def load_state(self):
-        with open(self.file, 'r') as f:
-            try: return json.load(f)
-            except: return {}
+    def _save_state(self):
+        with open(self.filepath, 'w') as f:
+            json.dump(self.state, f, indent=4)
 
-    def get_pair_state(self, symbol):
-        data = self.load_state()
-        return data.get(symbol, {"in_position": False})
-
-    def set_entry(self, symbol, price, time_str, sl, side): 
-        data = self.load_state()
-        data[symbol] = {
-            "in_position": True,
-            "side": side,
-            "entry_price": price,
-            "entry_time": str(time_str),
-            "stop_loss": sl,
-            "tp1_hit": False,
-            "bars_held": 0
-        }
-        self.save_state(data)
-
-    def clear_pair_state(self, symbol):
-        data = self.load_state()
-        if symbol in data:
-            del data[symbol] # Borramos la entrada del par
-            self.save_state(data)
-
-    def update_bars_held(self, symbol):
-        data = self.load_state()
-        if symbol in data and data[symbol].get("in_position"):
-            data[symbol]["bars_held"] += 1
-            self.save_state(data)
-            return data[symbol]["bars_held"]
-        return 0
+    # --- MÉTODOS QUE FALTABAN ---
     
-    def set_tp1_hit(self, symbol):
-        data = self.load_state()
-        if symbol in data:
-            data[symbol]["tp1_hit"] = True
-            self.save_state(data)
+    def get_position(self, symbol):
+        """Devuelve el estado si existe, o None si está libre"""
+        return self.state.get(symbol)
+
+    def set_entry(self, symbol, price, time, sl, side):
+        """Registra una nueva entrada"""
+        self.state[symbol] = {
+            'entry_price': price,
+            'entry_time': str(time),
+            'sl': sl,
+            'side': side,
+            'status': 'OPEN'
+        }
+        self._save_state()
+
+    def clear_position(self, symbol):
+        """Borra la posición del registro"""
+        if symbol in self.state:
+            del self.state[symbol]
+            self._save_state()
+            
+    def get_all_active_symbols(self):
+        """Devuelve lista de símbolos activos"""
+        return list(self.state.keys())
