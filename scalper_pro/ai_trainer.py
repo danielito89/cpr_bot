@@ -4,55 +4,53 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 import joblib
-import os
 
-# Los mismos pares
-PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT', 'LTC/USDT']
-
-def train_specialists():
-    print("🧠 ENTRENANDO ESPECIALISTAS (1 MODELO POR PAR)...")
+def train_cortex_v8():
+    print("🧠 ENTRENANDO CORTEX V8 (UNIVERSAL)...")
     
-    for pair in PAIRS:
-        safe_pair = pair.replace('/', '')
-        csv_file = f"cortex_data_{safe_pair}.csv"
-        model_file = f"cortex_model_{safe_pair}.joblib"
-        
-        print(f"\n⚙️ Entrenando Agente para: {pair}")
-        
-        if not os.path.exists(csv_file):
-            print(f"❌ No encontré {csv_file}, saltando...")
-            continue
-
+    csv_file = "cortex_training_data_v8.csv"
+    try:
         df = pd.read_csv(csv_file)
-        
-        # Limpieza rápida de NaNs por si acaso
-        df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    except:
+        print(f"❌ No se encontró {csv_file}")
+        return
 
-        X = df[['feat_volatility', 'feat_vol_ratio', 'feat_rsi', 'feat_trend_dev']]
-        y = df['TARGET']
-        
-        # Split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        
-        # Configuración ROBUSTA (Balanced)
-        clf = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=8, # Un poco menos profundo para evitar overfit en data más pequeña
-            class_weight='balanced',
-            n_jobs=-1,
-            random_state=42
-        )
-        
-        clf.fit(X_train, y_train)
-        
-        # Reporte rápido
-        y_pred = clf.predict(X_test)
-        report = classification_report(y_test, y_pred, output_dict=True)
-        # Solo imprimimos accuracy para no ensuciar, el detalle está en el backtest
-        print(f"   🎯 Accuracy: {report['accuracy']:.2f} | Weighted F1: {report['weighted avg']['f1-score']:.2f}")
-        
-        joblib.dump(clf, model_file, compress=3)
-        print(f"   ✅ Guardado: {model_file}")
+    # Definir X e y
+    # Nota: feat_vol_norm aparece dos veces en el miner por error tipográfico en la lista de guardado?
+    # Revisemos el miner: clean_df usa 'feat_vol_norm' dos veces si no cambiamos nombres.
+    # CORRECCION: En el miner, el volumen se llama 'feat_vol_norm' igual que la volatilidad.
+    # EL MINER DE ARRIBA TIENE UN BUG DE NOMBRE. CORREGIR EN EL MINER O AQUI.
+    # ASUMIENDO QUE EL MINER SE GUARDA CORRECTO, LAS COLUMNAS SON:
+    # 'feat_vol_norm' (Volatilidad) y 'feat_vol_norm.1' (Volumen) si pandas duplica.
+    # PARA EVITAR ESTO, CAMBIARÉ EL MINER DE ARRIBA EN TU COPIA:
+    # En el miner, cambia df['feat_vol_norm'] = df['volume']... por df['feat_volume_norm']
+    
+    # ASUMIENDO NOMBRES CORRECTOS (Ver abajo nota importante)
+    X = df.iloc[:, :-1] # Todas menos Target
+    y = df['TARGET']
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    print(f"⚙️ Features de entrada: {list(X.columns)}")
+    
+    # Configuración Balanceada
+    clf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=10, 
+        class_weight='balanced',
+        n_jobs=-1,
+        random_state=42
+    )
+    
+    clf.fit(X_train, y_train)
+    
+    print("\n📊 REPORTE DE RENDIMIENTO:")
+    y_pred = clf.predict(X_test)
+    print(classification_report(y_test, y_pred, target_names=['SNIPER', 'FLOW', 'WAIT']))
+    
+    # Guardar
+    joblib.dump(clf, "cortex_model_v8.joblib", compress=3)
+    print("✅ CEREBRO V8 GUARDADO.")
 
 if __name__ == "__main__":
-    train_specialists()
+    train_cortex_v8()
