@@ -21,9 +21,9 @@ END_DATE   = "2024-12-31"
 # ¿Qué pasa si subes el Volumen de Flow a 0.8?
 PROFILES = {
     'SNIPER': {
-        'vol_thresh': 1.2,    # Gatillo de Volumen (x veces la media)
-        'rsi_long': 40,       # RSI máximo para entrar en Long (Sobreventa)
-        'rsi_short': 60,      # RSI mínimo para entrar en Short (Sobrecompra)
+        'vol_thresh': 1.0,    # Gatillo de Volumen (x veces la media)
+        'rsi_long': 45,       # RSI máximo para entrar en Long (Sobreventa)
+        'rsi_short': 65,      # RSI mínimo para entrar en Short (Sobrecompra)
         'tp_mult': 3.0,       # Ratio Riesgo/Beneficio buscado
         'sl_atr': 1.5         # Distancia del Stop Loss en ATRs
     },
@@ -41,10 +41,10 @@ PROFILES = {
 # ¡Prueba ponerle 'FLOW' a BTC para ver cómo pierde dinero! Es educativo.
 TEST_MAP = {
     'BTC/USDT':  'SNIPER',
-    'ETH/USDT':  'SNIPER',
+    'ETH/USDT':  'FLOW',
     'SOL/USDT':  'SNIPER',
     'AVAX/USDT': 'FLOW',   # La joya de la corona
-    'LTC/USDT':  'SNIPER',
+    'LTC/USDT':  'FLOW'
     # 'BNB/USDT': 'FLOW'   # Descomenta para probar
 }
 
