@@ -22,8 +22,8 @@ except ImportError:
     from core.binance_api import BinanceAPI as BinanceClient
 
 from core.data_processor import DataProcessor
-from core.state_manager import StateManager
-from core.telegram_bot import TelegramBot
+from addons.state_manager import StateManager
+from addons.telegram_bot import TelegramBot
 from core.risk_manager import RiskManager
 from strategies.strategy_v6_5 import StrategyV6_5
 
