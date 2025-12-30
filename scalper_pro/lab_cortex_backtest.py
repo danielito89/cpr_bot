@@ -4,15 +4,16 @@ import joblib
 import sys
 import os
 import ccxt
+# import lightgbm as lgb # No hace falta import explícito para cargar joblib, pero debe estar instalado
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 
-# --- CONFIGURACIÓN ---
+# --- CONFIG ---
 START_DATE = "2024-01-01"
 END_DATE   = "2024-12-31"
 TARGET_PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT', 'LTC/USDT']
-MODEL_PATH = "cortex_model_v8.joblib"
+MODEL_PATH = "cortex_model_v9.joblib"
 
 PARAMS = {
     'SNIPER': {'vol_thresh': 1.2, 'rsi_long': 40, 'rsi_short': 60, 'tp_mult': 3.0},
@@ -20,7 +21,7 @@ PARAMS = {
 }
 
 def load_data(symbol):
-    print(f"📥 Descargando {symbol}...", end=" ")
+    print(f"📥 {symbol}...", end=" ")
     exchange = ccxt.binance()
     since = exchange.parse8601(f"{START_DATE}T00:00:00Z")
     end_ts = exchange.parse8601(f"{END_DATE}T23:59:59Z")
@@ -32,78 +33,95 @@ def load_data(symbol):
             since = ohlcv[-1][0] + 1
             ohlcv = [x for x in ohlcv if x[0] <= end_ts]
             all_ohlcv.extend(ohlcv)
-            print(".", end="", flush=True)
+            # print(".", end="", flush=True) # Silenciamos puntos para velocidad
         except: break
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     print(f" {len(df)} velas.")
     return df
 
-def calculate_features_inference(df):
-    """
-    DEBE SER IDÉNTICA AL MINER (NORMALIZADA)
-    """
+def calculate_features_v9(df):
+    """ DEBE SER IDÉNTICA AL MINER V9 """
     df = df.copy()
     
-    # 1. Volatilidad Normalizada (Z-Score like)
+    # A. DINÁMICA
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
-    atr = true_range.rolling(14).mean()
-    atr_baseline = atr.rolling(100).mean()
     
-    df['feat_vol_norm'] = atr / atr_baseline
+    atr_fast = true_range.rolling(14).mean()
+    atr_slow = true_range.rolling(100).mean()
+    df['feat_vol_z'] = atr_fast / atr_slow
+    df['feat_squeeze'] = (atr_fast / df['close']).rolling(20).std() 
+
+    # B. MICROESTRUCTURA
+    candle_range = df['high'] - df['low']
+    candle_range = candle_range.replace(0, 0.000001) 
+    df['feat_clv'] = ((df['close'] - df['low']) - (df['high'] - df['close'])) / candle_range
     
-    # 2. Volumen Normalizado
-    vol_ma_long = df['volume'].rolling(50).mean()
-    df['feat_volume_norm'] = df['volume'] / vol_ma_long
+    upper_wick = df['high'] - df[['close', 'open']].max(axis=1)
+    lower_wick = df[['close', 'open']].min(axis=1) - df['low']
+    df['feat_wick_up'] = upper_wick / candle_range
+    df['feat_wick_down'] = lower_wick / candle_range
     
-    # 3. RSI
+    body_size = abs(df['close'] - df['open'])
+    df['feat_body_r'] = body_size / candle_range
+
+    # C. IMPACTO
+    # df['feat_vol_impact'] = (df['volume'] * df['feat_clv']).rolling(3).mean() # Original
+    # Nota: Asegurarse de tener 'volume'.
+    df['feat_vol_impact'] = (df['volume'] * df['feat_clv']).rolling(3).mean()
+
+    # D. TENDENCIA
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df['feat_rsi'] = 100 - (100 / (1 + rs))
     
-    # 4. Tendencia Normalizada
     sma50 = df['close'].rolling(50).mean()
-    df['feat_trend_z'] = (df['close'] - sma50) / atr
+    df['feat_dist_sma'] = (df['close'] - sma50) / atr_fast
 
-    # Datos Técnicos para Estrategia
+    # Datos Técnicos
     df['rolling_mean'] = df['close'].rolling(300).mean()
     df['rolling_std'] = df['close'].rolling(300).std()
     df['VAH'] = df['rolling_mean'] + df['rolling_std']
     df['VAL'] = df['rolling_mean'] - df['rolling_std']
-    df['Vol_MA'] = df['volume'].rolling(20).mean() # Para la estrategia V6.5
-    df['ATR'] = atr # Para SL
+    df['Vol_MA'] = df['volume'].rolling(20).mean()
+    df['ATR'] = atr_fast
     
     return df.dropna()
 
 def run_simulation():
-    print(f"\n🧠 BACKTEST V8: ARQUITECTURA NORMALIZADA ({START_DATE} - {END_DATE})")
+    print(f"\n🧠 BACKTEST V9: LightGBM + HyperFeatures ({START_DATE} - {END_DATE})")
     
     try:
         model = joblib.load(MODEL_PATH)
-        print("✅ Modelo V8 cargado.")
+        print("✅ Modelo V9 cargado.")
+        # LightGBM a veces guarda las clases distinto, pero sklearn wrapper suele ser igual
         class_map = {label: idx for idx, label in enumerate(model.classes_)}
         idx_sniper, idx_flow, idx_wait = class_map.get(0), class_map.get(1), class_map.get(2)
     except Exception as e:
         print(f"❌ Error Modelo: {e}"); return
 
     global_log = []
-    # Nombres deben coincidir con Miner
-    feature_cols = ['feat_vol_norm', 'feat_volume_norm', 'feat_rsi', 'feat_trend_z']
+    # Columnas EXACTAS del Miner V9
+    feature_cols = [
+            'feat_vol_z', 'feat_squeeze', 'feat_clv', 'feat_wick_up', 
+            'feat_wick_down', 'feat_body_r', 'feat_vol_impact', 
+            'feat_rsi', 'feat_dist_sma'
+    ]
 
     for symbol in TARGET_PAIRS:
         df = load_data(symbol)
         if df.empty: continue
         
-        print(f"   ⚙️ Procesando {symbol}...")
-        df = calculate_features_inference(df)
+        # print(f"   ⚙️ Procesando {symbol}...")
+        df = calculate_features_v9(df)
         
-        # Inferencia Masiva
+        # Inferencia
         X_full = df[feature_cols]
         all_probs = model.predict_proba(X_full)
         
@@ -124,30 +142,26 @@ def run_simulation():
             p_sniper = probs[idx_sniper]
             p_flow = probs[idx_flow]
             
-            # --- LÓGICA DE DECISIÓN ESTRICTA (V8) ---
+            # --- LÓGICA DE DECISIÓN V9 ---
             profile = 'WAIT'
             
-            # Solo operamos si hay ALTA CONVICCIÓN
-            if p_sniper > 0.45: # Umbral alto para Sniper
+            # Con LightGBM podemos ser un poco más flexibles porque discrimina mejor
+            if p_sniper > 0.40:    # Antes 0.45
                 profile = 'SNIPER'
-            elif p_flow > 0.55: # Umbral muy alto para Flow (evita bleed)
+            elif p_flow > 0.50:    # Antes 0.55
                 profile = 'FLOW'
-            else:
-                profile = 'WAIT' # Ante la duda, Kill Switch
             
             if profile == 'WAIT': continue
             
-            # ... (Resto de la lógica técnica IDÉNTICA a versiones anteriores) ...
+            # ... Resto de la lógica técnica IDÉNTICA ...
             p_params = PARAMS[profile]
             if vols[i] < (vol_mas[i] * p_params['vol_thresh']): continue
             
             signal = None; sl_price = 0
-            # LONG
             if lows[i-1] <= vals[i-1] and closes[i-1] > vals[i-1]:
                  if lows[i] > vals[i] and closes[i] > highs[i-1] and closes[i] > opens[i]:
                      if rsis[i] < p_params['rsi_long']:
                          signal = 'LONG'; sl_price = closes[i] - (atrs[i] * 1.5)
-            # SHORT
             elif highs[i-1] >= vahs[i-1] and closes[i-1] < vahs[i-1]:
                  if highs[i] < vahs[i] and closes[i] < lows[i-1] and closes[i] < opens[i]:
                      if rsis[i] > p_params['rsi_short']:
@@ -180,11 +194,11 @@ def run_simulation():
             print(f"   -> {symbol}: {len(trades)} trades | {net_r:.2f} R")
             global_log.extend(trades)
         else:
-            print(f"   -> {symbol}: 0 trades (Protegido)")
+            print(f"   -> {symbol}: 0 trades")
 
     if global_log:
         df_glob = pd.DataFrame(global_log)
-        print(f"\n💰 R NETO TOTAL V8: {df_glob['r_net'].sum():.2f} R")
+        print(f"\n💰 R NETO TOTAL V9: {df_glob['r_net'].sum():.2f} R")
 
 if __name__ == "__main__":
     run_simulation()
