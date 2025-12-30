@@ -32,8 +32,8 @@ jobs:
             source venv/bin/activate
             
             # Reiniciar el bot para aplicar cambios
-            sudo systemctl restart cpr_dashboard.service
-            sudo systemctl restart scalper_pro.service
+            sudo systemctl restart cpr_dashboard
+            sudo systemctl restart scalper_pro
             echo "✅ Producción actualizada y reiniciada."
 
       # ---------------------------------------------------
