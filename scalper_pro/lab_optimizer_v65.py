@@ -43,7 +43,7 @@ TEST_MAP = {
     'BTC/USDT':  'SNIPER',
     'ETH/USDT':  'SNIPER',
     'SOL/USDT':  'FLOW',
-    'AVAX/USDT': 'FLOW',   # La joya de la corona
+    'AVAX/USDT': 'SNIPER',   # La joya de la corona
     'LTC/USDT':  'SNIPER'
     # 'BNB/USDT': 'FLOW'   # Descomenta para probar
 }
