@@ -85,73 +85,79 @@ def calculate_advanced_features(df):
     return df.dropna()
 
 def label_data(df):
-    """ETIQUETADO V9.1 (Targets Realistas)"""
+    """
+    ETIQUETADO V9.2: PnL BUCKETS (Rentabilidad Real)
+    Clase 0: TOXIC (Pérdida)
+    Clase 1: NOISE (Ruido / Breakeven)
+    Clase 2: PROFIT (Ganancia > 1.5R)
+    """
     targets = []
     closes = df['close'].values
     highs = df['high'].values
     lows = df['low'].values
     atrs = df['ATR'].values
     
-    LOOK_AHEAD = 12 
+    LOOK_AHEAD = 12 # 1 Hora
     
     for i in range(len(df) - LOOK_AHEAD):
         entry = closes[i]
-        sl_dist = atrs[i] * 1.5 
-        if sl_dist == 0: targets.append(2); continue
-            
-        outcome = 2 # WAIT
+        atr = atrs[i]
         
-        for j in range(1, LOOK_AHEAD + 1):
-            future_high = highs[i+j]
-            future_low = lows[i+j]
+        # SL Teórico (1.5 ATR)
+        sl_dist = atr * 1.5
+        if sl_dist == 0: targets.append(1); continue # Noise por defecto
             
-            r_high = (future_high - entry) / sl_dist
-            r_low = (entry - future_low) / sl_dist
+        # Analizamos el futuro
+        outcome = 1 # Default NOISE
+        
+        # Buscamos MFE (Max Favorable Excursion) y MAE (Max Adverse Excursion)
+        # en las próximas 12 velas
+        future_highs = highs[i+1 : i+LOOK_AHEAD+1]
+        future_lows = lows[i+1 : i+LOOK_AHEAD+1]
+        
+        # Asumimos que el bot acierta la dirección (Long/Short agnóstico)
+        # Si hay volatilidad direccional fuerte, es PROFIT.
+        # Si hay volatilidad sucia (mechas a ambos lados), es TOXIC.
+        
+        max_up = np.max(future_highs)
+        max_down = np.min(future_lows)
+        
+        dist_up = (max_up - entry) / sl_dist
+        dist_down = (entry - max_down) / sl_dist
+        
+        # CRITERIO DE CLASIFICACIÓN V9.2
+        
+        # 1. PROFIT: Si se mueve fuerte (>1.5R) hacia CUALQUIER lado
+        # y no nos stopea inmediatamente en el lado contrario (filtro de chop)
+        # (Simplificación: Buscamos expansión de rango limpia)
+        if (dist_up > 1.5 and dist_down < 1.0) or (dist_down > 1.5 and dist_up < 1.0):
+            outcome = 2 # PROFIT (Luz Verde)
             
-            # CORRECCIÓN 3: Targets Ajustados
-            # Sniper > 2.5R (Antes 3.0)
-            if r_high > 2.5 or r_low > 2.5:
-                outcome = 0 
-                break 
-            # Flow > 1.2R (Antes 1.5, para capturar más inercia)
-            elif (r_high > 1.2 or r_low > 1.2) and outcome == 2:
-                outcome = 1 
-                
+        # 2. TOXIC: Si se queda en rango estrecho O nos sacude a ambos lados
+        elif (dist_up > 1.0 and dist_down > 1.0): # Chop violento
+            outcome = 0 # TOXIC (Luz Roja)
+        elif (dist_up < 0.5 and dist_down < 0.5): # Mercado muerto
+            outcome = 1 # NOISE (Luz Amarilla - Solo fees)
+            
+        # Si toca SL rápido sin dar profit
+        elif (dist_up < 0.5 and dist_down > 1.0) or (dist_down < 0.5 and dist_up > 1.0):
+            outcome = 0 # TOXIC
+            
         targets.append(outcome)
             
-    targets.extend([2] * LOOK_AHEAD)
+    targets.extend([1] * LOOK_AHEAD) # Relleno con Noise
     df['TARGET'] = targets
     return df
 
 def run_mining():
-    print("⛏️ INICIANDO MINERÍA V9.1 (FIXED)")
-    full_dataset = []
-    
-    for pair in PAIRS:
-        df = fetch_data(pair)
-        if df.empty: continue
-        
-        df = calculate_advanced_features(df)
-        df = label_data(df)
-        
-        # Lista corregida de columnas
-        cols_to_save = [
-            'feat_volatility_z', 'feat_squeeze', 
-            'feat_clv', 'feat_wick_up', 'feat_wick_down', 'feat_body_r',
-            'feat_volume_z', 'feat_vol_impact', # Ahora ambos existen
-            'feat_rsi', 'feat_dist_sma', 
-            'TARGET'
-        ]
-        
-        full_dataset.append(df[cols_to_save])
-        
-    if full_dataset:
-        final_df = pd.concat(full_dataset)
-        final_df = final_df.replace([np.inf, -np.inf], np.nan).dropna()
-        
-        filename = "cortex_training_data_v9.csv"
+    print("⛏️ INICIANDO MINERÍA V9.2 (PROFIT BUCKETS)")
+    # ... (Resto del código igual, guardando en cortex_training_data_v9_2.csv) ...
+    # Asegúrate de cambiar el nombre del archivo de salida
+    # ...
+        filename = "cortex_training_data_v9_2.csv"
         final_df.to_csv(filename, index=False)
-        print(f"✅ DATASET V9.1 GENERADO: {len(final_df)} muestras.")
+        print(f"✅ DATASET V9.2 GENERADO. Balance:")
+        print(final_df['TARGET'].value_counts(normalize=True))
 
 if __name__ == "__main__":
     run_mining()

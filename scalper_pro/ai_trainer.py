@@ -9,7 +9,7 @@ def train_cortex_v9():
     print("🧠 ENTRENANDO CORTEX V9.1 (LightGBM)...")
     
     try:
-        df = pd.read_csv("cortex_training_data_v9.csv")
+        df = pd.read_csv("cortex_training_data_v9_2.csv")
     except:
         print("❌ Falta el dataset V9.")
         return
@@ -36,9 +36,8 @@ def train_cortex_v9():
     
     print("\n📊 REPORTE DE RENDIMIENTO:")
     y_pred = clf.predict(X_test)
-    print(classification_report(y_test, y_pred, target_names=['SNIPER', 'FLOW', 'WAIT']))
-    
-    joblib.dump(clf, "cortex_model_v9.joblib", compress=3)
+    print(classification_report(y_test, y_pred, target_names=['TOXIC', 'NOISE', 'PROFIT']))
+    joblib.dump(clf, "cortex_model_v9_2.joblib", compress=3)
     print("✅ CEREBRO V9.1 GUARDADO.")
 
 if __name__ == "__main__":
