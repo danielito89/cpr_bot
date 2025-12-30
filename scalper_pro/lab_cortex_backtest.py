@@ -5,21 +5,30 @@ import sys
 import os
 import ccxt
 
-# Imports locales
+# Imports locales (Asegúrate que la ruta sea correcta en tu Orange Pi)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 from core.data_processor import DataProcessor
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DEL BACKTEST ---
 START_DATE = "2024-01-01"
 END_DATE   = "2024-12-31"
 TARGET_PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT', 'LTC/USDT']
-MODEL_PATH = "cortex_model_v1.joblib"
 
-# Definición de Perfiles (Tus Reglas de Oro)
+# Definición de Perfiles Tácticos (Reglas de Oro V7)
 PARAMS = {
-    'SNIPER': {'vol_thresh': 1.2, 'rsi_long': 40, 'rsi_short': 60, 'tp_mult': 3.0}, # Agresivo
-    'FLOW':   {'vol_thresh': 0.6, 'rsi_long': 50, 'rsi_short': 50, 'tp_mult': 1.5}  # Conservador
+    'SNIPER': {
+        'vol_thresh': 1.2,    # Requiere volumen explosivo
+        'rsi_long': 40,       # Sobrevendido fuerte
+        'rsi_short': 60,      # Sobrecomprado fuerte
+        'tp_mult': 3.0        # Busca Home Runs
+    },
+    'FLOW': {
+        'vol_thresh': 0.6,    # Volumen medio aceptable
+        'rsi_long': 50,       # Neutro
+        'rsi_short': 50,      # Neutro
+        'tp_mult': 1.5        # Busca ganancias constantes
+    }
 }
 
 def load_data(symbol):
@@ -45,10 +54,12 @@ def load_data(symbol):
     return df
 
 def calculate_features_for_inference(df):
-    """Calcula features IDENTICAS al entrenamiento."""
+    """
+    Calcula features IDENTICAS al entrenamiento.
+    """
     df = df.copy()
     
-    # 1. Volatilidad (True Range Real)
+    # 1. Volatilidad (True Range Real Vectorizado)
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -73,7 +84,8 @@ def calculate_features_for_inference(df):
     df['sma50'] = df['close'].rolling(50).mean()
     df['feat_trend_dev'] = (df['close'] - df['sma50']) / df['close']
     
-    # Datos para estrategia técnica (VAH/VAL Simulado con Bandas)
+    # --- DATOS TÉCNICOS PARA LA ESTRATEGIA (V6.5) ---
+    # Simulación rápida de Bandas/Zones
     df['rolling_mean'] = df['close'].rolling(300).mean()
     df['rolling_std'] = df['close'].rolling(300).std()
     df['VAH'] = df['rolling_mean'] + df['rolling_std']
@@ -82,51 +94,52 @@ def calculate_features_for_inference(df):
     return df.dropna()
 
 def run_simulation():
-    print(f"\n🧠 INICIANDO BACKTEST CON CORTEX AI ({START_DATE} - {END_DATE})")
+    print(f"\n🧠 INICIANDO BACKTEST ESPECIALISTA V7 ({START_DATE} - {END_DATE})")
+    print("="*65)
     
-    # 1. Cargar Cerebro
-    try:
-        model = joblib.load(MODEL_PATH)
-        print("✅ Modelo cargado correctamente.")
-        
-        # Mapeo de Clases Seguro
-        print(f"🔍 Clases detectadas en modelo: {model.classes_}")
-        class_map = {label: idx for idx, label in enumerate(model.classes_)}
-        idx_sniper = class_map.get(0)
-        idx_flow   = class_map.get(1)
-        idx_wait   = class_map.get(2)
-        
-        if idx_sniper is None or idx_flow is None or idx_wait is None:
-            print("❌ ERROR CRÍTICO: Clases faltantes.")
-            return
-
-    except Exception as e:
-        print(f"❌ Error cargando modelo: {e}")
-        return
-
     global_log = []
-    
-    # Nombres de columnas EXACTOS
+    # Nombres de columnas EXACTOS para evitar warnings de sklearn
     feature_cols = ['feat_volatility', 'feat_vol_ratio', 'feat_rsi', 'feat_trend_dev']
 
     for symbol in TARGET_PAIRS:
+        # 1. CARGAR MODELO ESPECIALISTA
+        # Construimos el nombre del archivo: cortex_model_BTCUSDT.joblib
+        safe_pair = symbol.replace('/', '')
+        model_path = f"cortex_model_{safe_pair}.joblib"
+        
+        try:
+            model = joblib.load(model_path)
+            
+            # MAPEO DE CLASES (CRÍTICO)
+            # Aseguramos saber qué índice es SNIPER(0), FLOW(1), WAIT(2)
+            class_map = {label: idx for idx, label in enumerate(model.classes_)}
+            idx_sniper = class_map.get(0)
+            idx_flow = class_map.get(1)
+            idx_wait = class_map.get(2)
+            
+            if None in [idx_sniper, idx_flow, idx_wait]:
+                print(f"❌ Error en clases del modelo {symbol}. Saltando.")
+                continue
+                
+        except Exception as e:
+            print(f"⚠️ No se encontró modelo para {symbol} ({e}). Saltando.")
+            continue
+
+        # 2. CARGAR DATOS
         df = load_data(symbol)
         if df.empty: continue
         
-        # --- OPTIMIZACIÓN MASIVA AQUÍ ---
-        print(f"   ⚙️ Calculando Features y Predicciones en bloque para {symbol}...")
+        # 3. VECTORIZACIÓN DE PREDICCIONES (VELOCIDAD MÁXIMA) 🚀
+        print(f"   ⚙️  Consultando IA Especialista para {symbol}...")
         df = calculate_features_for_inference(df)
         
-        # 1. Preparamos TODO el dataset para la IA de una vez
-        X_full = df[feature_cols] # Ya es un DataFrame con nombres correctos
+        # Extraemos features como DataFrame con nombres (para evitar Warnings)
+        X_full = df[feature_cols]
         
-        # 2. La IA predice las 100,000 velas en un solo golpe (Vectorización)
-        # Esto tarda milisegundos en lugar de minutos
-        all_probs = model.predict_proba(X_full) 
+        # Predicción masiva (Milisegundos)
+        all_probs = model.predict_proba(X_full)
         
-        # --- FIN OPTIMIZACIÓN ---
-
-        # Convertimos a numpy para velocidad extrema en el bucle
+        # 4. PREPARACIÓN DE ARRAYS PARA BUCLE
         closes = df['close'].values
         opens = df['open'].values
         highs = df['high'].values
@@ -141,60 +154,56 @@ def run_simulation():
         trades = []
         cooldown = 0
         
-        # Bucle de simulación (Ahora es puramente numérico, vuela 🚀)
-        # Ajustamos rango para evitar índices fuera de limite al inicio
-        start_idx = 300
-        end_idx = len(df) - 12
-        
-        for i in range(start_idx, end_idx):
+        # 5. BUCLE DE TRADING (CANDLE BY CANDLE)
+        # Ajustamos offset porque df.dropna() eliminó las primeras velas
+        # Iteramos sobre el tamaño actual del DF
+        for i in range(300, len(df)-12):
             if cooldown > 0: 
                 cooldown -= 1
                 continue
             
-            # --- CONSULTA INSTANTÁNEA (Look up) ---
-            # En lugar de predecir, leemos lo que ya calculamos
-            probs = all_probs[i] # Acceso O(1)
-            
+            # --- CEREBRO IA ---
+            probs = all_probs[i]
             p_sniper = probs[idx_sniper]
-            p_flow   = probs[idx_flow]
-            p_wait   = probs[idx_wait]
+            p_flow = probs[idx_flow]
+            p_wait = probs[idx_wait]
             
             profile = 'WAIT'
             
-            # REGLAS DE DECISIÓN (Meta-Controller)
+            # LÓGICA DE META-CONTROLADOR
             if p_wait > 0.50: 
-                profile = 'WAIT'
+                profile = 'WAIT' # Kill Switch
             elif p_sniper > 0.40: 
-                profile = 'SNIPER'
+                profile = 'SNIPER' # Modo Agresivo
             else:
-                profile = 'FLOW'
+                profile = 'FLOW' # Modo Defensivo
                 
             if profile == 'WAIT': continue
-                
-            # Cargar parámetros
+            
+            # --- LÓGICA TÉCNICA (V6.5) ---
             p_params = PARAMS[profile]
             
-            # --- VALIDACIÓN TÉCNICA ---
+            # Filtro de Volumen Dinámico
             if vols[i] < (vol_mas[i] * p_params['vol_thresh']): continue
             
             signal = None
             sl_price = 0
             
-            # LONG
-            if lows[i-1] <= vals[i-1] and closes[i-1] > vals[i-1]:
+            # LONG SETUP
+            if lows[i-1] <= vals[i-1] and closes[i-1] > vals[i-1]: # Rechazo VAL
                  if lows[i] > vals[i] and closes[i] > highs[i-1] and closes[i] > opens[i]:
                      if rsis[i] < p_params['rsi_long']:
                          signal = 'LONG'
                          sl_price = closes[i] - (atrs[i] * 1.5)
 
-            # SHORT
-            elif highs[i-1] >= vahs[i-1] and closes[i-1] < vahs[i-1]:
+            # SHORT SETUP
+            elif highs[i-1] >= vahs[i-1] and closes[i-1] < vahs[i-1]: # Rechazo VAH
                  if highs[i] < vahs[i] and closes[i] < lows[i-1] and closes[i] < opens[i]:
                      if rsis[i] > p_params['rsi_short']:
                          signal = 'SHORT'
                          sl_price = closes[i] + (atrs[i] * 1.5)
             
-            # --- EJECUCIÓN ---
+            # --- EJECUCIÓN SIMULADA ---
             if signal:
                 entry = closes[i]
                 sl_dist = abs(entry - sl_price)
@@ -204,8 +213,11 @@ def run_simulation():
                 outcome_r = 0
                 result_type = "HOLD"
                 
+                # Forward simulation (12 velas / 1 Hora)
                 for j in range(1, 13):
                     idx = i + j
+                    if idx >= len(closes): break
+                    
                     if signal == 'LONG':
                         r_high = (highs[idx] - entry) / sl_dist
                         r_low = (lows[idx] - entry) / sl_dist
@@ -215,18 +227,22 @@ def run_simulation():
                         r_low = (entry - highs[idx]) / sl_dist 
                         r_curr = (entry - closes[idx]) / sl_dist
                     
+                    # Chequeo SL (Pesimista)
                     if r_low <= -1.1:
                         outcome_r = -1.1
                         result_type = "SL"
                         break
+                    # Chequeo TP (Dinámico)
                     if r_high >= tp_mult:
                         outcome_r = tp_mult
                         result_type = "TP"
                         break
+                    # Time Stop
                     if j == 12:
                         outcome_r = r_curr
                         result_type = "TIME"
                 
+                # Fee Stress Test (-0.05R por trade)
                 trades.append({
                     'symbol': symbol,
                     'profile': profile,
@@ -234,7 +250,8 @@ def run_simulation():
                     'type': result_type
                 })
                 cooldown = 12
-        
+
+        # Reporte por Par
         if trades:
             df_res = pd.DataFrame(trades)
             net_r = df_res['r_net'].sum()
@@ -242,21 +259,24 @@ def run_simulation():
             print(f"   -> {symbol}: {len(trades)} trades | {net_r:.2f} R | WinRate: {win_rate:.1%}")
             global_log.extend(trades)
         else:
-            print(f"   -> {symbol}: 0 trades (Modo Protección)")
+            print(f"   -> {symbol}: 0 trades (Modo Protección Activado 🛡️)")
 
+    # --- REPORTE GLOBAL ---
     if global_log:
         df_glob = pd.DataFrame(global_log)
-        print("\n" + "="*60)
-        print("🤖 RESULTADOS HYDRA V7 (OPTIMIZADO)")
-        print("="*60)
-        print("\n📊 POR PERFIL IA:")
+        print("\n" + "="*65)
+        print("🤖 RESULTADOS FINALES HYDRA V7 (CORTEX ESPECIALISTAS)")
+        print("="*65)
+        
+        print("\n📊 RENDIMIENTO POR PERFIL IA:")
         print(df_glob.groupby('profile')[['r_net']].agg(['count', 'sum', 'mean']))
         
-        print("\n🏆 POR MONEDA:")
+        print("\n🏆 RANKING POR MONEDA:")
         print(df_glob.groupby('symbol')['r_net'].sum().sort_values(ascending=False))
         
         total_r = df_glob['r_net'].sum()
         print(f"\n💰 R NETO TOTAL: {total_r:.2f} R")
+        print("="*65)
 
 if __name__ == "__main__":
     run_simulation()
