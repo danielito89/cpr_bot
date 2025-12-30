@@ -29,8 +29,8 @@ PROFILES = {
     },
     'FLOW': {
         'vol_thresh': 0.6,    # Gatillo más suave
-        'rsi_long': 50,       # RSI Neutro
-        'rsi_short': 50,      # RSI Neutro
+        'rsi_long': 45,       # RSI Neutro
+        'rsi_short': 55,      # RSI Neutro
         'tp_mult': 1.5,       # TP más corto, asegurar ganancia
         'sl_atr': 1.5
     }
@@ -41,10 +41,10 @@ PROFILES = {
 # ¡Prueba ponerle 'FLOW' a BTC para ver cómo pierde dinero! Es educativo.
 TEST_MAP = {
     'BTC/USDT':  'SNIPER',
-    'ETH/USDT':  'FLOW',
-    'SOL/USDT':  'SNIPER',
+    'ETH/USDT':  'SNIPER',
+    'SOL/USDT':  'FLOW',
     'AVAX/USDT': 'FLOW',   # La joya de la corona
-    'LTC/USDT':  'FLOW'
+    'LTC/USDT':  'SNIPER'
     # 'BNB/USDT': 'FLOW'   # Descomenta para probar
 }
 
