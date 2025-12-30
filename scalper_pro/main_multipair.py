@@ -38,7 +38,7 @@ def main():
     try:
         api = BinanceClient() # Si falla aquí, revisa el nombre de la clase en binance_api.py
         state = StateManager()
-        tg = TelegramBot()
+        tg = TelegramBot(token=config.TELEGRAM_TOKEN, chat_id=config.TELEGRAM_CHAT_ID)
         processor = DataProcessor()
         strategy = StrategyV6_5()
         
