@@ -1,96 +1,98 @@
-# core/binance_api.py
 import ccxt
 import pandas as pd
+import time
 import sys
 import os
 
-# Añadimos path para config
+# Ajuste de ruta para encontrar config si es necesario
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
-class BinanceAPI:
+class BinanceClient:
     def __init__(self):
-        try:
-            self.exchange = ccxt.binance({
-                'apiKey': config.API_KEY,
-                'secret': config.API_SECRET,
-                'enableRateLimit': True,
-                'options': {'defaultType': 'future'}
-            })
-            self.exchange.load_markets()
-            print("✅ Conexión Binance Futures (Multipair) OK.")
-        except Exception as e:
-            print(f"❌ Error conexión: {e}")
-            sys.exit(1)
+        self.exchange = ccxt.binance({
+            'apiKey': config.API_KEY,
+            'secret': config.API_SECRET,
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'future'  # Operamos en Futuros
+            }
+        })
+        
+        # Si estamos en Testnet/DryRun, a veces es útil cambiar la URL, 
+        # pero para DryRun local usamos la API real para datos y no ejecutamos órdenes.
+        # Si quisieras usar la Testnet de Binance real:
+        # self.exchange.set_sandbox_mode(True) 
 
-    def fetch_ohlcv(self, symbol, limit=500):
-        """Descarga velas para un par específico"""
+    def get_historical_data(self, symbol, interval=None, limit=300):
+        """
+        Descarga velas históricas y las devuelve como DataFrame.
+        """
+        if interval is None:
+            interval = config.TIMEFRAME
+            
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, config.TIMEFRAME, limit=limit)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
+            
+            if not ohlcv:
+                return None
+                
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            cols = ['open', 'high', 'low', 'close', 'volume']
-            df[cols] = df[cols].astype(float)
+            
+            # Convertir a float
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+                
             return df
+            
         except Exception as e:
-            print(f"⚠️ Error data {symbol}: {e}")
+            print(f"❌ Error API (Data) {symbol}: {e}")
             return None
 
     def get_balance_usdt(self):
+        """
+        Obtiene el saldo disponible en USDT.
+        """
         try:
-            bal = self.exchange.fetch_balance()
-            return float(bal['USDT']['free'])
-        except: return 0.0
+            balance = self.exchange.fetch_balance()
+            # En futuros, suele ser 'USDT' en 'free' o 'total'
+            return float(balance['USDT']['free'])
+        except Exception as e:
+            print(f"⚠️ Error Balance: {e}")
+            return 0.0
 
-    def get_position(self, symbol):
-        """Busca la posición específica de un par"""
+    def place_order(self, symbol, side, amount, order_type='MARKET', params={}):
+        """
+        Ejecuta una orden real.
+        """
         try:
-            positions = self.exchange.fetch_positions([symbol])
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type=order_type,
+                side=side,
+                amount=amount,
+                params=params
+            )
+            return order
+        except Exception as e:
+            print(f"❌ Error Orden {symbol} {side}: {e}")
+            return None
+
+    def get_open_positions_symbols(self):
+        """
+        Devuelve una lista de símbolos con posiciones abiertas.
+        """
+        try:
+            positions = self.exchange.fetch_positions()
+            active_symbols = []
             for pos in positions:
-                # CCXT a veces devuelve info extra, filtramos por contrato > 0
                 if float(pos['contracts']) > 0:
-                    return {
-                        'symbol': symbol,
-                        'side': pos['side'].upper(),
-                        'amount': float(pos['contracts']),
-                        'entry_price': float(pos['entryPrice']),
-                        'pnl': float(pos['unrealizedPnl'])
-                    }
-            return None # Flat
+                    active_symbols.append(pos['symbol'])
+            return active_symbols
         except Exception as e:
-            print(f"⚠️ Error get_position {symbol}: {e}")
-            return None
-
-    def place_order(self, symbol, side, amount, order_type='market', params={}):
-        """Ejecuta orden en el par indicado"""
-        if config.DRY_RUN:
-            print(f"🧪 DRY: {side} {amount} {symbol}")
-            return {'id': 'sim', 'average': 0}
-
-        try:
-            if order_type == 'market':
-                return self.exchange.create_market_order(symbol, side, amount, params)
-            elif order_type == 'limit':
-                # Nota: precio debe venir en params o argumento aparte, 
-                # pero para scalper market usamos params para stop loss orders
-                return self.exchange.create_order(symbol, order_type, side, amount, None, params)
-            elif order_type == 'STOP_MARKET':
-                 return self.exchange.create_order(symbol, 'STOP_MARKET', side, amount, None, params)
-        except Exception as e:
-            print(f"❌ Error orden {symbol}: {e}")
-            return None
-
-    def close_position(self, position):
-        """Cierra la posición recibida"""
-        if not position: return
-        symbol = position['symbol']
-        side = 'sell' if position['side'] == 'LONG' else 'buy'
-        amount = position['amount']
-        print(f"🔄 Cerrando {symbol}...")
-        
-        # 1. Cancelar órdenes abiertas (TP/SL pendientes)
-        try: self.exchange.cancel_all_orders(symbol)
-        except: pass
-        
-        # 2. Cerrar mercado
-        return self.place_order(symbol, side, amount, 'market', {'reduceOnly': True})
+            # print(f"⚠️ Error Posiciones: {e}") 
+            return []
+            
+# Alias por compatibilidad si algún script viejo llama a BinanceAPI
+BinanceAPI = BinanceClient
