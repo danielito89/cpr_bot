@@ -45,17 +45,16 @@ def load_data(symbol):
     return df
 
 def calculate_features_for_inference(df):
-    """
-    Calcula features IDENTICAS al entrenamiento para alimentar la IA.
-    """
+    """Calcula features IDENTICAS al entrenamiento."""
     df = df.copy()
     
-    # 1. Volatilidad (True Range)
+    # 1. Volatilidad (True Range Real)
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
+    
     df['ATR'] = true_range.rolling(14).mean()
     df['feat_volatility'] = df['ATR'] / df['close']
     
@@ -74,7 +73,7 @@ def calculate_features_for_inference(df):
     df['sma50'] = df['close'].rolling(50).mean()
     df['feat_trend_dev'] = (df['close'] - df['sma50']) / df['close']
     
-    # Pre-calcular Bandas VAH/VAL para la estrategia (Simulación rápida)
+    # Datos para estrategia técnica (VAH/VAL Simulado con Bandas)
     df['rolling_mean'] = df['close'].rolling(300).mean()
     df['rolling_std'] = df['close'].rolling(300).std()
     df['VAH'] = df['rolling_mean'] + df['rolling_std']
@@ -85,16 +84,32 @@ def calculate_features_for_inference(df):
 def run_simulation():
     print(f"\n🧠 INICIANDO BACKTEST CON CORTEX AI ({START_DATE} - {END_DATE})")
     
+    # 1. Cargar Cerebro
     try:
         model = joblib.load(MODEL_PATH)
         print("✅ Modelo cargado correctamente.")
-    except:
-        print("❌ No se encontró el modelo .joblib")
+        
+        # --- MAPEO DE CLASES DEFENSIVO (CRÍTICO) ---
+        # Aseguramos saber qué índice corresponde a qué etiqueta
+        # 0=SNIPER, 1=FLOW, 2=WAIT
+        print(f"🔍 Clases detectadas en modelo: {model.classes_}")
+        class_map = {label: idx for idx, label in enumerate(model.classes_)}
+        
+        idx_sniper = class_map.get(0)
+        idx_flow   = class_map.get(1)
+        idx_wait   = class_map.get(2)
+        
+        if idx_sniper is None or idx_flow is None or idx_wait is None:
+            print("❌ ERROR CRÍTICO: El modelo no tiene las 3 clases esperadas (0,1,2).")
+            return
+            
+    except Exception as e:
+        print(f"❌ Error cargando modelo: {e}")
         return
 
     global_log = []
     
-    # Nombres de columnas EXACTOS del entrenamiento
+    # Nombres de columnas EXACTOS del entrenamiento (para evitar warning sklearn)
     feature_cols = ['feat_volatility', 'feat_vol_ratio', 'feat_rsi', 'feat_trend_dev']
 
     for symbol in TARGET_PAIRS:
@@ -103,7 +118,7 @@ def run_simulation():
         
         df = calculate_features_for_inference(df)
         
-        # Numpy arrays para velocidad en datos técnicos
+        # Arrays numpy para velocidad técnica
         closes = df['close'].values
         opens = df['open'].values
         highs = df['high'].values
@@ -115,41 +130,44 @@ def run_simulation():
         vals = df['VAL'].values
         atrs = df['ATR'].values
         
-        # Numpy array para features de IA
+        # Array para features IA
         X_feats = df[feature_cols].values
         
         trades = []
         cooldown = 0
         
+        # Bucle de simulación
         for i in range(300, len(df)-12):
             if cooldown > 0: 
                 cooldown -= 1
                 continue
             
-            # --- CORRECCIÓN AQUÍ ---
-            # Pasamos DataFrame con nombres en lugar de array puro
+            # --- CONSULTA A CORTEX (IA) ---
+            # Pasamos DataFrame con nombres correctos para evitar Warnings
             features_row = pd.DataFrame([X_feats[i]], columns=feature_cols)
-            
             probs = model.predict_proba(features_row)[0] 
             
-            p_sniper = probs[0] # Asumiendo target 0
-            p_flow = probs[1]   # Asumiendo target 1
-            p_wait = probs[2]   # Asumiendo target 2
+            # Usamos el MAPEO SEGURO
+            p_sniper = probs[idx_sniper]
+            p_flow   = probs[idx_flow]
+            p_wait   = probs[idx_wait]
             
             profile = 'WAIT'
             
-            # REGLAS DE DECISIÓN (Ajustables)
+            # REGLAS DE DECISIÓN (Meta-Controller)
             if p_wait > 0.50: 
-                profile = 'WAIT'
+                profile = 'WAIT' # Kill Switch
             elif p_sniper > 0.40: 
-                profile = 'SNIPER'
+                profile = 'SNIPER' # Modo Agresivo
             else:
-                profile = 'FLOW'
+                profile = 'FLOW' # Modo Defensivo/Normal
                 
             if profile == 'WAIT': continue
                 
+            # Cargar parámetros del perfil activo
             p_params = PARAMS[profile]
             
+            # --- VALIDACIÓN TÉCNICA (V6.5) ---
             if vols[i] < (vol_mas[i] * p_params['vol_thresh']): continue
             
             signal = None
@@ -169,6 +187,7 @@ def run_simulation():
                          signal = 'SHORT'
                          sl_price = closes[i] + (atrs[i] * 1.5)
             
+            # --- EJECUCIÓN ---
             if signal:
                 entry = closes[i]
                 sl_dist = abs(entry - sl_price)
@@ -178,6 +197,7 @@ def run_simulation():
                 outcome_r = 0
                 result_type = "HOLD"
                 
+                # Forward simulation
                 for j in range(1, 13):
                     idx = i + j
                     if signal == 'LONG':
@@ -189,6 +209,7 @@ def run_simulation():
                         r_low = (entry - highs[idx]) / sl_dist 
                         r_curr = (entry - closes[idx]) / sl_dist
                     
+                    # Nota: Asumimos 'Pessimistic Execution' (SL chequeado antes que TP si ambos ocurren)
                     if r_low <= -1.1:
                         outcome_r = -1.1
                         result_type = "SL"
@@ -201,6 +222,7 @@ def run_simulation():
                         outcome_r = r_curr
                         result_type = "TIME"
                 
+                # Fee Stress Test (0.05 R fijo)
                 trades.append({
                     'symbol': symbol,
                     'profile': profile,
@@ -212,18 +234,22 @@ def run_simulation():
         if trades:
             df_res = pd.DataFrame(trades)
             net_r = df_res['r_net'].sum()
-            print(f"   -> {symbol}: {len(trades)} trades | {net_r:.2f} R | WinRate: {(df_res['r_net']>0).mean():.1%}")
+            win_rate = (df_res['r_net']>0).mean()
+            print(f"   -> {symbol}: {len(trades)} trades | {net_r:.2f} R | WinRate: {win_rate:.1%}")
             global_log.extend(trades)
         else:
-            print(f"   -> {symbol}: 0 trades (Cortex protegió)")
+            print(f"   -> {symbol}: 0 trades (Modo Protección Activado)")
 
     if global_log:
         df_glob = pd.DataFrame(global_log)
         print("\n" + "="*60)
-        print("🤖 RESULTADOS HYDRA V7 (CORTEX DRIVEN)")
+        print("🤖 RESULTADOS HYDRA V7 (CORTEX CONFIRMADO)")
         print("="*60)
         print("\n📊 POR PERFIL IA:")
         print(df_glob.groupby('profile')[['r_net']].agg(['count', 'sum', 'mean']))
+        
+        print("\n🏆 POR MONEDA:")
+        print(df_glob.groupby('symbol')['r_net'].sum().sort_values(ascending=False))
         
         total_r = df_glob['r_net'].sum()
         print(f"\n💰 R NETO TOTAL: {total_r:.2f} R")
