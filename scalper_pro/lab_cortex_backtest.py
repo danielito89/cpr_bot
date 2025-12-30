@@ -89,36 +89,44 @@ def run_simulation():
         model = joblib.load(MODEL_PATH)
         print("✅ Modelo cargado correctamente.")
         
-        # --- MAPEO DE CLASES DEFENSIVO (CRÍTICO) ---
-        # Aseguramos saber qué índice corresponde a qué etiqueta
-        # 0=SNIPER, 1=FLOW, 2=WAIT
+        # Mapeo de Clases Seguro
         print(f"🔍 Clases detectadas en modelo: {model.classes_}")
         class_map = {label: idx for idx, label in enumerate(model.classes_)}
-        
         idx_sniper = class_map.get(0)
         idx_flow   = class_map.get(1)
         idx_wait   = class_map.get(2)
         
         if idx_sniper is None or idx_flow is None or idx_wait is None:
-            print("❌ ERROR CRÍTICO: El modelo no tiene las 3 clases esperadas (0,1,2).")
+            print("❌ ERROR CRÍTICO: Clases faltantes.")
             return
-            
+
     except Exception as e:
         print(f"❌ Error cargando modelo: {e}")
         return
 
     global_log = []
     
-    # Nombres de columnas EXACTOS del entrenamiento (para evitar warning sklearn)
+    # Nombres de columnas EXACTOS
     feature_cols = ['feat_volatility', 'feat_vol_ratio', 'feat_rsi', 'feat_trend_dev']
 
     for symbol in TARGET_PAIRS:
         df = load_data(symbol)
         if df.empty: continue
         
+        # --- OPTIMIZACIÓN MASIVA AQUÍ ---
+        print(f"   ⚙️ Calculando Features y Predicciones en bloque para {symbol}...")
         df = calculate_features_for_inference(df)
         
-        # Arrays numpy para velocidad técnica
+        # 1. Preparamos TODO el dataset para la IA de una vez
+        X_full = df[feature_cols] # Ya es un DataFrame con nombres correctos
+        
+        # 2. La IA predice las 100,000 velas en un solo golpe (Vectorización)
+        # Esto tarda milisegundos en lugar de minutos
+        all_probs = model.predict_proba(X_full) 
+        
+        # --- FIN OPTIMIZACIÓN ---
+
+        # Convertimos a numpy para velocidad extrema en el bucle
         closes = df['close'].values
         opens = df['open'].values
         highs = df['high'].values
@@ -130,24 +138,23 @@ def run_simulation():
         vals = df['VAL'].values
         atrs = df['ATR'].values
         
-        # Array para features IA
-        X_feats = df[feature_cols].values
-        
         trades = []
         cooldown = 0
         
-        # Bucle de simulación
-        for i in range(300, len(df)-12):
+        # Bucle de simulación (Ahora es puramente numérico, vuela 🚀)
+        # Ajustamos rango para evitar índices fuera de limite al inicio
+        start_idx = 300
+        end_idx = len(df) - 12
+        
+        for i in range(start_idx, end_idx):
             if cooldown > 0: 
                 cooldown -= 1
                 continue
             
-            # --- CONSULTA A CORTEX (IA) ---
-            # Pasamos DataFrame con nombres correctos para evitar Warnings
-            features_row = pd.DataFrame([X_feats[i]], columns=feature_cols)
-            probs = model.predict_proba(features_row)[0] 
+            # --- CONSULTA INSTANTÁNEA (Look up) ---
+            # En lugar de predecir, leemos lo que ya calculamos
+            probs = all_probs[i] # Acceso O(1)
             
-            # Usamos el MAPEO SEGURO
             p_sniper = probs[idx_sniper]
             p_flow   = probs[idx_flow]
             p_wait   = probs[idx_wait]
@@ -156,18 +163,18 @@ def run_simulation():
             
             # REGLAS DE DECISIÓN (Meta-Controller)
             if p_wait > 0.50: 
-                profile = 'WAIT' # Kill Switch
+                profile = 'WAIT'
             elif p_sniper > 0.40: 
-                profile = 'SNIPER' # Modo Agresivo
+                profile = 'SNIPER'
             else:
-                profile = 'FLOW' # Modo Defensivo/Normal
+                profile = 'FLOW'
                 
             if profile == 'WAIT': continue
                 
-            # Cargar parámetros del perfil activo
+            # Cargar parámetros
             p_params = PARAMS[profile]
             
-            # --- VALIDACIÓN TÉCNICA (V6.5) ---
+            # --- VALIDACIÓN TÉCNICA ---
             if vols[i] < (vol_mas[i] * p_params['vol_thresh']): continue
             
             signal = None
@@ -197,7 +204,6 @@ def run_simulation():
                 outcome_r = 0
                 result_type = "HOLD"
                 
-                # Forward simulation
                 for j in range(1, 13):
                     idx = i + j
                     if signal == 'LONG':
@@ -209,7 +215,6 @@ def run_simulation():
                         r_low = (entry - highs[idx]) / sl_dist 
                         r_curr = (entry - closes[idx]) / sl_dist
                     
-                    # Nota: Asumimos 'Pessimistic Execution' (SL chequeado antes que TP si ambos ocurren)
                     if r_low <= -1.1:
                         outcome_r = -1.1
                         result_type = "SL"
@@ -222,7 +227,6 @@ def run_simulation():
                         outcome_r = r_curr
                         result_type = "TIME"
                 
-                # Fee Stress Test (0.05 R fijo)
                 trades.append({
                     'symbol': symbol,
                     'profile': profile,
@@ -238,12 +242,12 @@ def run_simulation():
             print(f"   -> {symbol}: {len(trades)} trades | {net_r:.2f} R | WinRate: {win_rate:.1%}")
             global_log.extend(trades)
         else:
-            print(f"   -> {symbol}: 0 trades (Modo Protección Activado)")
+            print(f"   -> {symbol}: 0 trades (Modo Protección)")
 
     if global_log:
         df_glob = pd.DataFrame(global_log)
         print("\n" + "="*60)
-        print("🤖 RESULTADOS HYDRA V7 (CORTEX CONFIRMADO)")
+        print("🤖 RESULTADOS HYDRA V7 (OPTIMIZADO)")
         print("="*60)
         print("\n📊 POR PERFIL IA:")
         print(df_glob.groupby('profile')[['r_net']].agg(['count', 'sum', 'mean']))
