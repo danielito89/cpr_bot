@@ -4,7 +4,6 @@ import joblib
 import sys
 import os
 import ccxt
-# import lightgbm as lgb # No hace falta import explícito para cargar joblib, pero debe estar instalado
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
@@ -33,7 +32,7 @@ def load_data(symbol):
             since = ohlcv[-1][0] + 1
             ohlcv = [x for x in ohlcv if x[0] <= end_ts]
             all_ohlcv.extend(ohlcv)
-            # print(".", end="", flush=True) # Silenciamos puntos para velocidad
+            # print(".", end="", flush=True) 
         except: break
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -41,7 +40,7 @@ def load_data(symbol):
     return df
 
 def calculate_features_v9(df):
-    """ DEBE SER IDÉNTICA AL MINER V9 """
+    """ V9.1: FEATURES CORREGIDOS (Match con Miner) """
     df = df.copy()
     
     # A. DINÁMICA
@@ -53,7 +52,9 @@ def calculate_features_v9(df):
     
     atr_fast = true_range.rolling(14).mean()
     atr_slow = true_range.rolling(100).mean()
-    df['feat_vol_z'] = atr_fast / atr_slow
+    
+    # CORRECCIÓN 1
+    df['feat_volatility_z'] = atr_fast / atr_slow
     df['feat_squeeze'] = (atr_fast / df['close']).rolling(20).std() 
 
     # B. MICROESTRUCTURA
@@ -70,8 +71,10 @@ def calculate_features_v9(df):
     df['feat_body_r'] = body_size / candle_range
 
     # C. IMPACTO
-    # df['feat_vol_impact'] = (df['volume'] * df['feat_clv']).rolling(3).mean() # Original
-    # Nota: Asegurarse de tener 'volume'.
+    vol_ma = df['volume'].rolling(50).mean()
+    # CORRECCIÓN 2
+    df['feat_volume_z'] = df['volume'] / vol_ma
+    
     df['feat_vol_impact'] = (df['volume'] * df['feat_clv']).rolling(3).mean()
 
     # D. TENDENCIA
@@ -84,7 +87,7 @@ def calculate_features_v9(df):
     sma50 = df['close'].rolling(50).mean()
     df['feat_dist_sma'] = (df['close'] - sma50) / atr_fast
 
-    # Datos Técnicos
+    # Técnicos
     df['rolling_mean'] = df['close'].rolling(300).mean()
     df['rolling_std'] = df['close'].rolling(300).std()
     df['VAH'] = df['rolling_mean'] + df['rolling_std']
@@ -95,22 +98,22 @@ def calculate_features_v9(df):
     return df.dropna()
 
 def run_simulation():
-    print(f"\n🧠 BACKTEST V9: LightGBM + HyperFeatures ({START_DATE} - {END_DATE})")
+    print(f"\n🧠 BACKTEST V9.1: Fixed & Ready ({START_DATE} - {END_DATE})")
     
     try:
         model = joblib.load(MODEL_PATH)
-        print("✅ Modelo V9 cargado.")
-        # LightGBM a veces guarda las clases distinto, pero sklearn wrapper suele ser igual
+        print("✅ Modelo V9.1 cargado.")
         class_map = {label: idx for idx, label in enumerate(model.classes_)}
         idx_sniper, idx_flow, idx_wait = class_map.get(0), class_map.get(1), class_map.get(2)
     except Exception as e:
         print(f"❌ Error Modelo: {e}"); return
 
     global_log = []
-    # Columnas EXACTAS del Miner V9
+    # Lista de features corregida
     feature_cols = [
-            'feat_vol_z', 'feat_squeeze', 'feat_clv', 'feat_wick_up', 
-            'feat_wick_down', 'feat_body_r', 'feat_vol_impact', 
+            'feat_volatility_z', 'feat_squeeze', 
+            'feat_clv', 'feat_wick_up', 'feat_wick_down', 'feat_body_r',
+            'feat_volume_z', 'feat_vol_impact', 
             'feat_rsi', 'feat_dist_sma'
     ]
 
@@ -118,7 +121,6 @@ def run_simulation():
         df = load_data(symbol)
         if df.empty: continue
         
-        # print(f"   ⚙️ Procesando {symbol}...")
         df = calculate_features_v9(df)
         
         # Inferencia
@@ -142,18 +144,18 @@ def run_simulation():
             p_sniper = probs[idx_sniper]
             p_flow = probs[idx_flow]
             
-            # --- LÓGICA DE DECISIÓN V9 ---
+            # --- LÓGICA DE DECISIÓN ---
             profile = 'WAIT'
             
-            # Con LightGBM podemos ser un poco más flexibles porque discrimina mejor
-            if p_sniper > 0.40:    # Antes 0.45
+            # Umbrales ajustados para LightGBM
+            if p_sniper > 0.40:    
                 profile = 'SNIPER'
-            elif p_flow > 0.50:    # Antes 0.55
+            elif p_flow > 0.50:    
                 profile = 'FLOW'
             
             if profile == 'WAIT': continue
             
-            # ... Resto de la lógica técnica IDÉNTICA ...
+            # --- TÉCNICO ---
             p_params = PARAMS[profile]
             if vols[i] < (vol_mas[i] * p_params['vol_thresh']): continue
             
@@ -198,7 +200,7 @@ def run_simulation():
 
     if global_log:
         df_glob = pd.DataFrame(global_log)
-        print(f"\n💰 R NETO TOTAL V9: {df_glob['r_net'].sum():.2f} R")
+        print(f"\n💰 R NETO TOTAL V9.1: {df_glob['r_net'].sum():.2f} R")
 
 if __name__ == "__main__":
     run_simulation()

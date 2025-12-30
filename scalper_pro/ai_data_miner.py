@@ -29,17 +29,10 @@ def fetch_data(symbol):
     return df
 
 def calculate_advanced_features(df):
-    """
-    FEATURES V9: MICROESTRUCTURA Y DINÁMICA
-    """
+    """FEATURES V9.1 (Corregido: Sin colisión de nombres)"""
     df = df.copy()
     
-    # --- A. DINÁMICA DE PRECIO Y VOLATILIDAD ---
-    
-    # 1. Log Returns (Mejor que cambio %)
-    df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
-    
-    # 2. Volatilidad Normalizada (Z-Score ATR)
+    # A. DINÁMICA
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -49,66 +42,50 @@ def calculate_advanced_features(df):
     atr_fast = true_range.rolling(14).mean()
     atr_slow = true_range.rolling(100).mean()
     
-    df['feat_vol_z'] = atr_fast / atr_slow # >1 Expansión, <1 Compresión
+    # CORRECCIÓN 1: Nombre único para Volatilidad
+    df['feat_volatility_z'] = atr_fast / atr_slow 
     
-    # 3. Squeeze (Compresión Extrema)
-    # Bandas de Bollinger vs Keltner (Simplificado: ATR relativo muy bajo)
+    # Squeeze
     df['feat_squeeze'] = (atr_fast / df['close']).rolling(20).std() 
 
-    # --- B. MICROESTRUCTURA DE VELA (PSEUDO ORDER FLOW) ---
-    
-    # 4. CLV (Close Location Value): ¿Dónde cerró la vela en su rango?
-    # 1 = En el High (Compra fuerte), -1 = En el Low (Venta fuerte)
-    # Fórmula: ((C - L) - (H - C)) / (H - L)
+    # B. MICROESTRUCTURA
     candle_range = df['high'] - df['low']
-    # Evitar división por cero
     candle_range = candle_range.replace(0, 0.000001) 
     df['feat_clv'] = ((df['close'] - df['low']) - (df['high'] - df['close'])) / candle_range
     
-    # 5. Wick Ratios (Rechazo)
-    # Qué % de la vela es mecha superior vs inferior
     upper_wick = df['high'] - df[['close', 'open']].max(axis=1)
     lower_wick = df[['close', 'open']].min(axis=1) - df['low']
     df['feat_wick_up'] = upper_wick / candle_range
     df['feat_wick_down'] = lower_wick / candle_range
     
-    # 6. Body Ratio (Decisión)
-    # Qué % de la vela es cuerpo real
     body_size = abs(df['close'] - df['open'])
     df['feat_body_r'] = body_size / candle_range
 
-    # --- C. VOLUMEN Y FLUJO ---
-    
-    # 7. Volumen Relativo (Z-Score)
+    # C. VOLUMEN E IMPACTO
     vol_ma = df['volume'].rolling(50).mean()
-    df['feat_vol_z'] = df['volume'] / vol_ma
     
-    # 8. Volumen de "Impacto" (Volumen * Cuerpo)
-    # Intenta medir volumen direccional vs volumen de indecisión
-    df['feat_vol_impact'] = (df['volume'] * df['feat_clv']).rolling(3).mean() # Suavizado
+    # CORRECCIÓN 2: Nombre único para Volumen
+    df['feat_volume_z'] = df['volume'] / vol_ma
+    
+    df['feat_vol_impact'] = (df['volume'] * df['feat_clv']).rolling(3).mean()
 
-    # --- D. TENDENCIA Y MOMENTUM ---
-    
-    # 9. RSI (Clásico pero robusto)
+    # D. TENDENCIA
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df['feat_rsi'] = 100 - (100 / (1 + rs))
     
-    # 10. Distancia a la Media (Trend Strenght)
     sma50 = df['close'].rolling(50).mean()
     df['feat_dist_sma'] = (df['close'] - sma50) / atr_fast
-    
+
     # Guardamos ATR para labeling
     df['ATR'] = atr_fast
     
     return df.dropna()
 
 def label_data(df):
-    """
-    ETIQUETADO V8/V9 (Resultado Puro)
-    """
+    """ETIQUETADO V9.1 (Targets Realistas)"""
     targets = []
     closes = df['close'].values
     highs = df['high'].values
@@ -131,11 +108,14 @@ def label_data(df):
             r_high = (future_high - entry) / sl_dist
             r_low = (entry - future_low) / sl_dist
             
-            if r_high > 3.0 or r_low > 3.0:
-                outcome = 0 # SNIPER
+            # CORRECCIÓN 3: Targets Ajustados
+            # Sniper > 2.5R (Antes 3.0)
+            if r_high > 2.5 or r_low > 2.5:
+                outcome = 0 
                 break 
-            elif (r_high > 1.5 or r_low > 1.5) and outcome == 2:
-                outcome = 1 # FLOW
+            # Flow > 1.2R (Antes 1.5, para capturar más inercia)
+            elif (r_high > 1.2 or r_low > 1.2) and outcome == 2:
+                outcome = 1 
                 
         targets.append(outcome)
             
@@ -144,20 +124,8 @@ def label_data(df):
     return df
 
 def run_mining():
-    print("⛏️ INICIANDO MINERÍA V9 (HYPER-FEATURES)")
+    print("⛏️ INICIANDO MINERÍA V9.1 (FIXED)")
     full_dataset = []
-    
-    # Lista de features a guardar (IMPORTANTE para luego cargar)
-    feature_cols = [
-        'feat_vol_z', 'feat_squeeze', 
-        'feat_clv', 'feat_wick_up', 'feat_wick_down', 'feat_body_r',
-        'feat_vol_z', 'feat_vol_impact',
-        'feat_rsi', 'feat_dist_sma'
-    ]
-    # Nota: 'feat_vol_z' aparece duplicado en logica nombre, corregido:
-    # El primero era ATR Z (feat_vol_z), el otro Volume Z. 
-    # En pandas sobrescribiria. CORRECCIÓN EN CÁLCULO ARRIBA O NOMBRES DIFERENTES.
-    # Corregiré nombres en el calculador abajo antes de guardar.
     
     for pair in PAIRS:
         df = fetch_data(pair)
@@ -166,14 +134,14 @@ def run_mining():
         df = calculate_advanced_features(df)
         df = label_data(df)
         
-        # Seleccionamos columnas
+        # Lista corregida de columnas
         cols_to_save = [
-            'feat_vol_z', 'feat_squeeze', 'feat_clv', 'feat_wick_up', 
-            'feat_wick_down', 'feat_body_r', 'feat_vol_impact', 
-            'feat_rsi', 'feat_dist_sma', 'TARGET'
+            'feat_volatility_z', 'feat_squeeze', 
+            'feat_clv', 'feat_wick_up', 'feat_wick_down', 'feat_body_r',
+            'feat_volume_z', 'feat_vol_impact', # Ahora ambos existen
+            'feat_rsi', 'feat_dist_sma', 
+            'TARGET'
         ]
-        # Nota: El feat de volumen relativo (feat_vol_z original) se sobrescribió.
-        # Es un error común. Vamos a dejarlo así por ahora, el feat_vol_impact lleva info de volumen.
         
         full_dataset.append(df[cols_to_save])
         
@@ -183,7 +151,7 @@ def run_mining():
         
         filename = "cortex_training_data_v9.csv"
         final_df.to_csv(filename, index=False)
-        print(f"✅ DATASET V9 GENERADO: {len(final_df)} muestras.")
+        print(f"✅ DATASET V9.1 GENERADO: {len(final_df)} muestras.")
 
 if __name__ == "__main__":
     run_mining()
