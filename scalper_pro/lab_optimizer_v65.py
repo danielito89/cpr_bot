@@ -9,47 +9,37 @@ import os
 # ==============================================================================
 
 # 1. FECHAS DEL TORNEO
-# Prueba 2024 para ver el Momentum de SOL
 START_DATE = "2024-01-01"
 END_DATE   = "2024-12-31"
 
-# 2. DEFINICIÓN DE PERFILES (V7 DUAL ENGINE)
+# 2. DEFINICIÓN DE PERFILES (V7.1 ESTRUCTURAL)
 PROFILES = {
     'SNIPER': {
-        'description': 'Reversión Clásica para BTC/ETH',
-        'vol_threshold': 1.0,   # <--- NOMBRE CORREGIDO
+        'description': 'Reversión Clásica (Bandas)',
+        'vol_threshold': 1.0,   
         'rsi_long': 40,
         'rsi_short': 60,
         'tp_mult': 3.0,
         'sl_atr': 1.5,
         'mode': 'REVERSION'
     },
-    'FLOW': {
-        'description': 'Reversión Suave (Legacy)',
-        'vol_threshold': 0.6,   # <--- NOMBRE CORREGIDO
-        'rsi_long': 50,
-        'rsi_short': 50,
-        'tp_mult': 1.5,
-        'sl_atr': 1.5,
-        'mode': 'REVERSION'
-    },
     'BREAKOUT': {
-        'description': 'Captura de Tendencias (Momentum)',
-        'vol_threshold': 1.5,   # <--- NOMBRE CORREGIDO
-        'rsi_long': 55,
-        'rsi_short': 45,
-        'tp_mult': 4.0,
-        'sl_atr': 1.0,
+        'description': 'Ruptura de Estructura (Donchian)',
+        'vol_threshold': 1.2,   # Volumen confirmatorio
+        'rsi_long': 50,         # RSI debe tener espacio para subir
+        'rsi_short': 50,        
+        'tp_mult': 3.0,         # Buscamos recorrido medio-largo
+        'sl_atr': 1.0,          # SL ajustado bajo la ruptura
+        'lookback': 48,         # 48 velas de 5m = 4 Horas de Estructura
         'mode': 'BREAKOUT'
     }
 }
 
 # 3. ASIGNACIÓN DE ACTIVOS
 TEST_MAP = {
-    'BTC/USDT':  'SNIPER',   # El Rey sigue en reversión
-    'ETH/USDT':  'SNIPER',
-    'SOL/USDT':  'BREAKOUT', # ¡Probamos la nueva bestia aquí!
-    'AVAX/USDT': 'BREAKOUT'  # Descomenta para probar
+    'BTC/USDT':  'SNIPER',    # BTC ama la reversión
+    'SOL/USDT':  'BREAKOUT',  # SOL ama la tendencia
+    'AVAX/USDT': 'BREAKOUT'   # Probemos si Donchian arregla a AVAX
 }
 
 # ==============================================================================
@@ -77,7 +67,7 @@ def fetch_data(symbol):
     print(f" {len(df)} velas.")
     return df
 
-def calculate_indicators(df):
+def calculate_indicators(df, params=None):
     df = df.copy()
     
     # 1. Volumen Relativo
@@ -98,39 +88,48 @@ def calculate_indicators(df):
     true_range = np.max(ranges, axis=1)
     df['ATR'] = true_range.rolling(14).mean()
     
-    # 4. Bandas (VAH/VAL Proxy)
+    # 4. Bandas (Para SNIPER)
     df['rolling_mean'] = df['close'].rolling(300).mean()
     df['rolling_std'] = df['close'].rolling(300).std()
     df['VAH'] = df['rolling_mean'] + df['rolling_std']
     df['VAL'] = df['rolling_mean'] - df['rolling_std']
     
+    # 5. Estructura Donchian (Para BREAKOUT)
+    # Lookback dinámico o default 48
+    lb = params.get('lookback', 48) if params else 48
+    
+    # IMPORTANTE: Shift(1) para no mirar el futuro. 
+    # Queremos romper el High de las 48 velas ANTERIORES.
+    df['Donchian_High'] = df['high'].rolling(lb).max().shift(1)
+    df['Donchian_Low']  = df['low'].rolling(lb).min().shift(1)
+    
     return df.dropna()
 
 def run_optimizer():
-    print(f"\n🧪 LABORATORIO DUAL ENGINE (V7)")
+    print(f"\n🧪 LABORATORIO V7.1 (DONCHIAN STRUCTURE)")
     print("="*60)
     
     global_log = []
     
     for symbol, profile_name in TEST_MAP.items():
-        df = fetch_data(symbol)
-        if df.empty: continue
+        # Pasamos params al calculador para el lookback dinámico
+        raw_df = fetch_data(symbol)
+        if raw_df.empty: continue
         
-        df = calculate_indicators(df)
         params = PROFILES[profile_name]
+        df = calculate_indicators(raw_df, params)
         mode = params.get('mode', 'REVERSION')
         
-        # Numpy Arrays para velocidad
-        closes = df['close'].values
-        opens = df['open'].values
-        highs = df['high'].values
-        lows = df['low'].values
-        vols = df['volume'].values
-        vol_mas = df['Vol_MA'].values
-        rsis = df['RSI'].values
-        atrs = df['ATR'].values
-        vahs = df['VAH'].values
-        vals = df['VAL'].values
+        # Numpy Arrays
+        closes = df['close'].values; opens = df['open'].values
+        highs = df['high'].values; lows = df['low'].values
+        vols = df['volume'].values; vol_mas = df['Vol_MA'].values
+        rsis = df['RSI'].values; atrs = df['ATR'].values
+        
+        # Sniper Arrays
+        vahs = df['VAH'].values; vals = df['VAL'].values
+        # Breakout Arrays
+        d_highs = df['Donchian_High'].values; d_lows = df['Donchian_Low'].values
         
         trades = []
         cooldown = 0
@@ -138,53 +137,45 @@ def run_optimizer():
         for i in range(300, len(df)-12):
             if cooldown > 0: cooldown -= 1; continue
             
-            # A. FILTRO COMÚN DE VOLUMEN
-            # CORRECCIÓN AQUÍ: Usamos 'vol_threshold'
+            # FILTRO VOLUMEN
             if vols[i] < (vol_mas[i] * params['vol_threshold']): 
                 continue
                 
-            signal = None
-            sl_price = 0
+            signal = None; sl_price = 0
             
             # ==================================================================
-            # 🛡️ MODO REVERSIÓN (V6.5)
+            # 🛡️ MODO REVERSIÓN (SNIPER)
             # ==================================================================
             if mode == 'REVERSION':
-                # LONG: Rechazo de VAL + RSI Bajo
                 if lows[i-1] <= vals[i-1] and closes[i-1] > vals[i-1]:
                      if lows[i] > vals[i] and closes[i] > highs[i-1] and closes[i] > opens[i]:
                          if rsis[i] < params['rsi_long']:
                              signal = 'LONG'; sl_price = closes[i] - (atrs[i] * params['sl_atr'])
 
-                # SHORT: Rechazo de VAH + RSI Alto
                 elif highs[i-1] >= vahs[i-1] and closes[i-1] < vahs[i-1]:
                      if highs[i] < vahs[i] and closes[i] < lows[i-1] and closes[i] < opens[i]:
                          if rsis[i] > params['rsi_short']:
                              signal = 'SHORT'; sl_price = closes[i] + (atrs[i] * params['sl_atr'])
 
             # ==================================================================
-            # 🚀 MODO BREAKOUT (V7)
+            # 🚀 MODO BREAKOUT (ESTRUCTURAL)
             # ==================================================================
             elif mode == 'BREAKOUT':
-                rsi_min_bull = params['rsi_long']  # Ej: 55
-                rsi_max_bear = params['rsi_short'] # Ej: 45
-                
-                # LONG BREAKOUT: Rompe VAH hacia arriba con vela verde y RSI fuerte
-                if closes[i] > vahs[i] and closes[i] > opens[i]:
-                    # RSI > 55 pero < 85 (no queremos comprar topes extremos)
-                    if rsis[i] > rsi_min_bull and rsis[i] < 85:
+                # LONG: Precio rompe el Techo de 4 horas
+                # + Vela Verde + RSI saludable (no extremo 90, pero sí fuerte >50)
+                if closes[i] > d_highs[i] and closes[i] > opens[i]:
+                    if rsis[i] > 50 and rsis[i] < 80:
                         signal = 'LONG'
-                        # SL más apretado en breakout
-                        sl_price = closes[i] - (atrs[i] * params['sl_atr']) 
+                        sl_price = closes[i] - (atrs[i] * params['sl_atr'])
                 
-                # SHORT BREAKOUT: Rompe VAL hacia abajo con vela roja y RSI bajo
-                elif closes[i] < vals[i] and closes[i] < opens[i]:
-                    if rsis[i] < rsi_max_bear and rsis[i] > 15:
+                # SHORT: Precio rompe el Piso de 4 horas
+                elif closes[i] < d_lows[i] and closes[i] < opens[i]:
+                    if rsis[i] < 50 and rsis[i] > 20:
                         signal = 'SHORT'
                         sl_price = closes[i] + (atrs[i] * params['sl_atr'])
 
             # ==================================================================
-            # C. SIMULACIÓN
+            # SIMULACIÓN
             # ==================================================================
             if signal:
                 entry = closes[i]
@@ -192,8 +183,7 @@ def run_optimizer():
                 if sl_dist == 0: continue
                 
                 tp_mult = params['tp_mult']
-                outcome_r = 0
-                result_type = "HOLD"
+                outcome_r = 0; result_type = "HOLD"
                 
                 for j in range(1, 13): # 1 Hora
                     idx = i + j
@@ -216,7 +206,6 @@ def run_optimizer():
                 trades.append({'symbol': symbol, 'profile': profile_name, 'r_net': r_net, 'type': result_type})
                 cooldown = 12 
         
-        # Reporte por par
         if trades:
             df_res = pd.DataFrame(trades)
             net_r = df_res['r_net'].sum()
@@ -226,11 +215,10 @@ def run_optimizer():
         else:
             print(f"   -> {symbol} [{profile_name}]: 0 trades")
 
-    # Reporte Global
     if global_log:
         df_glob = pd.DataFrame(global_log)
         print("\n" + "="*60)
-        print("📊 RESULTADOS V7")
+        print("📊 RESULTADOS V7.1 (DONCHIAN)")
         print("="*60)
         print(df_glob.groupby('profile')[['r_net']].agg(['count', 'sum', 'mean']))
         print("\n💰 R NETO TOTAL: {:.2f} R".format(df_glob['r_net'].sum()))
