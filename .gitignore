@@ -13,7 +13,7 @@ venv/
 secrets.json
 keys.json
 config_private.py
-scalper_pro/config.py
+bots/scalper_pro/config.py
 
 # --- Logs y Datos ---
 *.log

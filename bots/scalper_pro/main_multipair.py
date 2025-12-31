@@ -3,6 +3,7 @@ import sys
 import os
 import traceback
 from datetime import datetime
+from dotenv import load_dotenv
 
 # --- PARCHE DE RUTAS (CRÍTICO) ---
 # Esto asegura que Python encuentre las carpetas 'core' y 'strategies'
@@ -13,7 +14,15 @@ sys.path.append(os.path.dirname(current_dir))
 # ----------------------------------
 
 import config
+# 1. Cargar variables de entorno (.env)
+load_dotenv(os.path.join(os.path.dirname(__file__), '../../.env'))
 
+# 2. Añadir ruta raíz para importar shared
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+# 3. Ahora sí puedes importar lo compartido
+from shared.ccxt_handler import ExchangeHandler
+from shared.telegram_bot import send_msg (si lo adaptaste)
 # --- IMPORTS ---
 # Usamos try/except para manejar posibles diferencias de nombres en tus archivos
 try:
