@@ -18,7 +18,7 @@ except ImportError:
 
 # Configuración
 TIMEFRAME = '4h'
-SINCE_STR = "2023-07-01 00:00:00"
+SINCE_STR = "2022-01-01 00:00:00"
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 
 # Crear carpeta de datos si no existe
@@ -182,7 +182,7 @@ if __name__ == "__main__":
         'SOL/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'XRP/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'DOGE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
-        'LINK/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
+        'SUI/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
     }
     
     # Nota: Bajé ligeramente el 'vol_multiplier' de 1.5 a 1.3/1.4 para ser un poco más permisivo en backtest 
