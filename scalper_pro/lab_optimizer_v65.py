@@ -13,8 +13,8 @@ import os
 # - 2022-01-01 a 2022-12-31 (Bear Market / Crash)
 # - 2023-01-01 a 2023-12-31 (Recuperación / Cangrejo)
 # - 2024-01-01 a 2024-12-31 (Choppy / Trampas - El nivel difícil)
-START_DATE = "2025-01-01"
-END_DATE   = "2025-12-29"
+START_DATE = "2023-01-01"
+END_DATE   = "2023-12-31"
 
 # 2. DEFINICIÓN DE PERFILES (Tus herramientas)
 # Juega con estos números. ¿Qué pasa si bajas el RSI de Sniper a 30?
