@@ -13,8 +13,8 @@ import os
 # - 2022-01-01 a 2022-12-31 (Bear Market / Crash)
 # - 2023-01-01 a 2023-12-31 (Recuperación / Cangrejo)
 # - 2024-01-01 a 2024-12-31 (Choppy / Trampas - El nivel difícil)
-START_DATE = "2023-01-01"
-END_DATE   = "2023-12-31"
+START_DATE = "2022-01-01"
+END_DATE   = "2022-12-31"
 
 # 2. DEFINICIÓN DE PERFILES (Tus herramientas)
 # Juega con estos números. ¿Qué pasa si bajas el RSI de Sniper a 30?
@@ -29,8 +29,8 @@ PROFILES = {
     },
     'FLOW': {
         'vol_thresh': 0.8,    # Gatillo más suave
-        'rsi_long': 45,       # RSI Neutro
-        'rsi_short': 55,      # RSI Neutro
+        'rsi_long': 50,       # RSI Neutro
+        'rsi_short': 50,      # RSI Neutro
         'tp_mult': 1.5,       # TP más corto, asegurar ganancia
         'sl_atr': 1.5
     }
