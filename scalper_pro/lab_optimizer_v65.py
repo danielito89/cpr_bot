@@ -17,30 +17,30 @@ END_DATE   = "2024-12-31"
 PROFILES = {
     'SNIPER': {
         'description': 'Reversión Clásica para BTC/ETH',
-        'vol_threshold': 1.0,   # Ajustado a 1.0 para BTC
+        'vol_threshold': 1.0,   # <--- NOMBRE CORREGIDO
         'rsi_long': 40,
         'rsi_short': 60,
         'tp_mult': 3.0,
         'sl_atr': 1.5,
-        'mode': 'REVERSION'     # <--- Lógica V6.5
+        'mode': 'REVERSION'
     },
     'FLOW': {
         'description': 'Reversión Suave (Legacy)',
-        'vol_threshold': 0.6,
+        'vol_threshold': 0.6,   # <--- NOMBRE CORREGIDO
         'rsi_long': 50,
         'rsi_short': 50,
         'tp_mult': 1.5,
         'sl_atr': 1.5,
         'mode': 'REVERSION'
     },
-    'BREAKOUT': {               # <--- NUEVO PERFIL
+    'BREAKOUT': {
         'description': 'Captura de Tendencias (Momentum)',
-        'vol_threshold': 1.5,   # Requiere MUCHO volumen
-        'rsi_long': 55,         # Fuerza alcista (>55)
-        'rsi_short': 45,        # Fuerza bajista (<45)
-        'tp_mult': 4.0,         # Home Runs (4R)
-        'sl_atr': 1.0,          # Stop Loss apretado (1R)
-        'mode': 'BREAKOUT'      # <--- Lógica V7
+        'vol_threshold': 1.5,   # <--- NOMBRE CORREGIDO
+        'rsi_long': 55,
+        'rsi_short': 45,
+        'tp_mult': 4.0,
+        'sl_atr': 1.0,
+        'mode': 'BREAKOUT'
     }
 }
 
@@ -49,7 +49,7 @@ TEST_MAP = {
     'BTC/USDT':  'SNIPER',   # El Rey sigue en reversión
     'ETH/USDT':  'SNIPER',
     'SOL/USDT':  'BREAKOUT', # ¡Probamos la nueva bestia aquí!
-    # 'AVAX/USDT': 'BREAKOUT'  # Opcional: ver si AVAX sirve para esto
+    # 'AVAX/USDT': 'BREAKOUT'  # Descomenta para probar
 }
 
 # ==============================================================================
@@ -139,7 +139,8 @@ def run_optimizer():
             if cooldown > 0: cooldown -= 1; continue
             
             # A. FILTRO COMÚN DE VOLUMEN
-            if vols[i] < (vol_mas[i] * params['vol_thresh']): 
+            # CORRECCIÓN AQUÍ: Usamos 'vol_threshold'
+            if vols[i] < (vol_mas[i] * params['vol_threshold']): 
                 continue
                 
             signal = None
@@ -170,7 +171,7 @@ def run_optimizer():
                 
                 # LONG BREAKOUT: Rompe VAH hacia arriba con vela verde y RSI fuerte
                 if closes[i] > vahs[i] and closes[i] > opens[i]:
-                    # RSI > 55 pero < 80 (no queremos comprar topes extremos)
+                    # RSI > 55 pero < 85 (no queremos comprar topes extremos)
                     if rsis[i] > rsi_min_bull and rsis[i] < 85:
                         signal = 'LONG'
                         # SL más apretado en breakout
