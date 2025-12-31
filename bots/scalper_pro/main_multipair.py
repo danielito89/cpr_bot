@@ -6,26 +6,22 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURACIÓN DE RUTAS Y ENTORNO ---
-# Ruta del archivo actual
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Cargar .env (Subimos 2 niveles: bots/scalper/ -> bots/ -> root/.env)
 dotenv_path = os.path.abspath(os.path.join(current_dir, '../../.env'))
 load_dotenv(dotenv_path)
 
-# Añadir ruta raíz para que Python encuentre 'shared', 'core', 'config', etc.
+# Añadir ruta raíz
 root_path = os.path.abspath(os.path.join(current_dir, '../..'))
 sys.path.append(root_path)
 
 # --- 2. IMPORTS ---
-import config  # Configuración general (pares, blacklist, etc.)
+import config
 
-# Imports Shared
-# (Opcional si vas a migrar el Scalper a la nueva arquitectura completa,
-# por ahora lo dejamos comentado para no romper tu lógica antigua)
-# from shared.ccxt_handler import ExchangeHandler 
+# Imports Shared (Nueva Arquitectura)
+from shared.telegram_bot import TelegramBot  # <--- USAMOS EL COMPARTIDO
+# from shared.ccxt_handler import ExchangeHandler (Opcional si migras todo luego)
 
-# Imports Legacy (Tu estructura actual)
+# Imports Legacy
 try:
     from core.binance_api import BinanceClient
 except ImportError:
@@ -33,7 +29,6 @@ except ImportError:
 
 from core.data_processor import DataProcessor
 from addons.state_manager import StateManager
-from addons.telegram_bot import TelegramBot
 from core.risk_manager import RiskManager
 from strategies.strategy_v6_5 import StrategyV6_5
 
@@ -42,31 +37,27 @@ def main():
     
     # Verificación de Seguridad
     if not os.getenv('BINANCE_API_KEY'):
-        print("❌ ERROR CRÍTICO: No se detectaron API KEYS en el entorno.")
-        print("   Asegúrate de que el archivo .env existe y está cargado.")
+        print("❌ ERROR CRÍTICO: No se detectaron API KEYS en el entorno .env")
         return
 
     # --- INICIALIZACIÓN DE SERVICIOS ---
     try:
-        # ⚠️ IMPORTANTE: Asegúrate de que BinanceClient dentro de core/binance_api.py
-        # también esté leyendo os.getenv('BINANCE_API_KEY') y no config.API_KEY
         api = BinanceClient() 
-        
         state = StateManager()
-        
-        # --- CORRECCIÓN CLAVE: LEER CREDENCIALES DEL .ENV ---
-        tg_token = os.getenv('TELEGRAM_TOKEN')
-        tg_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        
-        if not tg_token or not tg_chat_id:
-             print("⚠️ Advertencia: Credenciales de Telegram no encontradas en .env")
-             tg = None
-        else:
-             tg = TelegramBot(token=tg_token, chat_id=tg_chat_id)
-
         processor = DataProcessor()
         strategy = StrategyV6_5()
         
+        # --- TELEGRAM SETUP ---
+        tg_token = os.getenv('TELEGRAM_TOKEN')
+        tg_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        tg = None
+        
+        if tg_token and tg_chat_id:
+             tg = TelegramBot(token=tg_token, chat_id=tg_chat_id)
+             print("✅ Telegram Conectado")
+        else:
+             print("⚠️ Telegram Desactivado (Faltan credenciales)")
+
         # Risk Manager
         initial_balance = api.get_balance_usdt()
         risk_mgr = RiskManager(initial_balance)
@@ -74,23 +65,35 @@ def main():
 
         # Notificación de arranque
         mode_txt = "LIVE 💸" if not config.DRY_RUN else "TEST 🧪"
-        
         if tg:
-            try:
-                tg.send_msg(f"🐲 *Hydra V6.5 Activado*\nModo: `{mode_txt}`\nActivos: {len(config.PAIRS)}")
-            except Exception as e:
-                print(f"⚠️ No se pudo enviar mensaje de inicio: {e}")
+            tg.send_msg(f"🐲 *Hydra V6.5 Activado*\nModo: `{mode_txt}`\nActivos: {len(config.PAIRS_SCALPER)}")
+
+        # Variable para el Heartbeat (Anti-Zombie)
+        last_heartbeat_day = datetime.now().day
 
         # --- BUCLE PRINCIPAL ---
         while True:
             try:
-                # Sincronización (Loop cada 10s)
-                time.sleep(10)
+                time.sleep(10) # Loop cada 10s
                 
-                # Actualizar saldo real
+                # --- 💓 HEARTBEAT DIARIO (Anti-Zombie) ---
+                current_day = datetime.now().day
+                if current_day != last_heartbeat_day:
+                    if tg:
+                        # Contamos posiciones abiertas
+                        positions_count = len(api.get_open_positions_symbols())
+                        tg.send_daily_report("Hydra Scalper 🐲", config.PAIRS_SCALPER, positions_count)
+                    last_heartbeat_day = current_day
+                    print("💓 Heartbeat diario enviado.")
+
+                # Actualizar saldo
                 risk_mgr.balance = api.get_balance_usdt()
 
-                for symbol in config.PAIRS:
+                # Iteramos sobre la lista de SCALPER (definida en config nuevo)
+                # Si aún usas config.PAIRS viejo, cámbialo aquí a config.PAIRS
+                pairs_to_scan = getattr(config, 'PAIRS_SCALPER', config.PAIRS) 
+
+                for symbol in pairs_to_scan:
                     
                     # 1. GESTIÓN DE ESTADO
                     current_pos = state.get_position(symbol)
@@ -98,29 +101,23 @@ def main():
                     # 2. OBTENCIÓN DE DATOS
                     try:
                         df = api.get_historical_data(symbol, limit=300)
-                        if df is None or df.empty:
-                            continue
+                        if df is None or df.empty: continue
                         
                         df['symbol_name'] = symbol
-                        
-                        # Indicadores + Bandas
                         df = processor.calculate_indicators(df)
                         zones = processor.get_volume_profile_zones(df)
-                        
                     except Exception as e:
                         print(f"❌ Data Error {symbol}: {e}")
                         continue
 
                     # 3. LÓGICA DE TRADING
                     if not current_pos:
-                        # --- ESTRATEGIA ---
                         profile_name = config.ASSET_MAP.get(symbol, 'SNIPER')
                         
-                        # Manejo seguro de configuración de perfiles
+                        # Cargar perfil
                         if hasattr(config, 'PROFILES') and profile_name in config.PROFILES:
                             profile_params = config.PROFILES[profile_name].copy()
                         else:
-                            # Fallback si falla la config
                             profile_params = {'name': 'DEFAULT', 'risk_type': 'conservative'}
                             
                         profile_params['name'] = profile_name
@@ -129,8 +126,7 @@ def main():
                         trade = strategy.get_signal(df, zones, profile_params)
                         
                         if trade:
-                            print(f"🎯 SEÑAL CONFIRMADA {symbol} [{profile_name}] {trade['type']}")
-                            
+                            print(f"🎯 SEÑAL {symbol} [{profile_name}] {trade['type']}")
                             risk_tier = trade.get('risk_type', 'standard')
                             
                             # Calcular tamaño
@@ -140,49 +136,53 @@ def main():
                                     trade['stop_loss'], 
                                     quality=risk_tier 
                                 )
-                            except Exception as e:
-                                print(f"⚠️ Error calculando tamaño: {e}")
-                                qty = 0
+                            except: qty = 0
                             
                             if qty > 0:
                                 if not config.DRY_RUN:
                                     # EJECUCIÓN REAL
                                     side = 'buy' if trade['type'] == 'LONG' else 'sell'
-                                    
                                     if api.place_order(symbol, side, qty):
+                                        # SL Order
                                         sl_side = 'sell' if side == 'buy' else 'buy'
-                                        # Orden Stop Loss
                                         api.place_order(symbol, sl_side, qty, 'STOP_MARKET', 
                                                        {'stopPrice': trade['stop_loss'], 'closePosition': True})
                                         
                                         # Guardar Estado
                                         state.set_entry(symbol, trade['entry_price'], trade['timestamp'], trade['stop_loss'], trade['type'])
                                         
-                                        # Notificar
+                                        # Notificar Telegram (Nuevo Formato)
                                         if tg:
-                                            emoji = "🟢" if trade['type'] == 'LONG' else "🔴"
-                                            tg.send_msg(f"{emoji} *ENTRADA {symbol}*\nPerfil: `{profile_name}`\nTipo: {trade['type']}\nRisk: `{risk_tier}`")
+                                            tg.send_trade_entry(
+                                                symbol=symbol,
+                                                strategy=f"Scalper {profile_name}",
+                                                side=trade['type'],
+                                                entry=trade['entry_price'],
+                                                sl=trade['stop_loss'],
+                                                tp="Dynamic (Fib)" # Scalper usa TP dinámico a veces
+                                            )
                                 else:
-                                    print(f"🧪 DRY RUN: {symbol} {trade['type']} Qty: {qty}")
-                            else:
-                                print(f"⚠️ Señal válida pero tamaño de posición 0")
+                                    print(f"🧪 DRY RUN: {symbol} Qty: {qty}")
+                                    if tg: tg.send_msg(f"🧪 *DRY RUN SIGNAL* {symbol} {trade['type']}")
 
-                    # B) GESTIONAR SALIDA
+                    # B) GESTIONAR SALIDA (Limpieza de estado)
                     else:
                         active_symbols = api.get_open_positions_symbols()
                         if symbol not in active_symbols and not config.DRY_RUN:
                              state.clear_position(symbol)
+                             # Opcional: Avisar cierre si quieres mucho ruido
+                             # if tg: tg.send_trade_update(symbol, 'CLOSE', "Posición cerrada en exchange")
 
             except KeyboardInterrupt:
                 print("\n🛑 Apagando Hydra...")
                 break
             except Exception as e:
-                print(f"🔥 Error Crítico en Loop Principal: {e}")
+                print(f"🔥 Error Loop: {e}")
                 traceback.print_exc()
                 time.sleep(30)
 
     except Exception as e:
-        print(f"🔥 Error de Inicialización General: {e}")
+        print(f"🔥 Error Init: {e}")
         traceback.print_exc()
 
 if __name__ == "__main__":

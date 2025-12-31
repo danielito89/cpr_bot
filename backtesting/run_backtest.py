@@ -7,70 +7,49 @@ import time
 from datetime import datetime
 from tabulate import tabulate
 
-# Hack para importar la estrategia desde ../bots/breakout/
+# --- 1. IMPORTACIÓN DE LA ESTRATEGIA REAL (PRODUCCIÓN) ---
+# Esto garantiza que usamos LA MISMA lógica que el bot en vivo
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-try:
-    from bots.breakout.strategy import BreakoutBotStrategy
-except ImportError:
-    # Fallback por si la estructura de carpetas varía ligeramente
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-    from bots.breakout.strategy import BreakoutBotStrategy
+from bots.breakout.strategy import BreakoutBotStrategy
 
 # Configuración
 TIMEFRAME = '4h'
-SINCE_STR = "2022-01-01 00:00:00"
+SINCE_STR = "2023-01-01 00:00:00" # Backtest desde 2023
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+FEE_TAKER = 0.0006 # 0.06% (0.05% Binance + 0.01% Slippage estimado)
 
-# Crear carpeta de datos si no existe
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 
 def fetch_full_history(symbol, timeframe, since_str):
-    """
-    Descarga historial completo de Binance usando paginación.
-    Guarda un CSV en caché para no descargar cada vez.
-    """
-    safe_symbol = symbol.replace('/', '_')
+    """Descarga datos usando la misma API de Futuros que producción."""
+    safe_symbol = symbol.replace('/', '_').replace(':', '_')
     csv_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}.csv")
     
-    # Si ya existe el CSV, lo cargamos
     if os.path.exists(csv_path):
-        print(f"📂 Cargando {symbol} desde caché local...")
+        print(f"📂 Cargando {symbol} desde caché...")
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
         return df
 
-    print(f"📥 Descargando historial completo de {symbol} desde Binance...")
-    exchange = ccxt.binance({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'future'}
-    })
+    print(f"📥 Descargando historial de {symbol} (Futuros)...")
+    exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
     exchange.load_markets()
+    
     since = exchange.parse8601(since_str)
     all_ohlcv = []
     
     while True:
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
-            if not ohlcv:
-                break
-            
+            if not ohlcv: break
             all_ohlcv.extend(ohlcv)
-            last_timestamp = ohlcv[-1][0]
-            since = last_timestamp + 1
-            
-            # Si la última vela es reciente (menos de 4h), paramos
-            if last_timestamp >= (exchange.milliseconds() - 4 * 3600 * 1000):
-                break
-                
-            print(f"   ... {len(all_ohlcv)} velas")
+            since = ohlcv[-1][0] + 1
+            if ohlcv[-1][0] >= (exchange.milliseconds() - 4 * 3600 * 1000): break
             time.sleep(exchange.rateLimit / 1000)
-            
         except Exception as e:
             print(f"❌ Error descargando: {e}")
             break
     
-    if not all_ohlcv:
-        return pd.DataFrame()
+    if not all_ohlcv: return pd.DataFrame()
 
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -78,95 +57,123 @@ def fetch_full_history(symbol, timeframe, since_str):
     df.to_csv(csv_path)
     return df
 
-def run_simulation(symbol, df, strategy_params):
-    # Instanciar estrategia
-    strategy = BreakoutBotStrategy(atr_period=14, lookback=20)
-    
-    # Inyectar parámetros
+def run_fidelity_simulation(symbol, df, strategy_params):
+    """
+    Simulación de Alta Fidelidad: Replica el bucle while True del main_breakout.py
+    """
+    # 1. Instanciar la MISMA clase de estrategia
+    strategy = BreakoutBotStrategy()
     strategy.sl_atr = strategy_params['sl_atr']
     strategy.tp_partial_atr = strategy_params['tp_partial_atr']
     strategy.trailing_dist_atr = strategy_params['trailing_dist_atr']
     strategy.vol_multiplier = strategy_params['vol_multiplier']
 
-    # Pre-calcular indicadores
+    # 2. Calcular indicadores (igual que en producción)
     df = strategy.calculate_indicators(df.copy())
     
+    # Estado inicial (Simula el JSON vacío)
     state = {'status': 'WAITING_BREAKOUT'}
-    trades = []
-    equity = 1000.0
     
-    # SIMULACIÓN VELA A VELA
-    for i in range(201, len(df)):
-        window = df.iloc[:i+1]
-        signal = strategy.get_signal(window, state)
+    trades = []
+    equity = 1000.0  # Capital inicial simulado
+    initial_equity = equity
+    
+    # --- BUCLE VELA A VELA (Simulando el paso del tiempo) ---
+    # Empezamos en 200 para dar espacio a la EMA200
+    for i in range(200, len(df)):
+        # Simulamos que "df" es lo que el bot ve en ese momento (ohlcv limit=300)
+        # Cortamos el dataframe hasta la vela 'i'
+        current_window = df.iloc[:i+1]
+        current_candle = current_window.iloc[-1]
+        current_date = current_window.index[-1]
+        
+        # 3. Obtener Señal (Igual que main.py)
+        signal = strategy.get_signal(current_window, state)
         action = signal['action']
-        current_date = df.index[i]
         
-        # --- Lógica de Ejecución Simulada ---
+        # --- REPLICANDO LA LÓGICA DE EJECUCIÓN DEL MAIN ---
         
-        # 1. MANEJO DE ESTADOS PREVIOS A LA ENTRADA (ESTO FALTABA)
-        if action == 'PREPARE_PULLBACK':
-            state.update({
-                'status': signal['new_status'],
-                'breakout_level': signal['breakout_level'],
-                'atr_at_breakout': signal['atr_at_breakout']
-            })
+        if action == 'ENTER_LONG':
+            # main.py: exchange.create_order(...) + state.update(...)
+            entry_price = signal['entry_price']
             
-        elif action == 'CANCEL_FOMO':
-            state['status'] = signal['new_status']
-
-        # 2. ENTRADA AL MERCADO
-        elif action == 'ENTER_LONG':
-            cost = 1000 * 0.001 # 0.1% fees
-            equity -= cost 
+            # Costo de entrada
+            cost = equity * FEE_TAKER
+            equity -= cost
+            
             state.update({
                 'status': 'IN_POSITION',
-                'entry_price': signal['entry_price'],
+                'entry_price': entry_price,
                 'stop_loss': signal['stop_loss'],
                 'tp_partial': signal['tp_partial'],
-                'position_size_pct': 1.0,
+                'position_size_pct': 1.0,      # 100% de la posición
                 'trailing_active': False,
-                'highest_price_post_tp': 0.0
+                'atr_at_breakout': signal.get('atr_at_breakout', 0), # Replicamos persistencia
+                'highest_price_post_tp': 0.0   # Replicamos lógica de trailing
             })
             
-        # 3. GESTIÓN DE SALIDAS
         elif action == 'EXIT_PARTIAL':
+            # main.py: Vende 50% al precio de TP
             exit_price = state['tp_partial']
             entry_price = state['entry_price']
             
+            # Cálculo PnL de la mitad de la posición
+            position_value = (equity / 2) # Simplificación: Asumimos reinversión completa
+            # Ajuste: En futuros usamos margen, aquí simulamos crecimiento de equity directo
+            # PnL % = (Exit - Entry) / Entry
             pnl_pct = (exit_price - entry_price) / entry_price
-            profit = (1000.0 * 0.5) * pnl_pct
-            cost = (1000.0 * 0.5) * 0.001 
             
-            equity += (profit - cost)
-            trades.append([current_date, symbol, 'PARTIAL_TP', pnl_pct*100])
+            # Ganancia bruta en $
+            gross_profit = (equity * 0.5) * pnl_pct
             
+            # Costo de salida (sobre el 50% vendido)
+            fee = (equity * 0.5) * FEE_TAKER
+            
+            equity += (gross_profit - fee)
+            
+            trades.append([current_date, symbol, 'PARTIAL_TP', pnl_pct*100, equity])
+            
+            # Actualización de Estado (Igual que main.py)
             state.update({
                 'position_size_pct': 0.5,
-                'stop_loss': signal['new_sl'],
+                'stop_loss': signal['new_sl'], # Breakeven
                 'trailing_active': True,
                 'highest_price_post_tp': signal['highest_price_post_tp']
             })
 
         elif action == 'UPDATE_TRAILING':
-             state['stop_loss'] = signal['new_sl']
-             state['highest_price_post_tp'] = signal['highest_price_post_tp']
+            # main.py: Solo actualiza el JSON
+            state['stop_loss'] = signal['new_sl']
+            state['highest_price_post_tp'] = signal['highest_price_post_tp']
 
         elif action in ['EXIT_SL', 'EXIT_TRAILING']:
+            # main.py: Cierra lo que queda (100% o 50%)
             exit_price = state['stop_loss']
             entry_price = state['entry_price']
+            size_pct = state['position_size_pct'] # 1.0 o 0.5
             
-            size_pct = state['position_size_pct']
             pnl_pct = (exit_price - entry_price) / entry_price
             
-            profit = (1000.0 * size_pct) * pnl_pct
-            cost = (1000.0 * size_pct) * 0.001
+            # Cálculo PnL sobre la porción restante
+            amount_involved = equity * size_pct # Si quedaba 50%, el profit/loss es sobre ese 50%
+            # (Nota: 'equity' ya creció por el parcial anterior, así que esto simula interés compuesto)
             
-            equity += (profit - cost)
-            trades.append([current_date, symbol, action, pnl_pct*100])
+            gross_profit = amount_involved * pnl_pct
+            fee = amount_involved * FEE_TAKER
             
+            equity += (gross_profit - fee)
+            
+            trades.append([current_date, symbol, action, pnl_pct*100, equity])
+            
+            # Reset de estado (Igual que main.py)
             state = {'status': 'COOLDOWN', 'last_exit_time': str(current_date)}
-            
+
+        # Manejo de estados intermedios (Waiting, Prepare Pullback)
+        elif 'new_status' in signal:
+            state['status'] = signal['new_status']
+            if 'breakout_level' in signal: state['breakout_level'] = signal['breakout_level']
+            if 'atr_at_breakout' in signal: state['atr_at_breakout'] = signal['atr_at_breakout']
+
         elif action == 'RESET_STATE':
              state['status'] = 'WAITING_BREAKOUT'
 
@@ -175,20 +182,18 @@ def run_simulation(symbol, df, strategy_params):
 if __name__ == "__main__":
     results = []
     
-    # CONFIGURACIONES DE RIESGO
+    # --- CONFIGURACIÓN DE RIESGO IDÉNTICA A CONFIG.PY ---
+    # (Copia aquí tus valores finales para validar)
     configs = {
-        '1000PEPE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}, 
-        'TRX/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
-        'SOL/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
-        'XRP/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
-        'DOGE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
-        'SUI/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
+        'SOL/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
+        'DOGE/USDT':      {'sl_atr': 1.0, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5},
+        '1000PEPE/USDT':  {'sl_atr': 2.0, 'tp_partial_atr': 5.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.8},
+        'XRP/USDT':       {'sl_atr': 1.0, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.5},
+        # Agrega pares para testear
     }
-    
-    # Nota: Bajé ligeramente el 'vol_multiplier' de 1.5 a 1.3/1.4 para ser un poco más permisivo en backtest 
-    # y verificar que hay operaciones.
 
-    print(f"🚀 INICIANDO BACKTEST 4H (Desde {SINCE_STR})...")
+    print(f"🚀 INICIANDO BACKTEST DE ALTA FIDELIDAD (Fee: {FEE_TAKER*100}%)")
+    print(f"📅 Desde: {SINCE_STR} | Timeframe: {TIMEFRAME}")
     
     for symbol, params in configs.items():
         try:
@@ -197,7 +202,7 @@ if __name__ == "__main__":
                 print(f"⚠️ Sin datos para {symbol}")
                 continue
 
-            final_cap, num_trades = run_simulation(symbol, df, params)
+            final_cap, num_trades = run_fidelity_simulation(symbol, df, params)
             
             roi = ((final_cap - 1000) / 1000) * 100
             color_roi = f"\033[92m{roi:.2f}%\033[0m" if roi > 0 else f"\033[91m{roi:.2f}%\033[0m"
@@ -205,7 +210,9 @@ if __name__ == "__main__":
             results.append([symbol, num_trades, f"${final_cap:.2f}", color_roi])
             
         except Exception as e:
-            print(f"Error crítico en {symbol}: {e}")
+            print(f"Error en {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
 
-    print("\n📊 RESULTADOS FINALES (Capital Inicial $1000 | Fees Incluidos)")
+    print("\n📊 RESULTADOS (Capital Inicial $1000)")
     print(tabulate(results, headers=['Par', '# Trades', 'Capital Final', 'ROI %'], tablefmt='grid'))
