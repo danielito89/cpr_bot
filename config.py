@@ -1,28 +1,56 @@
 # config.py
 
-# --- GENERAL ---
-TIMEFRAME_BREAKOUT = '4h'
-TIMEFRAME_SCALPER = '5m'
-USDT_PER_TRADE = 50.0  # Tamaño fijo para empezar (o lógica dinámica)
+# ==========================================
+# ⚠️ LAS API KEYS ESTÁN EN EL ARCHIVO .ENV
+# ==========================================
 
-# --- PERFILES DE RIESGO (Optimizados Backtest 2022-2024) ---
-RISK_PROFILES = {
-    'BTC/USDT': {
-        'sl_atr': 1.0,
-        'tp_partial_atr': 2.5,
-        'trailing_dist_atr': 1.5,
-        'vol_multiplier': 1.3  # Bajamos un poco para capturar más movimientos en BTC
-    },
-    'ETH/USDT': {
-        'sl_atr': 1.2,
-        'tp_partial_atr': 3.0,
-        'trailing_dist_atr': 2.0,
-        'vol_multiplier': 1.4
-    },
-    'SOL/USDT': { # La joya de la corona
-        'sl_atr': 1.5,          # Mayor espacio para respirar
-        'tp_partial_atr': 4.0,  # Buscar Home Runs
-        'trailing_dist_atr': 2.5,
-        'vol_multiplier': 1.5
-    }
+# --- 1. LISTAS DE PARES (DIVIDIDAS) ---
+
+# A) PARES PARA SCALPER (Hydra Mean Reversion)
+# Monedas que se mueven en rangos o son muy pesadas
+PAIRS_SCALPER = [
+    'BTC/USDT', 
+    'ETH/USDT', 
+    'SOL/USDT'
+]
+
+# B) PARES PARA BREAKOUT (Nuevo Bot)
+# Monedas explosivas
+PAIRS_BREAKOUT = [
+    'SOL/USDT', 
+    'DOGE/USDT',
+    'XRP/USDT'
+]
+
+# (Mantenemos compatibilidad hacia atrás por si acaso)
+PAIRS = PAIRS_SCALPER 
+
+# --- CONFIGURACIÓN DE TRADING ---
+TIMEFRAME = '5m' # Timeframe del Scalper
+LEVERAGE = 10           
+RISK_PER_TRADE = 0.03   
+MAX_DRAWDOWN_SESSION = 0.10 
+
+# --- FILTROS DE ESTRATEGIA (V6.4) ---
+RSI_LONG_THRESHOLD = 45
+RSI_SHORT_THRESHOLD = 55
+ATR_PERCENTILE = 0.25
+VOLUME_MA_PERIOD = 20
+TP1_RATIO = 1.0
+TP2_RATIO = 3.0
+
+# --- PERFILES DE ACTIVOS ---
+ASSET_MAP = {
+    'BTC/USDT': 'SNIPER',
+    'ETH/USDT': 'SNIPER',
+    'SOL/USDT': 'FLOW'
 }
+
+PROFILES = {
+    'SNIPER': { 'risk_type': 'standard', 'tp_multiplier': 1.0 },
+    'FLOW': { 'risk_type': 'aggressive', 'tp_multiplier': 1.5 }
+}
+
+# --- SISTEMA ---
+DRY_RUN = False
+LOG_FILE = "trading_log.txt"
