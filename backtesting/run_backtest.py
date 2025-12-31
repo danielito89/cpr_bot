@@ -18,7 +18,7 @@ except ImportError:
 
 # Configuración
 TIMEFRAME = '4h'
-SINCE_STR = "2022-01-01 00:00:00"
+SINCE_STR = "2023-06-01 00:00:00"
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 
 # Crear carpeta de datos si no existe
@@ -175,9 +175,9 @@ if __name__ == "__main__":
     # CONFIGURACIONES DE RIESGO
     configs = {
         '1000PEPE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}, 
-        'AAVE/USDT': {'sl_atr': 1.2, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.4},
+        'ZEC/USDT': {'sl_atr': 1.2, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.4},
         'SOL/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
-        'ADA/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
+        'XRP/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'DOGE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'BNB/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
     }
