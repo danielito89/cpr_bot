@@ -40,9 +40,11 @@ PROFILES = {
 
 TEST_MAP = {
     'BTC/USDT':  'SNIPER',    # Base
-    # 'BTC/USDT':  'BREAKOUT',  # Descomenta para probar si BTC rompe bien
+    'BTC/USDT':  'BREAKOUT',  # Descomenta para probar si BTC rompe bien
     'SOL/USDT':  'BREAKOUT',  # El candidato principal
     # 'AVAX/USDT': REMOVIDO
+    'ETH/USDT':  'SNIPER',
+    'ETH/USDT':  'BREAKOUT'
 }
 
 # ==============================================================================
