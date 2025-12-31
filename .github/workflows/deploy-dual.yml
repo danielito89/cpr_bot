@@ -34,6 +34,7 @@ jobs:
             # Reiniciar el bot para aplicar cambios
             sudo systemctl restart cpr_dashboard
             sudo systemctl restart scalper_pro
+            sudo systemctl restart breakout_sol
             echo "✅ Producción actualizada y reiniciada."
 
       # ---------------------------------------------------

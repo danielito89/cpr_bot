@@ -13,7 +13,7 @@ class BinanceClient:
         self.client = ccxt.binance({
             'apiKey': os.getenv('BINANCE_API_KEY'), 
             'secret': os.getenv('BINANCE_SECRET'),
-            'enableRateLimit': True
+            'enableRateLimit': True,
             'options': {
                 'defaultType': 'future'  # Operamos en Futuros
             }
