@@ -185,12 +185,24 @@ if __name__ == "__main__":
     # --- CONFIGURACIÓN DE RIESGO IDÉNTICA A CONFIG.PY ---
     # (Copia aquí tus valores finales para validar)
     configs = {
+        # --- LOS GANADORES ACTUALES ---
         'SOL/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'DOGE/USDT':      {'sl_atr': 1.0, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5},
-        'XPL/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.8},
-        'XRP/USDT':       {'sl_atr': 1.0, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.5},
-        'BNB/USDT':       {'sl_atr': 1.0, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.5}
-        # Agrega pares para testear
+        
+        # --- NUEVOS CANDIDATOS (LAYER 1 MODERNA) ---
+        # SUI suele ser muy limpia, parámetros similares a SOL
+        'SUI/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5},
+        'SEI/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 3.5, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.6},
+
+        # --- NARRATIVA I.A. (TREND FOLLOWERS) ---
+        # FET necesita dejar correr la ganancia (TP largo)
+        'FET/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 5.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.5},
+        'RNDR/USDT':      {'sl_atr': 1.2, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5},
+
+        # --- MEMES VOLÁTILES (AJUSTE PEPE/WIF) ---
+        # El truco con los memes: Stop Loss MUY amplio (2.0 o 2.5 ATR) para que no te saquen los mechazos
+        '1000PEPE/USDT':  {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 2.0},
+        'WIF/USDT':       {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.8},
     }
 
     print(f"🚀 INICIANDO BACKTEST DE ALTA FIDELIDAD (Fee: {FEE_TAKER*100}%)")
