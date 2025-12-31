@@ -33,16 +33,15 @@ def fetch_full_history(symbol, timeframe, since_str):
     safe_symbol = symbol.replace('/', '_')
     csv_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}.csv")
     
-    # Si ya existe el CSV, lo cargamos (Borrar el archivo si quieres actualizar data)
+    # Si ya existe el CSV, lo cargamos
     if os.path.exists(csv_path):
         print(f"📂 Cargando {symbol} desde caché local...")
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
         return df
 
-    print(f"📥 Descargando historial completo de {symbol} desde Binance (puede tardar unos segundos)...")
+    print(f"📥 Descargando historial completo de {symbol} desde Binance...")
     exchange = ccxt.binance({'enableRateLimit': True})
     
-    # Convertir string de fecha a milisegundos
     since = exchange.parse8601(since_str)
     all_ohlcv = []
     
@@ -53,8 +52,6 @@ def fetch_full_history(symbol, timeframe, since_str):
                 break
             
             all_ohlcv.extend(ohlcv)
-            
-            # Actualizar 'since' al tiempo de la última vela + 1 ms para la siguiente página
             last_timestamp = ohlcv[-1][0]
             since = last_timestamp + 1
             
@@ -62,8 +59,8 @@ def fetch_full_history(symbol, timeframe, since_str):
             if last_timestamp >= (exchange.milliseconds() - 4 * 3600 * 1000):
                 break
                 
-            print(f"   ... obtenidas {len(all_ohlcv)} velas hasta ahora")
-            time.sleep(exchange.rateLimit / 1000) # Respetar rate limit
+            print(f"   ... {len(all_ohlcv)} velas")
+            time.sleep(exchange.rateLimit / 1000)
             
         except Exception as e:
             print(f"❌ Error descargando: {e}")
@@ -75,10 +72,7 @@ def fetch_full_history(symbol, timeframe, since_str):
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    
-    # Guardar en CSV para la próxima
     df.to_csv(csv_path)
-    print(f"✅ Descarga completada: {len(df)} velas guardadas en {csv_path}")
     return df
 
 def run_simulation(symbol, df, strategy_params):
@@ -91,27 +85,36 @@ def run_simulation(symbol, df, strategy_params):
     strategy.trailing_dist_atr = strategy_params['trailing_dist_atr']
     strategy.vol_multiplier = strategy_params['vol_multiplier']
 
-    # Pre-calcular indicadores (vectorizado es muy rápido)
+    # Pre-calcular indicadores
     df = strategy.calculate_indicators(df.copy())
     
     state = {'status': 'WAITING_BREAKOUT'}
     trades = []
-    equity = 1000.0  # Capital inicial por moneda
+    equity = 1000.0
     
     # SIMULACIÓN VELA A VELA
-    # Empezamos en el índice 201 para tener datos previos para EMA200 y ATR
     for i in range(201, len(df)):
-        # Pasamos una "ventana" del DataFrame hasta el punto actual
-        # strategy.get_signal solo mira la última fila (iloc[-1]), así que es seguro pasar el DF entero cortado
         window = df.iloc[:i+1]
-        
         signal = strategy.get_signal(window, state)
         action = signal['action']
         current_date = df.index[i]
         
         # --- Lógica de Ejecución Simulada ---
-        if action == 'ENTER_LONG':
-            cost = 1000 * 0.001 # 0.1% fees entry
+        
+        # 1. MANEJO DE ESTADOS PREVIOS A LA ENTRADA (ESTO FALTABA)
+        if action == 'PREPARE_PULLBACK':
+            state.update({
+                'status': signal['new_status'],
+                'breakout_level': signal['breakout_level'],
+                'atr_at_breakout': signal['atr_at_breakout']
+            })
+            
+        elif action == 'CANCEL_FOMO':
+            state['status'] = signal['new_status']
+
+        # 2. ENTRADA AL MERCADO
+        elif action == 'ENTER_LONG':
+            cost = 1000 * 0.001 # 0.1% fees
             equity -= cost 
             state.update({
                 'status': 'IN_POSITION',
@@ -123,15 +126,14 @@ def run_simulation(symbol, df, strategy_params):
                 'highest_price_post_tp': 0.0
             })
             
+        # 3. GESTIÓN DE SALIDAS
         elif action == 'EXIT_PARTIAL':
-            # Asumimos que ejecutamos al TP exacto
             exit_price = state['tp_partial']
             entry_price = state['entry_price']
             
-            # Ganancia del 50% de la posición
             pnl_pct = (exit_price - entry_price) / entry_price
             profit = (1000.0 * 0.5) * pnl_pct
-            cost = (1000.0 * 0.5) * 0.001 # Fee de salida
+            cost = (1000.0 * 0.5) * 0.001 
             
             equity += (profit - cost)
             trades.append([current_date, symbol, 'PARTIAL_TP', pnl_pct*100])
@@ -151,12 +153,11 @@ def run_simulation(symbol, df, strategy_params):
             exit_price = state['stop_loss']
             entry_price = state['entry_price']
             
-            # Calculamos PnL sobre el tamaño restante
             size_pct = state['position_size_pct']
             pnl_pct = (exit_price - entry_price) / entry_price
             
             profit = (1000.0 * size_pct) * pnl_pct
-            cost = (1000.0 * size_pct) * 0.001 # Fee salida
+            cost = (1000.0 * size_pct) * 0.001
             
             equity += (profit - cost)
             trades.append([current_date, symbol, action, pnl_pct*100])
@@ -168,33 +169,30 @@ def run_simulation(symbol, df, strategy_params):
 
     return equity, len(trades)
 
-# --- EJECUCIÓN PRINCIPAL ---
 if __name__ == "__main__":
     results = []
     
-    # CONFIGURACIONES DE RIESGO A PROBAR
+    # CONFIGURACIONES DE RIESGO
     configs = {
-        'BTC/USDT': {'sl_atr': 1.0, 'tp_partial_atr': 2.5, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.5},
-        'ETH/USDT': {'sl_atr': 1.2, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.6},
-        'SOL/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.8},
-        # Agrega más si quieres probar (ej. DOGE, BNB)
+        'BTC/USDT': {'sl_atr': 1.0, 'tp_partial_atr': 2.5, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.3}, 
+        'ETH/USDT': {'sl_atr': 1.2, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.4},
+        'SOL/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
     }
+    
+    # Nota: Bajé ligeramente el 'vol_multiplier' de 1.5 a 1.3/1.4 para ser un poco más permisivo en backtest 
+    # y verificar que hay operaciones.
 
     print(f"🚀 INICIANDO BACKTEST 4H (Desde {SINCE_STR})...")
-    print("Nota: La primera vez descargará datos, luego será instantáneo.")
     
     for symbol, params in configs.items():
         try:
-            # 1. Obtener Datos Reales
             df = fetch_full_history(symbol, TIMEFRAME, SINCE_STR)
             if df.empty:
                 print(f"⚠️ Sin datos para {symbol}")
                 continue
 
-            # 2. Correr Simulación
             final_cap, num_trades = run_simulation(symbol, df, params)
             
-            # 3. Calcular Métricas
             roi = ((final_cap - 1000) / 1000) * 100
             color_roi = f"\033[92m{roi:.2f}%\033[0m" if roi > 0 else f"\033[91m{roi:.2f}%\033[0m"
             
@@ -202,8 +200,6 @@ if __name__ == "__main__":
             
         except Exception as e:
             print(f"Error crítico en {symbol}: {e}")
-            import traceback
-            traceback.print_exc()
 
     print("\n📊 RESULTADOS FINALES (Capital Inicial $1000 | Fees Incluidos)")
     print(tabulate(results, headers=['Par', '# Trades', 'Capital Final', 'ROI %'], tablefmt='grid'))
