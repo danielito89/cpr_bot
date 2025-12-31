@@ -30,6 +30,7 @@ PROFILES = {
         'vol_threshold': 0.6,   # Gatillo más suave
         'rsi_long': 50,         # Neutro
         'rsi_short': 50,        # Neutro
+        'tp_mult': 2.0,         # TP más corto = Más Win Rate
         'sl_atr': 1.5,
         'cooldown': 12
     }
