@@ -22,15 +22,15 @@ END_DATE   = "2023-12-31"
 PROFILES = {
     'SNIPER': {
         'vol_thresh': 1.0,    # Gatillo de Volumen (x veces la media)
-        'rsi_long': 45,       # RSI máximo para entrar en Long (Sobreventa)
-        'rsi_short': 65,      # RSI mínimo para entrar en Short (Sobrecompra)
+        'rsi_long': 40,       # RSI máximo para entrar en Long (Sobreventa)
+        'rsi_short': 60,      # RSI mínimo para entrar en Short (Sobrecompra)
         'tp_mult': 3.0,       # Ratio Riesgo/Beneficio buscado
         'sl_atr': 1.5         # Distancia del Stop Loss en ATRs
     },
     'FLOW': {
-        'vol_thresh': 0.6,    # Gatillo más suave
-        'rsi_long': 50,       # RSI Neutro
-        'rsi_short': 50,      # RSI Neutro
+        'vol_thresh': 0.8,    # Gatillo más suave
+        'rsi_long': 45,       # RSI Neutro
+        'rsi_short': 55,      # RSI Neutro
         'tp_mult': 1.5,       # TP más corto, asegurar ganancia
         'sl_atr': 1.5
     }
@@ -43,9 +43,9 @@ TEST_MAP = {
     'BTC/USDT':  'SNIPER',
     'ETH/USDT':  'SNIPER',
     'SOL/USDT':  'FLOW',
-    'AVAX/USDT': 'FLOW',   # La joya de la corona
-    'LTC/USDT':  'SNIPER',
-    'BNB/USDT':  'FLOW'   # Descomenta para probar
+    'AVAX/USDT': 'SNIPER',   # La joya de la corona
+    'LTC/USDT':  'SNIPER'
+    #'BNB/USDT':  'FLOW'   # Descomenta para probar
 }
 
 # ==============================================================================
