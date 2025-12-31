@@ -1,35 +1,60 @@
-# core/risk_manager.py
 import math
+import sys
+import os
+
+# Ajuste de ruta para encontrar config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
 
 class RiskManager:
-    def __init__(self, balance, risk_per_trade=0.03, leverage=10):
-        self.balance = balance
-        self.risk_per_trade = risk_per_trade
-        self.leverage = leverage
+    def __init__(self, initial_balance=None):
+        self.balance = initial_balance if initial_balance else 0.0
+        self.leverage = config.LEVERAGE
 
-    def calculate_position_size(self, entry_price, stop_loss_price):
+    def calculate_position_size(self, entry_price, stop_loss_price, quality='STANDARD'):
         """
-        Calcula la cantidad de BTC a comprar basándose en el riesgo en USD.
+        Calcula el tamaño de la posición basado en el riesgo % y la distancia al SL.
+        Acepta 'quality' para diferenciar entre activos PREMIUM (BTC) y STANDARD (SOL).
         """
-        if entry_price == 0: return 0
-        
-        # 1. Distancia al Stop Loss en %
-        sl_distance_percent = abs(entry_price - stop_loss_price) / entry_price
-        
-        # 2. Dinero a arriesgar (Ej: $1000 * 0.03 = $30 USD)
-        risk_amount = self.balance * self.risk_per_trade
-        
-        # 3. Tamaño de posición en USD (Ej: $30 / 0.008 = $3750)
-        position_size_usd = risk_amount / sl_distance_percent
-        
-        # 4. Chequeo de Leverage Máximo
-        max_position_usd = self.balance * self.leverage
-        if position_size_usd > max_position_usd:
-            position_size_usd = max_position_usd
-            print(f"⚠️ Posición limitada por leverage máx ({self.leverage}x)")
+        if self.balance <= 0:
+            return 0.0
 
-        # 5. Convertir a BTC
-        amount_btc = position_size_usd / entry_price
+        # 1. Determinar % de Riesgo según Configuración
+        if quality == 'PREMIUM':
+            risk_pct = config.RISK_PREMIUM  # Ej: 0.03 (3%)
+        else:
+            risk_pct = config.RISK_STANDARD # Ej: 0.015 (1.5%)
+
+        # 2. Calcular monto en dólares a arriesgar (pérdida máxima)
+        risk_amount = self.balance * risk_pct
+
+        # 3. Calcular distancia al Stop Loss
+        sl_dist = abs(entry_price - stop_loss_price)
         
-        # Redondear a la precisión de Binance (usualmente 3 decimales para BTC)
-        return round(amount_btc, 3)
+        if sl_dist == 0:
+            return 0.0
+
+        # 4. Calcular Cantidad de Monedas (Size)
+        # Fórmula: Riesgo $$$ / Distancia SL = Cantidad de Monedas
+        raw_qty = risk_amount / sl_dist
+
+        # 5. Verificación de Apalancamiento Máximo (Sanity Check)
+        # No queremos abrir una posición más grande que Balance * Leverage
+        max_notional = self.balance * self.leverage
+        notional_value = raw_qty * entry_price
+
+        if notional_value > max_notional:
+            raw_qty = max_notional / entry_price
+            print(f"⚠️ Posición limitada por apalancamiento ({self.leverage}x)")
+
+        # 6. Redondeo básico según precio (para cumplir mínimos de Binance aprox)
+        return self._round_qty(raw_qty, entry_price)
+
+    def _round_qty(self, qty, price):
+        """Redondea la cantidad según el valor del activo"""
+        if price > 1000: # BTC, ETH
+            return round(qty, 3) 
+        elif price > 10: # SOL, AVAX, BNB
+            return round(qty, 2)
+        else: # Altcoins baratas
+            return round(qty, 0)
