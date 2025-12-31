@@ -5,26 +5,27 @@ import traceback
 from datetime import datetime
 from dotenv import load_dotenv
 
-# --- PARCHE DE RUTAS (CRÍTICO) ---
-# Esto asegura que Python encuentre las carpetas 'core' y 'strategies'
-# sin importar desde qué directorio ejecutes el comando.
+# --- 1. CONFIGURACIÓN DE RUTAS Y ENTORNO ---
+# Ruta del archivo actual
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# Agregamos la carpeta superior (bot_cpr) al path
-sys.path.append(os.path.dirname(current_dir))
-# ----------------------------------
 
-import config
-# 1. Cargar variables de entorno (.env)
-load_dotenv(os.path.join(os.path.dirname(__file__), '../../.env'))
+# Cargar .env (Subimos 2 niveles: bots/scalper/ -> bots/ -> root/.env)
+dotenv_path = os.path.abspath(os.path.join(current_dir, '../../.env'))
+load_dotenv(dotenv_path)
 
-# 2. Añadir ruta raíz para importar shared
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+# Añadir ruta raíz para que Python encuentre 'shared', 'core', 'config', etc.
+root_path = os.path.abspath(os.path.join(current_dir, '../..'))
+sys.path.append(root_path)
 
-# 3. Ahora sí puedes importar lo compartido
-from shared.ccxt_handler import ExchangeHandler
-from shared.telegram_bot import send_msg (si lo adaptaste)
-# --- IMPORTS ---
-# Usamos try/except para manejar posibles diferencias de nombres en tus archivos
+# --- 2. IMPORTS ---
+import config  # Configuración general (pares, blacklist, etc.)
+
+# Imports Shared
+# (Opcional si vas a migrar el Scalper a la nueva arquitectura completa,
+# por ahora lo dejamos comentado para no romper tu lógica antigua)
+# from shared.ccxt_handler import ExchangeHandler 
+
+# Imports Legacy (Tu estructura actual)
 try:
     from core.binance_api import BinanceClient
 except ImportError:
@@ -39,12 +40,30 @@ from strategies.strategy_v6_5 import StrategyV6_5
 def main():
     print("🐲 INICIANDO HYDRA V6.5 (PRODUCCIÓN)...")
     
+    # Verificación de Seguridad
+    if not os.getenv('BINANCE_API_KEY'):
+        print("❌ ERROR CRÍTICO: No se detectaron API KEYS en el entorno.")
+        print("   Asegúrate de que el archivo .env existe y está cargado.")
+        return
+
     # --- INICIALIZACIÓN DE SERVICIOS ---
     try:
-        api = BinanceClient()
+        # ⚠️ IMPORTANTE: Asegúrate de que BinanceClient dentro de core/binance_api.py
+        # también esté leyendo os.getenv('BINANCE_API_KEY') y no config.API_KEY
+        api = BinanceClient() 
+        
         state = StateManager()
-        # Pasamos las credenciales explícitamente para evitar el error anterior
-        tg = TelegramBot(token=config.TELEGRAM_TOKEN, chat_id=config.TELEGRAM_CHAT_ID)
+        
+        # --- CORRECCIÓN CLAVE: LEER CREDENCIALES DEL .ENV ---
+        tg_token = os.getenv('TELEGRAM_TOKEN')
+        tg_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        
+        if not tg_token or not tg_chat_id:
+             print("⚠️ Advertencia: Credenciales de Telegram no encontradas en .env")
+             tg = None
+        else:
+             tg = TelegramBot(token=tg_token, chat_id=tg_chat_id)
+
         processor = DataProcessor()
         strategy = StrategyV6_5()
         
@@ -55,38 +74,37 @@ def main():
 
         # Notificación de arranque
         mode_txt = "LIVE 💸" if not config.DRY_RUN else "TEST 🧪"
-        try:
-            tg.send_msg(f"🐲 *Hydra V6.5 Activado*\nModo: `{mode_txt}`\nActivos: {len(config.PAIRS)}")
-        except Exception as e:
-            print(f"⚠️ No se pudo enviar mensaje de inicio: {e}")
+        
+        if tg:
+            try:
+                tg.send_msg(f"🐲 *Hydra V6.5 Activado*\nModo: `{mode_txt}`\nActivos: {len(config.PAIRS)}")
+            except Exception as e:
+                print(f"⚠️ No se pudo enviar mensaje de inicio: {e}")
 
         # --- BUCLE PRINCIPAL ---
         while True:
             try:
-                # Sincronización (Loop cada 10s para no saturar CPU)
+                # Sincronización (Loop cada 10s)
                 time.sleep(10)
                 
-                # Actualizar saldo real en cada ciclo
+                # Actualizar saldo real
                 risk_mgr.balance = api.get_balance_usdt()
 
                 for symbol in config.PAIRS:
                     
-                    # 1. GESTIÓN DE ESTADO (¿Ya tenemos posición?)
+                    # 1. GESTIÓN DE ESTADO
                     current_pos = state.get_position(symbol)
                     
                     # 2. OBTENCIÓN DE DATOS
                     try:
-                        # Descarga de velas
                         df = api.get_historical_data(symbol, limit=300)
                         if df is None or df.empty:
                             continue
                         
                         df['symbol_name'] = symbol
                         
-                        # Cálculo de indicadores (RSI, ATR, Vol_MA)
+                        # Indicadores + Bandas
                         df = processor.calculate_indicators(df)
-                        
-                        # Cálculo de Zonas (VAH/VAL) - ¡AQUÍ ESTÁ LA LÓGICA DE BANDAS!
                         zones = processor.get_volume_profile_zones(df)
                         
                     except Exception as e:
@@ -94,65 +112,66 @@ def main():
                         continue
 
                     # 3. LÓGICA DE TRADING
-                    
-                    # A) BUSCAR ENTRADA (Solo si no estamos comprados)
                     if not current_pos:
-                        # --- CONFIGURACIÓN DE ESTRATEGIA ---
-                        # 1. Buscamos el perfil asignado (Sniper vs Flow)
-                        profile_name = config.ASSET_MAP.get(symbol, 'SNIPER') # Default
+                        # --- ESTRATEGIA ---
+                        profile_name = config.ASSET_MAP.get(symbol, 'SNIPER')
                         
-                        # 2. Cargamos sus parámetros
-                        profile_params = config.PROFILES[profile_name].copy()
+                        # Manejo seguro de configuración de perfiles
+                        if hasattr(config, 'PROFILES') and profile_name in config.PROFILES:
+                            profile_params = config.PROFILES[profile_name].copy()
+                        else:
+                            # Fallback si falla la config
+                            profile_params = {'name': 'DEFAULT', 'risk_type': 'conservative'}
+                            
                         profile_params['name'] = profile_name
-                        # CORRECCIÓN: Agregamos el nombre del símbolo para los logs
                         profile_params['symbol_name'] = symbol  
                         
-                        # 3. PEDIMOS SEÑAL A LA ESTRATEGIA
-                        # Aquí se envían las 'zones' (bandas) y el 'df' (datos)
                         trade = strategy.get_signal(df, zones, profile_params)
                         
                         if trade:
                             print(f"🎯 SEÑAL CONFIRMADA {symbol} [{profile_name}] {trade['type']}")
                             
-                            # Gestión de Riesgo
-                            risk_tier = trade['risk_type']
-                            qty = risk_mgr.calculate_position_size(
-                                trade['entry_price'], 
-                                trade['stop_loss'],
-                                quality=risk_tier 
-                            )
+                            risk_tier = trade.get('risk_type', 'standard')
+                            
+                            # Calcular tamaño
+                            try:
+                                qty = risk_mgr.calculate_position_size(
+                                    trade['entry_price'], 
+                                    trade['stop_loss'], 
+                                    quality=risk_tier 
+                                )
+                            except Exception as e:
+                                print(f"⚠️ Error calculando tamaño: {e}")
+                                qty = 0
                             
                             if qty > 0:
                                 if not config.DRY_RUN:
                                     # EJECUCIÓN REAL
                                     side = 'buy' if trade['type'] == 'LONG' else 'sell'
                                     
-                                    # 1. Orden de Mercado
                                     if api.place_order(symbol, side, qty):
-                                        # 2. Stop Loss
                                         sl_side = 'sell' if side == 'buy' else 'buy'
+                                        # Orden Stop Loss
                                         api.place_order(symbol, sl_side, qty, 'STOP_MARKET', 
                                                        {'stopPrice': trade['stop_loss'], 'closePosition': True})
                                         
-                                        # 3. Guardar Estado
+                                        # Guardar Estado
                                         state.set_entry(symbol, trade['entry_price'], trade['timestamp'], trade['stop_loss'], trade['type'])
                                         
-                                        # 4. Notificar
-                                        emoji = "🟢" if trade['type'] == 'LONG' else "🔴"
-                                        tg.send_msg(f"{emoji} *ENTRADA {symbol}*\nPerfil: `{profile_name}`\nTipo: {trade['type']}\nRisk: `{risk_tier}`")
+                                        # Notificar
+                                        if tg:
+                                            emoji = "🟢" if trade['type'] == 'LONG' else "🔴"
+                                            tg.send_msg(f"{emoji} *ENTRADA {symbol}*\nPerfil: `{profile_name}`\nTipo: {trade['type']}\nRisk: `{risk_tier}`")
                                 else:
                                     print(f"🧪 DRY RUN: {symbol} {trade['type']} Qty: {qty}")
                             else:
-                                print(f"⚠️ Señal válida pero tamaño de posición 0 (Saldo insuficiente o riesgo alto)")
+                                print(f"⚠️ Señal válida pero tamaño de posición 0")
 
-                    # B) GESTIONAR SALIDA (Si ya estamos dentro)
+                    # B) GESTIONAR SALIDA
                     else:
-                        # Aquí podrías verificar si la orden se cerró en Binance para limpiar el estado
-                        # Por ahora confiamos en el SL/TP del exchange, pero limpiamos si ya no hay posición
                         active_symbols = api.get_open_positions_symbols()
                         if symbol not in active_symbols and not config.DRY_RUN:
                              state.clear_position(symbol)
-                             # print(f"🧹 Estado limpiado para {symbol} (Posición cerrada en exchange)")
 
             except KeyboardInterrupt:
                 print("\n🛑 Apagando Hydra...")
@@ -160,7 +179,7 @@ def main():
             except Exception as e:
                 print(f"🔥 Error Crítico en Loop Principal: {e}")
                 traceback.print_exc()
-                time.sleep(30) # Espera de seguridad ante errores graves
+                time.sleep(30)
 
     except Exception as e:
         print(f"🔥 Error de Inicialización General: {e}")

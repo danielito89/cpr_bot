@@ -10,10 +10,10 @@ import config
 
 class BinanceClient:
     def __init__(self):
-        self.exchange = ccxt.binance({
-            'apiKey': config.API_KEY,
-            'secret': config.API_SECRET,
-            'enableRateLimit': True,
+        self.client = ccxt.binance({
+            'apiKey': os.getenv('BINANCE_API_KEY'), 
+            'secret': os.getenv('BINANCE_SECRET'),
+            'enableRateLimit': True
             'options': {
                 'defaultType': 'future'  # Operamos en Futuros
             }
