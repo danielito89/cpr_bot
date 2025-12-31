@@ -7,7 +7,7 @@ from tabulate import tabulate
 
 # Hack para importar la estrategia desde ../bots/breakout/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from bots.breakout.strategy import BreakoutBotStrategy
+from breakout_bot.strategy import BreakoutBotStrategy
 
 # Mapeo de Símbolos Binance -> Yahoo Finance
 SYMBOLS_MAP = {
