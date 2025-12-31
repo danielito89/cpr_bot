@@ -24,17 +24,17 @@ PROFILES = {
     },
     'BREAKOUT': {
         'description': 'Trend Following (Long Only + BE)',
-        'vol_threshold': 1.2,   
+        'vol_threshold': 1.1,   
         'rsi_long': 50,         
         'rsi_short': 50,        
-        'tp_mult': 5.0,         # Buscamos 5R
+        'tp_mult': 4.0,         # Buscamos 5R
         'sl_atr': 1.0,          # SL ajustado
-        'lookback': 288,        # Estructura 24h
-        'max_range_atr': 6.0,   # Filtro de expansión previa
+        'lookback': 144,        # Estructura 24h
+        'max_range_atr': 8.0,   # Filtro de expansión previa
         'mode': 'BREAKOUT',
         'direction': 'LONG_ONLY', # <--- NUEVO FILTRO
         'breakeven_trigger': 1.5, # <--- NUEVO: Si toca +1.5R, mover a BE
-        'cooldown': 96          # 8 Horas
+        'cooldown': 48          # 8 Horas
     }
 }
 
