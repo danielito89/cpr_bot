@@ -174,10 +174,10 @@ if __name__ == "__main__":
     
     # CONFIGURACIONES DE RIESGO
     configs = {
-        'BTC/USDT': {'sl_atr': 1.0, 'tp_partial_atr': 2.5, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.3}, 
-        'ETH/USDT': {'sl_atr': 1.2, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.4},
+        '1000PEPE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}, 
+        'AAVE/USDT': {'sl_atr': 1.2, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.4},
         'SOL/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
-        'LTC/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
+        'ADA/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'DOGE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'BNB/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
     }
