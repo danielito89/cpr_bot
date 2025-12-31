@@ -49,7 +49,7 @@ TEST_MAP = {
     'BTC/USDT':  'SNIPER',   # El Rey sigue en reversión
     'ETH/USDT':  'SNIPER',
     'SOL/USDT':  'BREAKOUT', # ¡Probamos la nueva bestia aquí!
-    # 'AVAX/USDT': 'BREAKOUT'  # Descomenta para probar
+    'AVAX/USDT': 'BREAKOUT'  # Descomenta para probar
 }
 
 # ==============================================================================
