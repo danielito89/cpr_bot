@@ -187,7 +187,7 @@ if __name__ == "__main__":
     configs = {
         'SOL/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'DOGE/USDT':      {'sl_atr': 1.0, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5},
-        'XPL/USDT':  {'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.8},
+        'XPL/USDT':       {'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.8},
         'XRP/USDT':       {'sl_atr': 1.0, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.5},
         'BNB/USDT':       {'sl_atr': 1.0, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.5}
         # Agrega pares para testear
