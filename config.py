@@ -18,8 +18,9 @@ PAIRS_SCALPER = [
 # Monedas explosivas
 PAIRS_BREAKOUT = [
     'SOL/USDT', 
-    'DOGE/USDT',
-    'XRP/USDT'
+    'DOGE/USDT', 
+    'FET/USDT',  # Nueva estrella IA
+    'WIF/USDT'   # Meme Sniper
 ]
 
 # (Mantenemos compatibilidad hacia atrás por si acaso)
@@ -39,6 +40,38 @@ ATR_PERCENTILE = 0.25
 VOLUME_MA_PERIOD = 20
 TP1_RATIO = 1.0
 TP2_RATIO = 3.0
+
+# --- PERFILES DE RIESGO (Breakout) ---
+# Valores validados por tu Backtest de Alta Fidelidad
+RISK_PROFILES_BREAKOUT = {
+    'SOL/USDT': {
+        'sl_atr': 1.5, 
+        'tp_partial_atr': 4.0, 
+        'trailing_dist_atr': 2.5, 
+        'vol_multiplier': 1.5
+    },
+    'DOGE/USDT': {
+        'sl_atr': 1.0, 
+        'tp_partial_atr': 3.0, 
+        'trailing_dist_atr': 2.0, 
+        'vol_multiplier': 1.5
+    },
+    'FET/USDT': {  # Configuración IA
+        'sl_atr': 1.5, 
+        'tp_partial_atr': 5.0, # Dejar correr mucho
+        'trailing_dist_atr': 3.0, 
+        'vol_multiplier': 1.5
+    },
+    'WIF/USDT': {  # Configuración Meme Volátil
+        'sl_atr': 2.5, # Mucho aire
+        'tp_partial_atr': 6.0, 
+        'trailing_dist_atr': 3.5, 
+        'vol_multiplier': 1.8 # Solo volumen muy alto
+    },
+    'DEFAULT': { # Por seguridad
+        'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5
+    }
+}
 
 # --- PERFILES DE ACTIVOS ---
 ASSET_MAP = {
