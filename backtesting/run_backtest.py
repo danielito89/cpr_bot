@@ -18,7 +18,7 @@ except ImportError:
 
 # Configuración
 TIMEFRAME = '4h'
-SINCE_STR = "2023-06-01 00:00:00"
+SINCE_STR = "2023-07-01 00:00:00"
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 
 # Crear carpeta de datos si no existe
@@ -40,8 +40,11 @@ def fetch_full_history(symbol, timeframe, since_str):
         return df
 
     print(f"📥 Descargando historial completo de {symbol} desde Binance...")
-    exchange = ccxt.binance({'enableRateLimit': True})
-    
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'future'}
+    })
+    exchange.load_markets()
     since = exchange.parse8601(since_str)
     all_ohlcv = []
     
@@ -174,7 +177,7 @@ if __name__ == "__main__":
     
     # CONFIGURACIONES DE RIESGO
     configs = {
-        '1000PEPE/USDT:USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}, 
+        '1000PEPE/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}, 
         'TRX/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'SOL/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
         'XRP/USDT': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5},
