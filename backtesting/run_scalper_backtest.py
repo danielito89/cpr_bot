@@ -24,19 +24,19 @@ TRADING_HOURS = [] # 24/7 por defecto
 PROFILES = {
     'SNIPER': { # Para BTC/ETH
         'vol_threshold': 1.2,   # Exigir 20% más volumen que la media
-        'rsi_long': 35,         # Sobreventa fuerte
-        'rsi_short': 65,        # Sobrecompra fuerte
-        'tp_mult': 2.5,         # TP moderado
+        'rsi_long': 40,         # Sobreventa fuerte
+        'rsi_short': 60,        # Sobrecompra fuerte
+        'tp_mult': 3,         # TP moderado
         'sl_atr': 1.0,          # Stop ajustado
         'cooldown': 12          # 1 hora de espera
     },
     'FLOW': {   # Para SOL
-        'vol_threshold': 0.8,   # Más permisivo
-        'rsi_long': 45,
-        'rsi_short': 55,
+        'vol_threshold': 0.6,   # Más permisivo
+        'rsi_long': 50,
+        'rsi_short': 50,
         'tp_mult': 2.0,         # Scalping rápido
         'sl_atr': 1.5,          # Más aire
-        'cooldown': 6           # 30 min de espera
+        'cooldown': 12           # 30 min de espera
     }
 }
 
