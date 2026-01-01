@@ -7,67 +7,49 @@ import time
 from datetime import datetime
 from tabulate import tabulate
 
-# --- IMPORTACIÓN DE ESTRATEGIA (Mismo Cerebro que 4H) ---
+# --- IMPORTACIÓN DE ESTRATEGIA ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from bots.breakout.strategy import BreakoutBotStrategy
 
-# --- CONFIGURACIÓN DEL EXPERIMENTO 1H ---
-TIMEFRAME = '1h'  # <--- VELOCIDAD RÁPIDA
-SINCE_STR = "2024-01-01 00:00:00" # Solo mercado reciente
+# --- CONFIGURACIÓN DEL EXPERIMENTO ---
+TIMEFRAME = '1h'
+# Descargamos desde 2023 para tener contexto histórico
+SINCE_STR = "2022-01-01 00:00:00" 
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 FEE_TAKER = 0.0006 
 
 if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 
-# --- CONFIGURACIONES ESPECÍFICAS PARA 1H ---
-# Teoría: En 1H hay más ruido. Necesitamos:
-# 1. SL más holgado (ATR 2.0) para aguantar mechas.
-# 2. Volumen MUY alto (2.0x) para evitar falsas rupturas.
+# AÑOS A TESTEAR (Separados para ver consistencia)
+TEST_YEARS = [2022, 2023, 2024, 2025] 
+
+# TUS CONFIGURACIONES GANADORAS
 configs = {
-    'DOGE/USDT': {
-        'sl_atr': 2.0, 
-        'tp_partial_atr': 4.0, 
-        'trailing_dist_atr': 2.5, 
-        'vol_multiplier': 1.8
-    },
-    'FET/USDT': {
-        'sl_atr': 2.0, 
-        'tp_partial_atr': 6.0, 
-        'trailing_dist_atr': 3.0, 
-        'vol_multiplier': 1.7
-    },
-    'WIF/USDT': {
-        'sl_atr': 2.5, 
-        'tp_partial_atr': 4.0, 
-        'trailing_dist_atr': 3.5, 
-        'vol_multiplier': 1.8 # WIF en 1H es una locura, filtro máximo
-    },
-    '1000PEPE/USDT': {
-        'sl_atr': 2.5, 
-        'tp_partial_atr': 6.0, 
-        'trailing_dist_atr': 3.5, 
-        'vol_multiplier': 1.8
-    },
-    'AVAX/USDT': {
-        'sl_atr': 2.5, 
-        'tp_partial_atr': 5.0, 
-        'trailing_dist_atr': 3.5, 
-        'vol_multiplier': 1.8
-    }
+    'DOGE/USDT': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.8},
+    'FET/USDT':  {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.7},
+    'WIF/USDT':  {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.8},
+    '1000PEPE/USDT': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.8},
+    'AVAX/USDT': {'sl_atr': 2.5, 'tp_partial_atr': 5.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.8},
+    'SOL/USDT':  {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}
 }
 
 def fetch_full_history(symbol, timeframe, since_str):
     safe_symbol = symbol.replace('/', '_').replace(':', '_')
-    csv_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}_2024.csv")
+    csv_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}_FULL.csv")
     
+    # Si existe, cargamos y chequeamos si tiene datos viejos
     if os.path.exists(csv_path):
-        print(f"📂 Cargando {symbol} ({timeframe}) desde caché...")
+        print(f"📂 Cargando {symbol} desde caché...", end=" ")
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
-        return df
+        # Si el caché empieza después de lo que pedimos, forzamos descarga nueva
+        if df.index[0] > pd.to_datetime(since_str):
+            print("Datos insuficientes (necesitamos 2023). Descargando de nuevo...")
+        else:
+            print("OK.")
+            return df
 
-    print(f"📥 Descargando {symbol} {timeframe} (Futuros)...")
+    print(f"📥 Descargando historial completo {symbol}...")
     exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    
     since = exchange.parse8601(since_str)
     all_ohlcv = []
     
@@ -77,7 +59,6 @@ def fetch_full_history(symbol, timeframe, since_str):
             if not ohlcv: break
             all_ohlcv.extend(ohlcv)
             since = ohlcv[-1][0] + 1
-            # Paramos si llegamos a hoy
             if ohlcv[-1][0] >= (exchange.milliseconds() - 3600 * 1000): break
             time.sleep(exchange.rateLimit / 1000)
         except Exception as e:
@@ -85,7 +66,6 @@ def fetch_full_history(symbol, timeframe, since_str):
             break
     
     if not all_ohlcv: return pd.DataFrame()
-
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
@@ -94,20 +74,20 @@ def fetch_full_history(symbol, timeframe, since_str):
     return df
 
 def run_fidelity_simulation(symbol, df, strategy_params):
-    # Instanciamos la estrategia REAL
     strategy = BreakoutBotStrategy()
     strategy.sl_atr = strategy_params['sl_atr']
     strategy.tp_partial_atr = strategy_params['tp_partial_atr']
     strategy.trailing_dist_atr = strategy_params['trailing_dist_atr']
     strategy.vol_multiplier = strategy_params['vol_multiplier']
 
+    # Calculamos indicadores sobre TODO el dataframe para no perder EMAs al cortar años
     df = strategy.calculate_indicators(df.copy())
-    state = {'status': 'WAITING_BREAKOUT'}
     
+    state = {'status': 'WAITING_BREAKOUT'}
     trades = []
     equity = 1000.0
     
-    # Bucle vela a vela
+    # IMPORTANTE: Empezamos en 200 para tener indicadores listos
     for i in range(200, len(df)):
         current_window = df.iloc[:i+1]
         current_date = current_window.index[-1]
@@ -136,8 +116,6 @@ def run_fidelity_simulation(symbol, df, strategy_params):
             fee = (equity * 0.5) * FEE_TAKER
             equity += (gross_profit - fee)
             
-            trades.append([current_date, symbol, 'PARTIAL', pnl_pct*100, equity])
-            
             state.update({
                 'position_size_pct': 0.5,
                 'stop_loss': signal['new_sl'],
@@ -159,7 +137,6 @@ def run_fidelity_simulation(symbol, df, strategy_params):
             fee = amount * FEE_TAKER
             equity += (gross_profit - fee)
             
-            trades.append([current_date, symbol, action, pnl_pct*100, equity])
             state = {'status': 'COOLDOWN', 'last_exit_time': str(current_date)}
 
         elif 'new_status' in signal:
@@ -167,26 +144,47 @@ def run_fidelity_simulation(symbol, df, strategy_params):
             if 'breakout_level' in signal: state['breakout_level'] = signal['breakout_level']
             if 'atr_at_breakout' in signal: state['atr_at_breakout'] = signal['atr_at_breakout']
             
-    return equity, len(trades)
+    return equity, len(trades) # (Nota: equity es acumulativo)
 
 if __name__ == "__main__":
-    results = []
-    print(f"🚀 BACKTEST BREAKOUT RÁPIDO (1H) - 2024")
-    print(f"🌊 Vol Multiplier: High (Filtro de Ruido)")
+    print(f"🚀 BACKTEST ANUALIZADO (1H) - {SINCE_STR[:4]} a HOY")
     
-    for symbol, params in configs.items():
-        try:
-            df = fetch_full_history(symbol, TIMEFRAME, SINCE_STR)
-            if df.empty: continue
+    for year in TEST_YEARS:
+        results = []
+        print(f"\n📅 AÑO: {year}")
+        print("="*60)
+        
+        total_profit = 0
+        
+        for symbol, params in configs.items():
+            try:
+                # 1. Obtenemos todo el historial
+                df_full = fetch_full_history(symbol, TIMEFRAME, SINCE_STR)
+                if df_full.empty: continue
 
-            final_cap, num_trades = run_fidelity_simulation(symbol, df, params)
-            
-            roi = ((final_cap - 1000) / 1000) * 100
-            color_roi = f"\033[92m{roi:.2f}%\033[0m" if roi > 0 else f"\033[91m{roi:.2f}%\033[0m"
-            results.append([symbol, num_trades, f"${final_cap:.2f}", color_roi])
-            
-        except Exception as e:
-            print(f"Error {symbol}: {e}")
+                # 2. FILTRADO POR AÑO
+                # Creamos una copia que solo contiene los datos de ESE año
+                df_year = df_full[df_full.index.year == year].copy()
+                
+                if df_year.empty:
+                    # Caso WIF/PEPE que quizas no existian a principios de 2023 en futuros
+                    results.append([symbol, 0, "N/A", "N/A"])
+                    continue
 
-    print("\n📊 RESULTADOS 1H (Capital Inicial $1000)")
-    print(tabulate(results, headers=['Par', '# Trades', 'Capital Final', 'ROI %'], tablefmt='grid'))
+                # 3. Corremos simulación solo en ese año
+                # Reiniciamos capital a $1000 cada año para comparar ROI limpio
+                final_cap, _ = run_fidelity_simulation(symbol, df_year, params)
+                
+                roi = ((final_cap - 1000) / 1000) * 100
+                profit = final_cap - 1000
+                
+                color_roi = f"\033[92m{roi:.2f}%\033[0m" if roi > 0 else f"\033[91m{roi:.2f}%\033[0m"
+                results.append([symbol, f"${final_cap:.2f}", color_roi])
+                total_profit += profit
+                
+            except Exception as e:
+                # print(f"Error {symbol}: {e}") # Debug
+                results.append([symbol, "ERROR", str(e)[:10]])
+
+        print(tabulate(results, headers=['Par', 'Capital Final ($1000)', 'ROI %'], tablefmt='grid'))
+        print(f"💰 PnL Año {year}: ${total_profit:.2f}")
