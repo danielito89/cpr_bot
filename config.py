@@ -64,12 +64,6 @@ RISK_PROFILES_BREAKOUT = {
         'trailing_dist_atr': 3.5, 
         'vol_multiplier': 1.8
     },
-    'AVAX/USDT': {
-        'sl_atr': 2.5, 
-        'tp_partial_atr': 5.0, 
-        'trailing_dist_atr': 3.5, 
-        'vol_multiplier': 1.8
-    },
 
     # --- DIVISIÓN LENTA (4H) ---
     'SOL/USDT': {
