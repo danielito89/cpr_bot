@@ -13,7 +13,8 @@ PAIRS_FAST = [
     'DOGE/USDT',
     '1000PEPE/USDT',
     'WIF/USDT',
-    'FET/USDT'
+    'FET/USDT',
+    'AVAX/USDT'  # Configurado agresivo, va a 1H
 ]
 
 # B) DIVISIÓN LENTA "SLOW" (Timeframe 4H)
@@ -41,7 +42,7 @@ RISK_PROFILES_BREAKOUT = {
     # --- DIVISIÓN RÁPIDA (1H) ---
     'DOGE/USDT': {
         'sl_atr': 2.0, 
-        'tp_partial_atr': 5.0, 
+        'tp_partial_atr': 4.0, 
         'trailing_dist_atr': 2.5, 
         'vol_multiplier': 1.8
     },

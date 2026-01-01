@@ -32,7 +32,7 @@ configs = {
     },
     'FET/USDT': {
         'sl_atr': 2.0, 
-        'tp_partial_atr': 4.0, 
+        'tp_partial_atr': 5.0, 
         'trailing_dist_atr': 3.0, 
         'vol_multiplier': 1.7
     },
@@ -44,13 +44,13 @@ configs = {
     },
     '1000PEPE/USDT': {
         'sl_atr': 2.5, 
-        'tp_partial_atr': 5.0, 
+        'tp_partial_atr': 6.0, 
         'trailing_dist_atr': 3.5, 
         'vol_multiplier': 1.8
     },
     'AVAX/USDT': {
         'sl_atr': 2.5, 
-        'tp_partial_atr': 4.0, 
+        'tp_partial_atr': 5.0, 
         'trailing_dist_atr': 3.5, 
         'vol_multiplier': 1.8
     }
