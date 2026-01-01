@@ -13,7 +13,7 @@ START_DATE = "2024-01-01 00:00:00"
 END_DATE   = "2024-12-31 23:59:59"
 
 # Horario (Opcional, dejar vacío para 24/7)
-TRADING_HOURS = [8,9,10,11,12,13,14,15,16,17,18,19,20] 
+TRADING_HOURS = [] 
 
 PROFILES = {
     'SNIPER': { # BTC/ETH
@@ -35,8 +35,8 @@ PROFILES = {
 }
 
 TEST_MAP = {
-    'BTC/USDT': 'SNIPER',
-    'ETH/USDT': 'SNIPER',
+    'BTC/USDT': 'FLOW',
+    'ETH/USDT': 'FLOW',
     'SOL/USDT': 'FLOW'
 }
 
