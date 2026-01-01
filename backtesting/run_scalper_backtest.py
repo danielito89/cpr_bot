@@ -18,7 +18,7 @@ END_DATE   = "2024-12-31 23:59:59"
 # London Open aprox 07:00 UTC | NY Open aprox 13:00 UTC
 # Ejemplo: Solo operar de 8 AM a 4 PM UTC:
 # TRADING_HOURS = list(range(8, 17)) 
-TRADING_HOURS = [] # 24/7 por defecto
+TRADING_HOURS = [8,9,10,11,12,13,14,15,16,17,18,19,20] # 24/7 por defecto
 
 # 3. PERFILES DE ESTRATEGIA (Tus "Perillas")
 PROFILES = {
