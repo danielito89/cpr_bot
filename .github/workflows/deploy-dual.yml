@@ -35,6 +35,7 @@ jobs:
             sudo systemctl restart cpr_dashboard
             sudo systemctl restart breakout_fast
             sudo systemctl restart breakout_slow
+            sudo systemctl restart hydra_commander
             echo "✅ Producción actualizada y reiniciada."
 
       # ---------------------------------------------------

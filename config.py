@@ -54,7 +54,7 @@ RISK_PROFILES_BREAKOUT = {
     },
     'WIF/USDT': {
         'sl_atr': 2.5, 
-        'tp_partial_atr': 6.0, 
+        'tp_partial_atr': 4.0, 
         'trailing_dist_atr': 3.5, 
         'vol_multiplier': 1.8 
     },
@@ -66,7 +66,7 @@ RISK_PROFILES_BREAKOUT = {
     },
     'AVAX/USDT': {
         'sl_atr': 2.5, 
-        'tp_partial_atr': 4.0, 
+        'tp_partial_atr': 5.0, 
         'trailing_dist_atr': 3.5, 
         'vol_multiplier': 1.8
     },
