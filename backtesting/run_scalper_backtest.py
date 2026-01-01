@@ -13,12 +13,12 @@ END_DATE   = "2024-12-31 23:59:59"
 
 PROFILES = {
     'TREND_SCALPER': { 
-        'vol_threshold': 1.0,   
-        'rsi_long': 35,         # Solo comprar si está MUY sobrevendido
-        'rsi_short': 65,        # Solo vender si está MUY sobrecomprado
-        'tp_mult': 2.0,         # TP más conservador
+        'vol_threshold': 0.8,   
+        'rsi_long': 45,         # Solo comprar si está MUY sobrevendido
+        'rsi_short': 55,        # Solo vender si está MUY sobrecomprado
+        'tp_mult': 1.5,         # TP más conservador
         'sl_atr': 1.5,          # Stop estándar
-        'cooldown': 8          
+        'cooldown': 6          
     }
 }
 
