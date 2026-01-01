@@ -24,7 +24,7 @@ PROFILES = {
         'sl_atr': 1.5,          # SL Estructural
         'cooldown': 12          
     },
-    'FLOW': {   # SOL
+    'FLOW': {   # ALTS
         'vol_threshold': 0.8,   
         'rsi_long': 45,
         'rsi_short': 55,
@@ -35,9 +35,10 @@ PROFILES = {
 }
 
 TEST_MAP = {
-    'BTC/USDT': 'FLOW',
-    'ETH/USDT': 'FLOW',
-    'SOL/USDT': 'FLOW'
+    'AVAX/USDT': 'FLOW',
+    'BNB/USDT': 'FLOW',
+    'SOL/USDT': 'FLOW',
+    'DOGE/USDT':'FLOW'
 }
 
 # ==============================================================================
