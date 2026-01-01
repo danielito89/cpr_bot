@@ -25,9 +25,9 @@ PROFILES = {
         'cooldown': 12          
     },
     'FLOW': {   # ALTS
-        'vol_threshold': 0.8,   
-        'rsi_long': 45,
-        'rsi_short': 55,
+        'vol_threshold': 0.6,   
+        'rsi_long': 50,
+        'rsi_short': 50,
         'tp_mult': 2.0,         
         'sl_atr': 1.5,
         'cooldown': 6           
