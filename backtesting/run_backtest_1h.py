@@ -24,27 +24,27 @@ if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 # 1. SL más holgado (ATR 2.0) para aguantar mechas.
 # 2. Volumen MUY alto (2.0x) para evitar falsas rupturas.
 configs = {
-    'DOGE/USDT': {
+        'DOGE/USDT': {
         'sl_atr': 2.0, 
-        'tp_partial_atr': 5.0, 
+        'tp_partial_atr': 4.0, 
         'trailing_dist_atr': 2.5, 
         'vol_multiplier': 1.8
     },
     'FET/USDT': {
         'sl_atr': 2.0, 
-        'tp_partial_atr': 6.0, 
+        'tp_partial_atr': 4.0, 
         'trailing_dist_atr': 3.0, 
         'vol_multiplier': 1.7
     },
     'WIF/USDT': {
         'sl_atr': 2.5, 
-        'tp_partial_atr': 6.0, 
+        'tp_partial_atr': 4.0, 
         'trailing_dist_atr': 3.5, 
         'vol_multiplier': 1.8 # WIF en 1H es una locura, filtro máximo
     },
     '1000PEPE/USDT': {
         'sl_atr': 2.5, 
-        'tp_partial_atr': 6.0, 
+        'tp_partial_atr': 5.0, 
         'trailing_dist_atr': 3.5, 
         'vol_multiplier': 1.8
     },
