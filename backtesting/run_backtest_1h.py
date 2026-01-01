@@ -26,27 +26,27 @@ if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 configs = {
     'SOL/USDT': {
         'sl_atr': 2.0, 
-        'tp_partial_atr': 5.0, 
+        'tp_partial_atr': 4.0, 
         'trailing_dist_atr': 3.0, 
-        'vol_multiplier': 2.0 # Filtro estricto
+        'vol_multiplier': 1.6 # Filtro estricto
     },
     'DOGE/USDT': {
         'sl_atr': 2.0, 
         'tp_partial_atr': 4.0, 
         'trailing_dist_atr': 2.5, 
-        'vol_multiplier': 2.0
+        'vol_multiplier': 1.8
     },
     'FET/USDT': {
         'sl_atr': 2.0, 
         'tp_partial_atr': 6.0, 
         'trailing_dist_atr': 3.0, 
-        'vol_multiplier': 1.8
+        'vol_multiplier': 1.6
     },
     'WIF/USDT': {
         'sl_atr': 2.5, 
         'tp_partial_atr': 6.0, 
         'trailing_dist_atr': 3.5, 
-        'vol_multiplier': 2.2 # WIF en 1H es una locura, filtro máximo
+        'vol_multiplier': 1.8 # WIF en 1H es una locura, filtro máximo
     }
 }
 
