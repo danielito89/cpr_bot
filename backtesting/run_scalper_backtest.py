@@ -115,7 +115,7 @@ def calculate_indicators(df):
     return df.dropna()
 
 def run_simulation():
-    print(f"\n🧪 SCALPER BACKTEST 3.0 (LOGIC FIX)")
+    print(f"\n🧪 SCALPER BACKTEST 4.0 (CON BREAKEVEN LOGIC)")
     print("="*60)
     
     total_r = 0
@@ -144,7 +144,6 @@ def run_simulation():
         vals = df['VAL'].values
         timestamps = df.index
         
-        # Empezamos en 300 para asegurar bandas estables
         for i in range(300, len(df)-12):
             if cooldown > 0: 
                 cooldown -= 1
@@ -153,17 +152,12 @@ def run_simulation():
             if TRADING_HOURS and timestamps[i].hour not in TRADING_HOURS:
                 continue
 
-            # Filtro Volumen
             if vols[i] < (vol_mas[i] * params['vol_threshold']): continue
             
             signal = None
             sl_price = 0
             
-            # --- FIX 1: LÓGICA DE CONFIRMACIÓN (2 VELAS) ---
-            
-            # LONG:
-            # 1. Vela ANTERIOR (i-1): Pinchó la banda de abajo (Rechazo) pero cerró cerca o dentro.
-            # 2. Vela ACTUAL (i): Es alcista (Close > Open) y rompe el máximo anterior.
+            # --- LÓGICA DE ENTRADA (MANTENEMOS LA V3) ---
             touched_prev = lows[i-1] <= vals[i-1] and closes[i-1] > vals[i-1]
             confirm_curr = closes[i] > highs[i-1] and closes[i] > opens[i]
             
@@ -172,9 +166,6 @@ def run_simulation():
                      signal = 'LONG'
                      sl_price = closes[i] - (atrs[i] * params['sl_atr'])
 
-            # SHORT:
-            # 1. Vela ANTERIOR: Pinchó arriba.
-            # 2. Vela ACTUAL: Bajista y rompe mínimo anterior.
             touched_prev_high = highs[i-1] >= vahs[i-1] and closes[i-1] < vahs[i-1]
             confirm_curr_low = closes[i] < lows[i-1] and closes[i] < opens[i]
 
@@ -183,7 +174,7 @@ def run_simulation():
                      signal = 'SHORT'
                      sl_price = closes[i] + (atrs[i] * params['sl_atr'])
             
-            # --- SIMULACIÓN DE RESULTADO ---
+            # --- SIMULACIÓN DE RESULTADO CON BREAKEVEN ---
             if signal:
                 entry = closes[i]
                 risk = abs(entry - sl_price)
@@ -192,38 +183,71 @@ def run_simulation():
                 tp_dist = risk * params['tp_mult']
                 tp_price = entry + tp_dist if signal == 'LONG' else entry - tp_dist
                 
-                outcome_r = 0
-                trade_duration = 0
+                # PRECIO DE ACTIVACIÓN DE BREAKEVEN (A 1R de distancia)
+                be_trigger = entry + risk if signal == 'LONG' else entry - risk
                 
-                # FIX 4: SIN TIME EXIT FORZADO (Solo TP o SL)
-                # Buscamos hasta 288 velas (24 horas) para dar espacio
+                outcome_r = 0
+                sl_moved_to_be = False # Bandera de estado
+                
+                # Buscamos en el futuro
                 for j in range(1, 288): 
                     idx = i + j
                     if idx >= len(closes): break
                     
+                    current_low = lows[idx]
+                    current_high = highs[idx]
+
                     if signal == 'LONG':
-                        if lows[idx] <= sl_price: outcome_r = -1.0; break
-                        if highs[idx] >= tp_price: outcome_r = params['tp_mult']; break
-                    else:
-                        if highs[idx] >= sl_price: outcome_r = -1.0; break
-                        if lows[idx] <= tp_price: outcome_r = params['tp_mult']; break
+                        # 1. Chequear SL actual
+                        if current_low <= sl_price: 
+                            if sl_moved_to_be: outcome_r = 0.0 # Salimos a precio de entrada
+                            else: outcome_r = -1.0 # SL Completo
+                            break
+                        
+                        # 2. Chequear TP
+                        if current_high >= tp_price: 
+                            outcome_r = params['tp_mult']
+                            break
+                        
+                        # 3. Chequear si movemos a BE
+                        if not sl_moved_to_be and current_high >= be_trigger:
+                            sl_price = entry # Stop Loss ahora es la entrada
+                            sl_moved_to_be = True # ¡Stop asegurado!
+
+                    else: # SHORT
+                        if current_high >= sl_price: 
+                            if sl_moved_to_be: outcome_r = 0.0
+                            else: outcome_r = -1.0
+                            break
+                        
+                        if current_low <= tp_price: 
+                            outcome_r = params['tp_mult']
+                            break
+                            
+                        if not sl_moved_to_be and current_low <= be_trigger:
+                            sl_price = entry
+                            sl_moved_to_be = True
                     
-                    # Si pasan 24h, cerramos al mercado (Time Stop de Emergencia)
+                    # Time Stop (Cierre forzado a las 24h)
                     if j == 287:
                         current_pnl = (closes[idx] - entry) if signal == 'LONG' else (entry - closes[idx])
                         outcome_r = current_pnl / risk
                 
-                # Fees
+                # Fees (Siempre pagamos fees, incluso en BE)
                 r_net = outcome_r - 0.05 
                 
                 trades.append(r_net)
-                cooldown = params['cooldown'] # Este cooldown ahora sí sirve porque hay menos señales
+                cooldown = params['cooldown']
         
         # Reporte
         if trades:
             net_r_symbol = sum(trades)
+            # Win Rate real: Ganancias > 0
             win_rate = len([x for x in trades if x > 0]) / len(trades)
-            print(f" -> {symbol: <10} [{profile_name}]: {len(trades):3d} trades | WR: {win_rate:.0%} | R Neto: {net_r_symbol:+.2f} R")
+            # Break Even Rate: Trades que terminaron cerca de 0 (entre -0.1 y 0.1)
+            be_rate = len([x for x in trades if -0.1 <= x <= 0.1]) / len(trades)
+            
+            print(f" -> {symbol: <10} [{profile_name}]: {len(trades):3d} trades | WR: {win_rate:.0%} | BE: {be_rate:.0%} | R Neto: {net_r_symbol:+.2f} R")
             total_r += net_r_symbol
         else:
             print(f" -> {symbol: <10} [{profile_name}]:   0 trades")
