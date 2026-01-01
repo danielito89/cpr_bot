@@ -33,7 +33,8 @@ jobs:
             
             # Reiniciar el bot para aplicar cambios
             sudo systemctl restart cpr_dashboard
-            sudo systemctl restart breakout_sol
+            sudo systemctl restart breakout_fast
+            sudo systemctl restart breakout_slow
             echo "✅ Producción actualizada y reiniciada."
 
       # ---------------------------------------------------

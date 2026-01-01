@@ -3,53 +3,66 @@ import subprocess
 import json
 import os
 import glob
+import sys
 from datetime import datetime
 
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN ---
-# Ajusta esta ruta a donde tengas la carpeta raíz de tu suite
+# Ajusta esta ruta a la carpeta raíz de tu bot
 BASE_PATH = "/home/ubuntu/bot_cpr" 
 
+# Importamos la configuración para saber qué par es qué
+sys.path.append(BASE_PATH)
+try:
+    import config
+    PAIRS_FAST = getattr(config, 'PAIRS_FAST', [])
+    PAIRS_SLOW = getattr(config, 'PAIRS_SLOW', [])
+except ImportError:
+    PAIRS_FAST = []
+    PAIRS_SLOW = []
+
 # Rutas de estados
-SCALPER_STATE = os.path.join(BASE_PATH, "bots", "scalper", "state_scalper.json")
 BREAKOUT_DIR = os.path.join(BASE_PATH, "bots", "breakout")
 
-# Servicios de Systemd (para los logs)
-SERVICES = ["scalper_pro", "breakout_sol"] 
+# Servicios de Systemd para leer logs
+SERVICES = ["breakout_fast", "breakout_slow"] 
 
-# --- HTML TEMPLATE (DARK MODE PRO - UPDATED) ---
+# --- HTML TEMPLATE (DARK MODE ULTRA) ---
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>HYDRA COMMAND CENTER</title>
+    <title>HYDRA HIBRID CENTER</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="refresh" content="10">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --green: #2ea043; --red: #da3633; --orange: #d29922; --purple: #a371f7; }
+        :root { --bg: #090c10; --card: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --green: #2ea043; --red: #da3633; --orange: #d29922; --purple: #a371f7; --fire: #f0883e; }
         body { background-color: var(--bg); color: var(--text); font-family: 'JetBrains Mono', monospace; padding: 20px; margin: 0; }
         .container { max-width: 1200px; margin: 0 auto; display: grid; gap: 20px; }
+        
         .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; }
         
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; }
         .stat-card { background: var(--card); border: 1px solid var(--border); padding: 15px; border-radius: 6px; text-align: center; }
         .stat-value { font-size: 1.5rem; font-weight: bold; color: var(--accent); }
         .stat-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; }
-        .warning { color: var(--orange); } .danger { color: var(--red); }
-
+        
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { text-align: left; padding: 10px; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
-        th { color: #8b949e; font-size: 0.8rem; text-transform: uppercase; }
-        .badge { padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
-        .badge-long { background: rgba(46, 160, 67, 0.15); color: var(--green); border: 1px solid var(--green); }
-        .badge-short { background: rgba(218, 54, 51, 0.15); color: var(--red); border: 1px solid var(--red); }
-        .badge-bot { background: rgba(88, 166, 255, 0.15); color: var(--accent); border: 1px solid var(--border); margin-right: 5px;}
-        .badge-breakout { background: rgba(163, 113, 247, 0.15); color: var(--purple); border: 1px solid var(--border); margin-right: 5px;}
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+        th { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
+        
+        .badge { padding: 3px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; border: 1px solid transparent; }
+        .badge-long { background: rgba(46, 160, 67, 0.15); color: var(--green); border-color: var(--green); }
+        .badge-short { background: rgba(218, 54, 51, 0.15); color: var(--red); border-color: var(--red); }
+        
+        .badge-fast { background: rgba(240, 136, 62, 0.15); color: var(--fire); border-color: var(--fire); }
+        .badge-slow { background: rgba(88, 166, 255, 0.15); color: var(--accent); border-color: var(--accent); }
 
-        .log-box { background: #000; padding: 15px; border-radius: 6px; border: 1px solid var(--border); height: 400px; overflow-y: auto; font-size: 0.85rem; color: #8b949e; white-space: pre-wrap; }
-        h2 { font-size: 1rem; margin-top: 0; color: var(--text); display: flex; align-items: center; gap: 10px; }
+        .log-box { background: #000; padding: 15px; border-radius: 6px; border: 1px solid var(--border); height: 450px; overflow-y: auto; font-size: 0.80rem; color: #8b949e; white-space: pre-wrap; font-family: 'Courier New', monospace; }
+        
+        h2 { font-size: 1rem; margin-top: 0; color: var(--text); display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 15px;}
         .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
         .dot-green { background: var(--green); box-shadow: 0 0 8px var(--green); }
     </style>
@@ -58,27 +71,27 @@ HTML = """
     <div class="container">
         <div class="header">
             <div>
-                <h1 style="margin:0; font-size:1.5rem;">🐲 HYDRA <span style="color:var(--accent)">SUITE</span></h1>
-                <div style="font-size:0.8rem; color:#8b949e; margin-top:5px;">Scalper & Breakout Integration | Multi-Service</div>
+                <h1 style="margin:0; font-size:1.5rem;">🐲 HYDRA <span style="color:var(--fire)">HYBRID</span></h1>
+                <div style="font-size:0.8rem; color:#8b949e; margin-top:5px;">Engine: Breakout | Dual Velocity (1H/4H)</div>
             </div>
             <div style="text-align:right;">
-                <div style="font-size:1.2rem;">{{ time_now }}</div>
-                <div style="font-size:0.8rem; color:#8b949e;">UTC TIME</div>
+                <div style="font-size:1.2rem; font-weight:bold;">{{ time_now }}</div>
+                <div style="font-size:0.8rem; color:#8b949e;">UTC SYSTEM</div>
             </div>
         </div>
 
         <div class="stats-grid">
             <div class="stat-card">
-                <div class="stat-value {{ cpu_color }}">{{ cpu_usage }}</div>
-                <div class="stat-label">CPU LOAD</div>
+                <div class="stat-value" style="color:{{ cpu_color }}">{{ cpu_usage }}</div>
+                <div class="stat-label">CPU</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value {{ ram_color }}">{{ ram_usage }}</div>
-                <div class="stat-label">RAM USAGE</div>
+                <div class="stat-value" style="color:{{ ram_color }}">{{ ram_usage }}</div>
+                <div class="stat-label">RAM</div>
             </div>
             <div class="stat-card">
                 <div class="stat-value" style="color:var(--text)">{{ active_positions_count }}</div>
-                <div class="stat-label">TOTAL POSITIONS</div>
+                <div class="stat-label">OPEN TRADES</div>
             </div>
         </div>
 
@@ -88,11 +101,12 @@ HTML = """
             <table>
                 <thead>
                     <tr>
-                        <th>BOT</th>
+                        <th>ENGINE</th>
                         <th>PAIR</th>
                         <th>SIDE</th>
                         <th>ENTRY</th>
-                        <th>SL / TP</th>
+                        <th>STOP LOSS</th>
+                        <th>PROFIT TARGET</th>
                         <th>STATUS</th>
                     </tr>
                 </thead>
@@ -100,28 +114,36 @@ HTML = """
                     {% for p in positions %}
                     <tr>
                         <td>
-                            <span class="badge {{ 'badge-bot' if p.bot == 'SCALPER' else 'badge-breakout' }}">
-                                {{ p.bot }}
+                            <span class="badge {{ 'badge-fast' if p.type == 'FAST' else 'badge-slow' }}">
+                                {{ '🔥 FAST 1H' if p.type == 'FAST' else '🐢 SLOW 4H' }}
                             </span>
                         </td>
                         <td style="font-weight:bold; color:#fff;">{{ p.symbol }}</td>
                         <td><span class="badge {{ 'badge-long' if p.side == 'LONG' else 'badge-short' }}">{{ p.side }}</span></td>
                         <td>${{ p.entry }}</td>
-                        <td>SL: ${{ p.sl }} <br> <span style="color:#8b949e; font-size:0.8em">TP: {{ p.tp }}</span></td>
-                        <td>{{ p.status }}</td>
+                        <td style="color:var(--red)">${{ p.sl }}</td>
+                        <td style="color:var(--green)">${{ p.tp }}</td>
+                        <td>
+                            {% if p.trailing %}
+                                <span style="color:var(--accent)">🛡️ Trailing</span>
+                            {% else %}
+                                <span style="color:#8b949e">Targeting</span>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
             {% else %}
-            <div style="padding:20px; text-align:center; color:#8b949e; font-style:italic;">
-                Scanning markets... No active positions in ecosystem.
+            <div style="padding:40px; text-align:center; color:#8b949e; font-style:italic;">
+                <div>⚡ All systems operational. Scanning for breakouts...</div>
+                <div style="margin-top:10px; font-size:0.8rem;">Waiting for candle closures (1H / 4H)</div>
             </div>
             {% endif %}
         </div>
 
         <div>
-            <h2>SYSTEM LOGS (Merged)</h2>
+            <h2>SYSTEM LOGS (Breakout Fast & Slow)</h2>
             <div class="log-box">{{ logs }}</div>
         </div>
 
@@ -133,7 +155,6 @@ HTML = """
 # --- BACKEND LOGIC ---
 
 def get_sys_stats():
-    """Métricas del servidor"""
     try:
         load = os.getloadavg()[0]
         out = subprocess.check_output("free -m", shell=True).decode()
@@ -143,65 +164,44 @@ def get_sys_stats():
         used_mem = int(mem_line[2])
         ram_pct = int((used_mem / total_mem) * 100)
         
-        return {
-            'cpu': f"{load:.2f}",
-            'cpu_color': 'danger' if load > 2.0 else 'warning' if load > 1.0 else '',
-            'ram': f"{ram_pct}%",
-            'ram_color': 'danger' if ram_pct > 90 else 'warning' if ram_pct > 75 else ''
-        }
+        cpu_col = '#da3633' if load > 2.0 else '#d29922' if load > 1.0 else '#2ea043'
+        ram_col = '#da3633' if ram_pct > 90 else '#d29922' if ram_pct > 75 else '#2ea043'
+
+        return {'cpu': f"{load:.2f}", 'ram': f"{ram_pct}%", 'cpu_color': cpu_col, 'ram_color': ram_col}
     except:
         return {'cpu': 'ERR', 'ram': 'ERR', 'cpu_color':'', 'ram_color':''}
 
 def get_positions_combined():
-    """Lee Scalper + Todos los Breakout States"""
     positions = []
     
-    # 1. LEER SCALPER (Archivo único con múltiples pares)
-    if os.path.exists(SCALPER_STATE):
-        try:
-            with open(SCALPER_STATE, 'r') as f:
-                data = json.load(f)
-                # El formato del Scalper suele ser { "BTC/USDT": { ... }, "ETH/USDT": { ... } }
-                for symbol, info in data.items():
-                    # Verificar si está realmente en posición
-                    if info.get('in_position') or info.get('entry_price'):
-                         positions.append({
-                            'bot': 'SCALPER',
-                            'symbol': symbol,
-                            'side': info.get('side', 'LONG'), # Asumimos Long si no dice nada
-                            'entry': info.get('entry_price', 0),
-                            'sl': f"{info.get('stop_loss', 0):.4f}",
-                            'tp': 'Dynamic',
-                            'status': 'Active'
-                        })
-        except Exception as e:
-            print(f"Error reading Scalper state: {e}")
-
-    # 2. LEER BREAKOUT (Múltiples archivos state_*.json)
-    # Buscamos todos los archivos que empiecen con state_ en la carpeta breakout
+    # Buscamos todos los estados de Breakout
     breakout_files = glob.glob(os.path.join(BREAKOUT_DIR, "state_*.json"))
     
     for file_path in breakout_files:
         try:
             with open(file_path, 'r') as f:
                 data = json.load(f)
-                # El formato del Breakout es { "status": "IN_POSITION", ... }
+                
+                # Solo procesamos si está IN_POSITION
                 if data.get('status') == 'IN_POSITION':
-                    # Deducimos el símbolo del nombre del archivo o si está en el json (mejor si estuviera en json, si no parseamos nombre)
                     filename = os.path.basename(file_path)
+                    # Reconstruir simbolo (state_SOL_USDT.json -> SOL/USDT)
                     symbol_raw = filename.replace("state_", "").replace(".json", "").replace("_", "/")
                     
+                    # Determinar si es FAST o SLOW
+                    engine_type = "FAST" if symbol_raw in PAIRS_FAST else "SLOW"
+                    
                     positions.append({
-                        'bot': 'BREAKOUT',
+                        'type': engine_type,
                         'symbol': symbol_raw,
-                        'side': 'LONG', # Breakout strategy es Long Only por ahora
+                        'side': 'LONG', # Breakout es Long Only por ahora
                         'entry': data.get('entry_price'),
                         'sl': f"{data.get('stop_loss'):.4f}",
                         'tp': f"{data.get('tp_partial'):.4f}",
-                        'status': 'Trailing' if data.get('trailing_active') else 'Targeting'
+                        'trailing': data.get('trailing_active', False)
                     })
         except Exception as e:
-            print(f"Error reading Breakout file {file_path}: {e}")
+            print(f"Error reading {file_path}: {e}")
 
     return positions
 
@@ -209,7 +209,8 @@ def get_logs():
     try:
         # Traemos logs de AMBOS servicios
         service_flags = " ".join([f"-u {s}" for s in SERVICES])
-        cmd = f"journalctl {service_flags} -n 50 --no-pager"
+        # Filtramos un poco para limpiar ruido de systemd
+        cmd = f"journalctl {service_flags} -n 60 --no-pager"
         return subprocess.check_output(cmd, shell=True).decode().strip()
     except: return "Error reading logs."
 

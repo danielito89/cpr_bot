@@ -95,7 +95,22 @@ def main():
                 state = load_state(symbol)
                 
                 # 3. Obtener Datos (Con Timeframe seguro)
-                tf = getattr(config, 'TIMEFRAME_BREAKOUT', '4h')
+                # Si pasamos un argumento (ej: '1h'), lo usamos. Si no, leemos config.
+                if len(sys.argv) > 1:
+                    tf = sys.argv[1]
+                else:
+                    tf = getattr(config, 'TIMEFRAME_BREAKOUT', '4h')
+
+                print(f"⏱️ Timeframe seleccionado: {tf}")
+
+                # SELECCIÓN DE LISTA DE PARES
+                if tf == '1h':
+                    pairs_to_scan = getattr(config, 'PAIRS_FAST', [])
+                else:
+                    pairs_to_scan = getattr(config, 'PAIRS_SLOW', [])
+        
+                print(f"📋 Pares activos: {pairs_to_scan}")
+                
                 ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=200) # 200 es suficiente
                 
                 if not ohlcv:
