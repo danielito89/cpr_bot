@@ -1,98 +1,65 @@
 # config.py
 
 # ==============================================================================
-# ⚠️ IMPORTANTE: Las API KEYS (BINANCE_API_KEY, etc.) están en el archivo .env
-# No escribir credenciales reales aquí.
+# CONFIGURACIÓN MAESTRA HYDRA HYBRID (VERSION GOLD 443% ROI)
 # ==============================================================================
 
-# --- 1. ARQUITECTURA DE PARES (Doble Velocidad) ---
+# --- 1. ARQUITECTURA DE PARES ---
 
-# A) DIVISIÓN RÁPIDA "FAST" (Timeframe 1H)
-# Monedas de alta volatilidad (Memes, IA) que requieren reacción rápida.
+# A) DIVISIÓN RÁPIDA "FAST" (1H) - Volatilidad Pura
 PAIRS_FAST = [
-    'DOGE/USDT',
-    '1000PEPE/USDT',
-    'WIF/USDT',
-    'FET/USDT',
-    'AVAX/USDT'  # Configurado agresivo, va a 1H
+    '1000PEPE/USDT', # El Alpha (ROI 72%)
+    'FET/USDT',      # El Francotirador (ROI 34%)
+    'WIF/USDT',      # El Volátil (ROI 27%)
+    'DOGE/USDT'      # El Veterano (ROI 16% - Opcional)
 ]
 
-# B) DIVISIÓN LENTA "SLOW" (Timeframe 4H)
-# Monedas estructurales / L1s sólidas. Buscamos tendencias de días/semanas.
+# B) DIVISIÓN LENTA "SLOW" (4H) - Estructura & Tendencia
 PAIRS_SLOW = [
-    'SOL/USDT',
-    'BTC/USDT',
-    'ETH/USDT'
+    'SOL/USDT',      # El Rey (ROI 193%)
+    'BTC/USDT'       # El Tanque (ROI 98%)
 ]
 
-# (Lista Maestra para compatibilidad con Dashboard)
+# Lista Maestra
 PAIRS = PAIRS_FAST + PAIRS_SLOW
 
-# --- 2. CONFIGURACIÓN GLOBAL DE TRADING ---
-# Estos valores aplican si no se sobrescriben en el perfil específico
-TIMEFRAME_BREAKOUT = '4h'  # Fallback por defecto
-LEVERAGE = 10              # Apalancamiento (Cross o Isolated según tu cuenta)
-RISK_PER_TRADE = 0.03      # 3% de riesgo por operación
-MAX_DRAWDOWN_SESSION = 0.10 # Stop de emergencia del bot
+# --- 2. GESTIÓN DE CAPITAL ---
+TIMEFRAME_BREAKOUT = '4h'  # Default fallback
+LEVERAGE = 10              
+RISK_PER_TRADE = 0.03      # 3% de la cuenta por operación
+MAX_DRAWDOWN_SESSION = 0.10 
 
-# --- 3. PERFILES DE RIESGO POR ACTIVO ---
-# Definimos el "carácter" de cada moneda.
+# --- 3. PERFILES DE RIESGO OPTIMIZADOS (GOLD SETTINGS) ---
 
 RISK_PROFILES_BREAKOUT = {
-    # --- DIVISIÓN RÁPIDA (1H) ---
-    'DOGE/USDT': {
-        'sl_atr': 2.0, 
-        'tp_partial_atr': 4.0, 
-        'trailing_dist_atr': 2.5, 
-        'vol_multiplier': 1.8
+    # --- DIVISIÓN FAST (1H) ---
+    '1000PEPE/USDT': {
+        'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.9
     },
     'FET/USDT': {
-        'sl_atr': 2.0, 
-        'tp_partial_atr': 6.0, 
-        'trailing_dist_atr': 3.0, 
-        'vol_multiplier': 1.7
+        'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0
     },
     'WIF/USDT': {
-        'sl_atr': 2.5, 
-        'tp_partial_atr': 4.0, 
-        'trailing_dist_atr': 3.5, 
-        'vol_multiplier': 1.8 
+        'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6
     },
-    '1000PEPE/USDT': {
-        'sl_atr': 2.5, 
-        'tp_partial_atr': 6.0, 
-        'trailing_dist_atr': 3.5, 
-        'vol_multiplier': 1.8
+    'DOGE/USDT': {
+        'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.9
     },
 
-    # --- DIVISIÓN LENTA (4H) ---
+    # --- DIVISIÓN SLOW (4H) ---
     'SOL/USDT': {
-        'sl_atr': 1.5, 
-        'tp_partial_atr': 4.0, 
-        'trailing_dist_atr': 2.5, 
-        'vol_multiplier': 1.5
+        'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5
     },
-    # BTC (4H): Es más pesado. Stop más corto, Vol más bajo para poder entrar.
     'BTC/USDT': {
-        'sl_atr': 1.0,           # BTC respeta mejor los niveles, no necesita tanto aire
-        'tp_partial_atr': 2.5,   # TP más conservador
+        'sl_atr': 1.5,          # Stop amplio
+        'tp_partial_atr': 2.0,  # TP corto asegurado
         'trailing_dist_atr': 1.5, 
-        'vol_multiplier': 1.3    # Exigimos solo un 30% extra de volumen (es difícil mover BTC x2)
-    },
-    # ETH (4H): Híbrido entre BTC y SOL.
-    'ETH/USDT': {
-        'sl_atr': 1.2, 
-        'tp_partial_atr': 3.0, 
-        'trailing_dist_atr': 2.0, 
-        'vol_multiplier': 1.4
+        'vol_multiplier': 1.1   # Casi sin filtro (Unlocked)
     },
 
     # --- DEFAULT (Seguridad) ---
     'DEFAULT': {
-        'sl_atr': 1.5, 
-        'tp_partial_atr': 3.0, 
-        'trailing_dist_atr': 2.0, 
-        'vol_multiplier': 1.5
+        'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5
     }
 }
 
@@ -100,6 +67,6 @@ RISK_PROFILES_BREAKOUT = {
 DRY_RUN = False          # False = Dinero Real
 LOG_FILE = "trading_log.txt"
 
-# (Legacy Scalper - Mantenemos esto vacío para no romper imports viejos si quedan)
+# Legacy (Dejar vacío)
 PAIRS_SCALPER = []
 PROFILES = {}
