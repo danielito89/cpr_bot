@@ -70,3 +70,4 @@ LOG_FILE = "trading_log.txt"
 # Legacy (Dejar vacío)
 PAIRS_SCALPER = []
 PROFILES = {}
+MAX_OPEN_POSITIONS = 4
