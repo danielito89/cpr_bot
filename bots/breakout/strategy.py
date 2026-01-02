@@ -2,124 +2,116 @@ import pandas as pd
 import numpy as np
 
 class BreakoutBotStrategy:
-    def __init__(self, atr_period=14, lookback=20):
-        self.atr_period = atr_period
-        self.lookback = lookback
+    def __init__(self):
+        self.lookback = 20
+        self.sl_atr = 1.5
+        self.tp_partial_atr = 2.0
+        self.trailing_dist_atr = 1.5
         self.vol_multiplier = 1.5
-        self.atr_pullback_factor = 0.5
-        self.trend_filter_period = 200 
-        
-        # Risk Management
-        self.sl_atr = 1.0              
-        self.tp_partial_atr = 2.5      
-        self.trailing_dist_atr = 1.5   
-        self.cooldown_candles = 2      
-    
-    # ... (calculate_indicators es igual al anterior) ...
+        self.sma_period = 200 
+
     def calculate_indicators(self, df):
-        df['Resistance'] = df['High'].rolling(window=self.lookback).max().shift(1)
-        df['Vol_SMA'] = df['Volume'].rolling(window=20).mean()
-        df['Trend_SMA'] = df['Close'].rolling(window=self.trend_filter_period).mean()
+        df = df.copy()
         
-        # ATR Manual Robusto
+        # 1. Resistencia (Donchian High)
+        df['Resistance'] = df['High'].rolling(window=self.lookback).max().shift(1)
+        
+        # 2. ATR
         df['tr0'] = abs(df['High'] - df['Low'])
         df['tr1'] = abs(df['High'] - df['Close'].shift())
         df['tr2'] = abs(df['Low'] - df['Close'].shift())
         df['TR'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
-        df['ATR'] = df['TR'].rolling(window=self.atr_period).mean()
+        df['ATR'] = df['TR'].rolling(window=14).mean()
+        
+        # 3. Volumen y Tendencia
+        df['Vol_SMA'] = df['Volume'].rolling(window=20).mean()
+        df['Trend_SMA'] = df['Close'].rolling(window=self.sma_period).mean()
+        
         return df
 
-    def get_signal(self, df, state_data):
-        curr = df.iloc[-1]
-        current_state = state_data.get('status', 'WAITING_BREAKOUT')
-        
-        # --- 0. GESTIÓN DE COOLDOWN ---
-        if current_state == 'COOLDOWN':
-            last_trade_time = pd.to_datetime(state_data.get('last_exit_time'))
-            candles_passed = (curr.name - last_trade_time).total_seconds() / (4 * 3600)
-            if candles_passed >= self.cooldown_candles:
-                return {'action': 'RESET_STATE', 'new_status': 'WAITING_BREAKOUT'}
+    def get_signal(self, window, state_data):
+        if len(window) < self.sma_period: 
             return {'action': 'HOLD'}
-
-        # --- 1. WAITING_BREAKOUT (Sin cambios) ---
-        if current_state == 'WAITING_BREAKOUT':
-            is_breakout = curr['Close'] > curr['Resistance']
-            is_vol_valid = curr['Volume'] > (curr['Vol_SMA'] * self.vol_multiplier)
-            is_trend_bullish = curr['Close'] > curr['Trend_SMA']
             
-            if is_breakout and is_vol_valid and is_trend_bullish:
-                return {
-                    'action': 'PREPARE_PULLBACK', 'new_status': 'WAITING_PULLBACK',
-                    'breakout_level': curr['Resistance'], 'atr_at_breakout': curr['ATR']
-                }
-
-        # --- 2. WAITING_PULLBACK (Sin cambios) ---
-        elif current_state == 'WAITING_PULLBACK':
-            level = state_data['breakout_level']
-            atr = state_data['atr_at_breakout']
+        curr = window.iloc[-1]
+        status = state_data.get('status', 'WAITING_BREAKOUT')
+        
+        # --- 1. GESTIÓN DE SALIDAS (SI ESTAMOS DENTRO) ---
+        if status == 'IN_POSITION':
+            curr_price = curr['High']
+            curr_low = curr['Low']
             
-            if curr['Close'] > level + (2 * atr): # Anti-FOMO
-                return {'action': 'CANCEL_FOMO', 'new_status': 'WAITING_BREAKOUT'}
+            # TP Parcial
+            tp_part = state_data.get('tp_partial')
+            size_pct = state_data.get('position_size_pct', 1.0)
             
-            buy_zone = level + (atr * self.atr_pullback_factor)
-            
-            # Condición Reforzada: Tocar zona Y cerrar sobre soporte
-            if curr['Low'] <= buy_zone and curr['Close'] > level:
-                entry_price = curr['Close']
-                # SL: Mínimo entre Estructura y Volatilidad
-                sl_structure = level - (0.25 * atr)
-                sl_volatility = entry_price - (atr * self.sl_atr)
-                stop_loss = min(sl_structure, sl_volatility)
-                tp_partial = entry_price + (atr * self.tp_partial_atr)
-                
-                return {
-                    'action': 'ENTER_LONG', 'new_status': 'IN_POSITION',
-                    'entry_price': entry_price, 'stop_loss': stop_loss,
-                    'tp_partial': tp_partial, 'trailing_active': False,
-                    'position_size_pct': 1.0, 'highest_price_post_tp': 0.0
-                }
-
-        # --- 3. IN_POSITION (CORREGIDO: BUG 1 y 2) ---
-        elif current_state == 'IN_POSITION':
-            entry = state_data['entry_price']
-            sl = state_data['stop_loss'] # PUNTO ÚNICO DE VERDAD
-            tp_part = state_data['tp_partial']
-            atr = curr['ATR']
-            
-            # A) CHEQUEO UNIVERSAL DE STOP LOSS (Primero y Único)
-            if curr['Low'] <= sl:
-                return {'action': 'EXIT_SL', 'new_status': 'COOLDOWN'}
-            
-            # B) CHEQUEO TAKE PROFIT PARCIAL (Solo si estamos al 100%)
-            if state_data['position_size_pct'] == 1.0 and curr['High'] >= tp_part:
-                new_sl = entry * 1.002 # Breakeven
+            if size_pct == 1.0 and curr_price >= tp_part:
                 return {
                     'action': 'EXIT_PARTIAL',
-                    'new_sl': new_sl,
-                    'trailing_active': True,
-                    'highest_price_post_tp': curr['High'] # Iniciamos tracking
+                    'new_sl': state_data['entry_price'], # Breakeven
+                    'highest_price_post_tp': curr_price
                 }
             
-            # C) ACTUALIZACIÓN DE TRAILING (Solo si ya cobramos parcial)
-            if state_data.get('trailing_active'):
-                # Lógica corregida: Comparar contra el máximo previo registrado
-                prev_highest = state_data.get('highest_price_post_tp', 0)
-                current_high = curr['High']
+            # SL
+            sl = state_data.get('stop_loss')
+            if curr_low <= sl:
+                return {'action': 'EXIT_SL'} if size_pct == 1.0 else {'action': 'EXIT_TRAILING'}
+            
+            # Trailing
+            trailing_active = state_data.get('trailing_active', False)
+            if trailing_active:
+                highest = state_data.get('highest_price_post_tp', 0)
+                if curr_price > highest:
+                    new_highest = curr_price
+                    new_sl = new_highest - (curr['ATR'] * self.trailing_dist_atr)
+                    if new_sl > sl:
+                        return {'action': 'UPDATE_TRAILING', 'new_sl': new_sl, 'highest_price_post_tp': new_highest}
+            
+            return {'action': 'HOLD'}
+
+        # --- 2. GESTIÓN DE ENTRADAS (DIRECT BREAKOUT) ---
+        # Si estamos esperando, analizamos si rompe YA.
+        if status == 'WAITING_BREAKOUT' or status == 'COOLDOWN':
+            
+            # Gestión de Cooldown simple
+            if status == 'COOLDOWN':
+                 # Si pasaron 3 velas, reseteamos a WAITING_BREAKOUT internamente para evaluar
+                 last_exit_str = state_data.get('last_exit_time')
+                 if last_exit_str:
+                     last_exit = pd.to_datetime(last_exit_str)
+                     hours_diff = (curr.name - last_exit).total_seconds() / 3600
+                     if hours_diff < 3: return {'action': 'HOLD'}
+
+            res = curr['Resistance']
+            vol_sma = curr['Vol_SMA']
+            trend_sma = curr['Trend_SMA']
+            
+            if pd.isna(res) or pd.isna(vol_sma) or pd.isna(trend_sma): return {'action': 'HOLD'}
+            
+            # A) RUPTURA DE PRECIO
+            is_breakout = curr['Close'] > res
+            
+            # B) FILTRO DE VOLUMEN (VITAL)
+            is_volume_ok = curr['Volume'] > (vol_sma * self.vol_multiplier)
+            
+            # C) FILTRO DE TENDENCIA (EL SALVAVIDAS)
+            # Solo compramos si estamos sobre la media de 200
+            is_trend_ok = curr['Close'] > trend_sma
+
+            if is_breakout and is_volume_ok and is_trend_ok:
+                atr = curr['ATR']
+                entry_price = curr['Close']
                 
-                if current_high > prev_highest:
-                    # Hacemos Update del Trailing
-                    proposed_sl = current_high - (atr * self.trailing_dist_atr)
-                    current_sl = state_data['stop_loss']
-                    
-                    # El SL solo sube
-                    new_sl = max(current_sl, proposed_sl)
-                    
-                    return {
-                        'action': 'UPDATE_TRAILING',
-                        'new_sl': new_sl,
-                        'highest_price_post_tp': current_high
-                    }
-                
-                # Si no hay nuevo máximo, mantenemos todo igual ('HOLD')
+                return {
+                    'action': 'ENTER_LONG',
+                    'new_status': 'IN_POSITION',
+                    'entry_price': entry_price,
+                    'stop_loss': entry_price - (atr * self.sl_atr),
+                    'tp_partial': entry_price + (atr * self.tp_partial_atr),
+                    'atr_at_breakout': atr,
+                    'position_size_pct': 1.0,
+                    'trailing_active': False,
+                    'highest_price_post_tp': 0.0
+                }
 
         return {'action': 'HOLD'}
