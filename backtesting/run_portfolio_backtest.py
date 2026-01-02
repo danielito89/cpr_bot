@@ -24,25 +24,25 @@ PORTFOLIO = {
     # --- DIVISIÓN RÁPIDA (1H) ---
     'DOGE/USDT': {
         'tf': '1h', 
-        'params': {'sl_atr': 2.0, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 2.0}
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 5.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.6}
     },
     'FET/USDT': {
         'tf': '1h',
-        'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.8}
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.6}
     },
     'WIF/USDT': {
         'tf': '1h',
-        'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.8}
+        'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}
     },
     '1000PEPE/USDT': {
         'tf': '1h',
-        'params': {'sl_atr': 2.5, 'tp_partial_atr': 5.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}
+        'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.9}
     },
 
     # --- DIVISIÓN LENTA (4H) ---
     'SOL/USDT': {
         'tf': '4h',
-        'params': {'sl_atr': 1.5, 'tp_partial_atr': 3.5, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}
+        'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}
     },
     'BTC/USDT': {
         'tf': '4h',
