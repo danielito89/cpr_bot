@@ -26,12 +26,33 @@ DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
 # Tu Portfolio Gold
 PORTFOLIO = {
-    '1000PEPE/USDT': {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.9}},
-    'FET/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0}},
-    'WIF/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}},
-    'DOGE/USDT':     {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.9}},
-    'SOL/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}},
-    'BTC/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.1}}
+    # --- AJUSTE: Bajamos de 1.9 a 1.8 para que ENTRE en ese trade del 16 de Mayo ---
+    '1000PEPE/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.8} 
+    },
+    'FET/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0}
+    },
+    'WIF/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}
+    },
+    # --- AJUSTE: Bajamos DOGE también para darle aire ---
+    'DOGE/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.8}
+    },
+    # --- SLOW (Sin cambios) ---
+    'SOL/USDT': {
+        'tf': '4h', 
+        'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}
+    },
+    'BTC/USDT': {
+        'tf': '4h', 
+        'params': {'sl_atr': 1.5, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.1}
+    }
 }
 
 def clean_columns(df):
