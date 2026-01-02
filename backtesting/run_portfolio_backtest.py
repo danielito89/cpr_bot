@@ -24,11 +24,11 @@ PORTFOLIO = {
     # --- DIVISIÓN RÁPIDA (1H) ---
     'DOGE/USDT': {
         'tf': '1h', 
-        'params': {'sl_atr': 2.0, 'tp_partial_atr': 5.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.6}
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.9}
     },
     'FET/USDT': {
         'tf': '1h',
-        'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.6}
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0}
     },
     'WIF/USDT': {
         'tf': '1h',
