@@ -1,4 +1,4 @@
-print("🟢 INICIANDO SIMULACIÓN PULLBACK... (Con Memoria de Estado)")
+print("🟢 INICIANDO SIMULACIÓN AGRESIVA (DIRECT BREAKOUT)...")
 
 import sys
 import os
@@ -16,15 +16,15 @@ except ImportError as e:
 
 # --- CONFIGURACIÓN ---
 INITIAL_CAPITAL = 5000
-MAX_OPEN_POSITIONS = 3 
+MAX_OPEN_POSITIONS = 4  # Damos más espacio para que entren los memes
 DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
-# Mismos parámetros ajustados
+# --- PARÁMETROS AGRESIVOS (Vol 1.5 standard) ---
 PORTFOLIO = {
-    '1000PEPE/USDT': {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.8}},
-    'FET/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0}},
-    'WIF/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}},
-    'DOGE/USDT':     {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.8}},
+    '1000PEPE/USDT': {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.5}},
+    'FET/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.5}},
+    'WIF/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.5}},
+    'DOGE/USDT':     {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}},
     'SOL/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}},
     'BTC/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.1}}
 }
@@ -69,26 +69,20 @@ def run_debug_sim():
     full_timeline = sorted(list(set().union(*[df.index for df in market_data.values()])))
     wallet = INITIAL_CAPITAL
     active_positions = {} 
-    
-    # --- MEMORIA DEL SIMULADOR (NUEVO) ---
-    # Aquí guardamos el estado de las monedas que NO están en posición pero están esperando (Pullback/Cooldown)
-    pending_states = {sym: {'status': 'WAITING_BREAKOUT'} for sym in PORTFOLIO.keys()}
-    
     trades_history = []
     
-    print(f"\n🚀 EJECUTANDO SIMULACIÓN PULLBACK ({len(full_timeline)} pasos)...")
+    print(f"\n🚀 EJECUTANDO SIMULACIÓN AGRESIVA ({len(full_timeline)} pasos)...")
     
     for i, current_time in enumerate(full_timeline):
-        if i % 5000 == 0: print(f"   ... {int(i/len(full_timeline)*100)}%")
+        if i % 10000 == 0: print(f"   ... {int(i/len(full_timeline)*100)}%")
 
-        # A) GESTIÓN DE POSICIONES ABIERTAS (Salidas)
+        # A) SALIDAS
         closed_ids = []
         for sym, pos in active_positions.items():
             df = market_data[sym]
             if current_time not in df.index: continue
             
             strat = strategies[sym]
-            # Reconstruimos el estado completo para la estrategia
             st = {
                 'status': 'IN_POSITION', 
                 'entry_price': pos['entry'], 'stop_loss': pos['sl'], 'tp_partial': pos['tp'], 
@@ -96,8 +90,8 @@ def run_debug_sim():
             }
             
             idx = df.index.get_loc(current_time)
-            if idx < 300: continue
-            window = df.iloc[idx-300 : idx+1] # Ventana grande
+            # Solo necesitamos la última vela para salir
+            window = df.iloc[max(0, idx-50) : idx+1] 
             
             try:
                 signal = strat.get_signal(window, st)
@@ -124,79 +118,50 @@ def run_debug_sim():
                     wallet += realized
                     closed_ids.append(sym)
                     trades_history.append([current_time, sym, act, realized])
-                    # Al cerrar, pasamos a estado COOLDOWN en la memoria pendiente
-                    pending_states[sym] = {'status': 'COOLDOWN', 'last_exit_time': str(current_time)}
-
             except: pass
 
         for sym in closed_ids: del active_positions[sym]
 
-        # B) BUSQUEDA DE ENTRADAS (Gestión de Estados Pendientes)
-        # Iteramos TODOS los pares, incluso si no tenemos cupo, para actualizar sus estados (ej: Breakout -> Pullback)
-        # Pero solo ejecutamos la compra si hay cupo.
-        
+        # B) ENTRADAS (Directas)
+        if len(active_positions) >= MAX_OPEN_POSITIONS: continue
+            
         for sym in PORTFOLIO.keys():
-            if sym in active_positions: continue # Ya está dentro, ignorar
+            if sym in active_positions: continue
             if sym not in market_data: continue
+            if len(active_positions) >= MAX_OPEN_POSITIONS: break
             
             df = market_data[sym]
             if current_time not in df.index: continue
             
             try:
                 idx = df.index.get_loc(current_time)
-                if idx < 300: continue
-                window = df.iloc[idx-300 : idx+1]
+                if idx < 50: continue
+                window = df.iloc[idx-50 : idx+1]
                 
-                # --- RECUPERAMOS EL ESTADO DE LA MEMORIA ---
-                current_st = pending_states.get(sym, {'status': 'WAITING_BREAKOUT'})
+                st_dummy = {'status': 'WAITING_BREAKOUT'} # Siempre reseteamos a Waiting porque es Directo
                 
-                signal = strategies[sym].get_signal(window, current_st)
+                signal = strategies[sym].get_signal(window, st_dummy)
                 
-                # --- ACTUALIZACIÓN DE ESTADO (CRÍTICO) ---
-                if 'new_status' in signal:
-                    # Actualizamos la memoria para la siguiente vela
-                    new_st_data = current_st.copy()
-                    new_st_data['status'] = signal['new_status']
-                    
-                    # Guardamos datos extra si la estrategia los manda (breakout_level, etc)
-                    if 'breakout_level' in signal: new_st_data['breakout_level'] = signal['breakout_level']
-                    if 'atr_at_breakout' in signal: new_st_data['atr_at_breakout'] = signal['atr_at_breakout']
-                    
-                    pending_states[sym] = new_st_data
-                
-                # --- EJECUCIÓN DE ENTRADA ---
                 if signal['action'] == 'ENTER_LONG':
-                    # Aquí aplicamos el filtro de cupos
-                    if len(active_positions) < MAX_OPEN_POSITIONS:
-                        entry = signal['entry_price']
-                        sl = signal['stop_loss']
-                        dist = abs(entry - sl)
-                        if dist > 0:
-                            risk = wallet * 0.03
-                            coins = risk / dist
-                            notional = coins * entry
-                            if notional > wallet * 0.4: coins = (wallet * 0.4) / entry
-                            
-                            active_positions[sym] = {
-                                'entry': entry, 'sl': sl, 'tp': signal['tp_partial'],
-                                'coins': coins, 'size_pct': 1.0, 'trail': False, 'h_post': 0.0
-                            }
-                            # Al entrar, reseteamos el estado pendiente para el futuro
-                            pending_states[sym] = {'status': 'IN_POSITION'} # Placeholder
-                    else:
-                        # Si no hay cupo, técnicamente perdimos el trade. 
-                        # Podríamos mantenerlo en WAITING_PULLBACK o resetearlo. 
-                        # Por simplicidad, dejamos que la estrategia decida en la prox vela (o cancele por FOMO)
-                        pass
-                
-                elif signal['action'] == 'RESET_STATE':
-                     pending_states[sym] = {'status': 'WAITING_BREAKOUT'}
-
+                    entry = signal['entry_price']
+                    sl = signal['stop_loss']
+                    dist = abs(entry - sl)
+                    if dist > 0:
+                        # Gestión de riesgo simple: 3% riesgo fijo
+                        risk = wallet * 0.03
+                        coins = risk / dist
+                        notional = coins * entry
+                        if notional > wallet * 0.4: coins = (wallet * 0.4) / entry
+                        
+                        active_positions[sym] = {
+                            'entry': entry, 'sl': sl, 'tp': signal['tp_partial'],
+                            'coins': coins, 'size_pct': 1.0, 'trail': False, 'h_post': 0.0
+                        }
             except: pass
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     print("\n" + "="*40)
-    print(f"📊 RESULTADO FINAL (Estrategia PULLBACK)")
+    print(f"📊 RESULTADO FINAL (Directo + Agresivo)")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print(f"🔢 Trades:        {len(trades_history)}")
