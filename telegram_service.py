@@ -64,7 +64,7 @@ def status_command(message):
             else: return f"🟡 {status.upper()}"
         except: return "❓ ERROR"
 
-    service_status = check_service("cpr_bot")
+    service_status = check_service("cpr_bot_breakout")
     
     # 2. Leer Posiciones Abiertas (Directo de Binance para mayor precisión)
     try:
@@ -134,13 +134,13 @@ def run_system_cmd(message, cmd):
         bot.reply_to(message, f"❌ Error: {e}")
 
 @bot.message_handler(commands=['start_bot'])
-def start_bot(m): run_system_cmd(m, "sudo systemctl start cpr_bot")
+def start_bot(m): run_system_cmd(m, "sudo systemctl start cpr_bot_breakout")
 
 @bot.message_handler(commands=['stop_bot'])
-def stop_bot(m): run_system_cmd(m, "sudo systemctl stop cpr_bot")
+def stop_bot(m): run_system_cmd(m, "sudo systemctl stop cpr_bot_breakout")
 
 @bot.message_handler(commands=['restart'])
-def restart_bot(m): run_system_cmd(m, "sudo systemctl restart cpr_bot")
+def restart_bot(m): run_system_cmd(m, "sudo systemctl restart cpr_bot_breakout")
 
 # --- COMANDO: /logs ---
 @bot.message_handler(commands=['logs'])
@@ -148,9 +148,9 @@ def logs_command(message):
     if not is_authorized(message): return
     try:
         # Últimas 15 líneas del servicio cpr_bot
-        out = subprocess.check_output("journalctl -u cpr_bot -n 15 --no-pager", shell=True).decode()
+        out = subprocess.check_output("journalctl -u cpr_bot_breakout -n 15 --no-pager", shell=True).decode()
         if len(out) > 4000: out = out[-4000:]
-        bot.reply_to(message, f"📜 *LOGS (cpr_bot):*\n```\n{out}\n```", parse_mode="Markdown")
+        bot.reply_to(message, f"📜 *LOGS (cpr_bot_breakout):*\n```\n{out}\n```", parse_mode="Markdown")
     except Exception as e:
         bot.reply_to(message, f"❌ Error obteniendo logs: {e}")
 
@@ -195,7 +195,7 @@ def process_panic(message):
         bot.reply_to(message, f"📝 *REPORTE PÁNICO:*\n{log}")
         
         # Opcional: Detener el bot para que no vuelva a abrir
-        subprocess.run(["sudo", "systemctl", "stop", "cpr_bot"])
+        subprocess.run(["sudo", "systemctl", "stop", "cpr_bot_breakout"])
         bot.reply_to(message, "🛑 Bot detenido por seguridad.")
 
     except Exception as e:
