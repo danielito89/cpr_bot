@@ -1,4 +1,4 @@
-print("🟢 INICIANDO SIMULACIÓN 'WINNER'S CIRCLE' (Solo Activos Rentables)...")
+print("🟢 INICIANDO SIMULACIÓN 'GOLDEN CONFIG' ($1k + 3% Risk + Smart Trailing)...")
 
 import sys
 import os
@@ -14,35 +14,33 @@ try:
 except ImportError as e:
     sys.exit(1)
 
-# --- CONFIGURACIÓN ---
-INITIAL_CAPITAL = 5000
-MAX_OPEN_POSITIONS = 3 # Mantenemos 3 para concentrar fuerza
-RISK_PER_TRADE = 0.015 # SUBIMOS LEVEMENTE EL RIESGO (1.5%) porque confiamos en la selección
+# --- CONFIGURACIÓN REALISTA ---
+INITIAL_CAPITAL = 1000      # Capital inicial real
+MAX_OPEN_POSITIONS = 3      # Mantenemos foco
 DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
-# --- EL CLUB DE LOS GANADORES ---
-# Eliminamos SOL, DOGE, APT, SEI, SUI.
-CATEGORIES = {
-    # TIER S (Los que pagaron la fiesta)
-    'FLOKI/USDT': 'MEME', 
-    'TIA/USDT': 'L1',
-    'INJ/USDT': 'L1', 
-    'WIF/USDT': 'MEME',
-    
-    # TIER A (Contribuyentes positivos)
-    'NEAR/USDT': 'L1', 
-    'JUP/USDT': 'DEFI', 
-    'BONK/USDT': 'MEME',
-    'PYTH/USDT': 'DEFI',
-    
-    # Mantenemos FET como "wildcard" AI, aunque rindió poco, tiene potencial
-    'FET/USDT': 'AI',
+# --- DEFINICIÓN DE TIERS & CLUSTERS ---
+# TIER S: 3% Riesgo (Los que pagan la cuenta)
+# TIER A: 2% Riesgo (Los acompañantes)
 
-    # FILTRO MACRO
-    'BTC/USDT': 'MACRO'
+CONFIG = {
+    # --- TIER S (Riesgo 3%) ---
+    'FLOKI/USDT': {'tier': 'S', 'type': 'MEME'},
+    'NEAR/USDT':  {'tier': 'S', 'type': 'L1'},
+    'WIF/USDT':   {'tier': 'S', 'type': 'MEME'},
+    'INJ/USDT':   {'tier': 'S', 'type': 'L1'},
+
+    # --- TIER A (Riesgo 2%) ---
+    'BONK/USDT':  {'tier': 'A', 'type': 'MEME'},
+    'JUP/USDT':   {'tier': 'A', 'type': 'DEFI'},
+    'TIA/USDT':   {'tier': 'A', 'type': 'L1'},
+
+    # --- MACRO FILTER ONLY ---
+    'BTC/USDT':   {'tier': 'MACRO', 'type': 'MACRO'}
 }
 
-PORTFOLIO = {k: {'tf': '4h'} for k in CATEGORIES.keys()}
+# Generamos el portfolio dict estándar
+PORTFOLIO = {k: {'tf': '4h'} for k in CONFIG.keys()}
 
 def clean_columns(df):
     df.columns = [c.strip().capitalize() for c in df.columns]
@@ -54,7 +52,7 @@ def run_debug_sim():
     market_data = {}
     strategies = {}
     
-    print("\n🛠️ CARGANDO DATOS 4H (Purgados)...")
+    print("\n🛠️ CARGANDO DATOS Y APLICANDO 'SMART TRAILING'...")
     for symbol in PORTFOLIO.keys():
         safe_symbol = symbol.replace('/', '_')
         pattern = os.path.join(DATA_DIR, f"{safe_symbol}_4h*.csv")
@@ -79,12 +77,27 @@ def run_debug_sim():
                 df = df.resample('4h').agg(logic).dropna()
             
             strat = BreakoutBotStrategy()
+            
+            # --- SMART TRAILING CONFIG ---
+            # Si es MEME, le damos más aire (4.5). Si es L1/DeFi, estándar (4.0).
+            asset_type = CONFIG[symbol]['type']
+            if asset_type == 'MEME':
+                strat.trailing_dist_atr = 4.5
+                strat.tp_partial_atr = 5.5 # Memes pueden correr más
+            else:
+                strat.trailing_dist_atr = 4.0
+                strat.tp_partial_atr = 5.0
+
             df = strat.calculate_indicators(df)
             df = df[(df.index >= '2023-01-01') & (df.index <= '2025-12-31')]
             
             market_data[symbol] = df
             strategies[symbol] = strat
-            print(f"✅ {symbol} cargado.")
+            
+            # Info visual
+            risk_display = "3%" if CONFIG[symbol]['tier'] == 'S' else "2%"
+            print(f"✅ {symbol:<10} | Tier {CONFIG[symbol]['tier']} ({risk_display}) | Trail {strat.trailing_dist_atr}")
+            
         except: pass
 
     if not market_data: return
@@ -102,10 +115,9 @@ def run_debug_sim():
     bot_memory = {sym: {'status': 'WAITING_BREAKOUT', 'last_exit_time': None} for sym in PORTFOLIO}
     active_positions = {} 
     
-    # STATS
     symbol_stats = {sym: {'trades': 0, 'pnl': 0.0, 'wins': 0} for sym in PORTFOLIO}
     
-    print(f"\n🚀 SIMULACIÓN WINNER'S CIRCLE ({len(full_timeline)} velas 4H)...")
+    print(f"\n🚀 SIMULACIÓN ($1k Start)...")
     
     for i, current_time in enumerate(full_timeline):
         
@@ -163,16 +175,20 @@ def run_debug_sim():
         # B) ENTRADAS
         if len(active_positions) >= MAX_OPEN_POSITIONS: continue
         if not is_macro_bullish: continue
+        
+        # Filtro Cluster
+        active_types = [CONFIG[s]['type'] for s in active_positions.keys()]
 
-        active_categories = [CATEGORIES.get(s, 'UNKNOWN') for s in active_positions.keys()]
-            
         for sym in PORTFOLIO.keys():
             if sym in active_positions: continue
             if sym not in market_data: continue
             if sym == 'BTC/USDT': continue 
             
-            my_cat = CATEGORIES.get(sym, 'UNKNOWN')
-            if my_cat in active_categories: continue
+            # FILTRO CLUSTER: Si ya hay un MEME, no entro en otro MEME.
+            # (Opcional: Si tienes 3 cupos y 4 memes en Tier S, quizás quieras relajar esto? 
+            #  Pero por seguridad mantenemos 1 por tipo para evitar correlación total).
+            my_type = CONFIG[sym]['type']
+            if my_type in active_types: continue
 
             if len(active_positions) >= MAX_OPEN_POSITIONS: break
             
@@ -192,14 +208,19 @@ def run_debug_sim():
                     sl = signal['stop_loss']
                     dist = abs(entry - sl)
                     if dist > 0:
-                        risk_amt = wallet * RISK_PER_TRADE
+                        # --- RISK CALCULATION BY TIER ---
+                        tier = CONFIG[sym]['tier']
+                        risk_pct = 0.03 if tier == 'S' else 0.02
+                        
+                        risk_amt = wallet * risk_pct
                         if risk_amt > wallet: risk_amt = wallet
                         
                         coins = risk_amt / dist
                         notional = coins * entry
                         
-                        if notional > wallet * 0.35: # Le damos un poquito más de margen (35%)
-                            coins = (wallet * 0.35) / entry; risk_amt = coins * dist
+                        # Cap 40% wallet
+                        if notional > wallet * 0.4: 
+                            coins = (wallet * 0.4) / entry; risk_amt = coins * dist
                         
                         wallet -= risk_amt
                         active_positions[sym] = {
@@ -207,13 +228,13 @@ def run_debug_sim():
                             'coins': coins, 'size_pct': 1.0, 'trail': False, 
                             'h_post': 0.0, 'risk_blocked': risk_amt
                         }
-                        active_categories.append(my_cat)
+                        active_types.append(my_type)
             except: pass
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     
     print("\n" + "="*50)
-    print(f"📊 RESULTADO FINAL (PURGADO)")
+    print(f"📊 RESULTADO FINAL (GOLDEN CONFIG)")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print("="*50)
