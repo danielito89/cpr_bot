@@ -9,10 +9,10 @@ class BreakoutBotStrategy:
         self.kc_length = 20
         self.kc_mult = 1.5
         
-        # --- FIX 2: TP MÁS REALISTA ---
+        # Parámetros Salida
         self.sl_atr = 2.0
-        self.tp_partial_atr = 3.5      # Bajamos de 5.5 a 3.5 (Bank Profit)
-        self.trailing_dist_atr = 3.0   # Trailing un poco más holgado para dejar respirar
+        self.tp_partial_atr = 3.5      # Target rápido
+        self.trailing_dist_atr = 3.0   
         
         self.adx_period = 14
         self.cooldown_candles = 10 
@@ -37,12 +37,14 @@ class BreakoutBotStrategy:
         df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
         df['BB_Width_Change'] = df['BB_Width'] - df['BB_Width'].shift(1)
         
+        # PROMEDIO DE ANCHO (Para detectar expansión relativa real)
+        df['BB_Width_SMA'] = df['BB_Width'].rolling(window=20).mean()
+        
         # 3. Keltner Channels
         df['KC_Upper'] = df['BB_Mid'] + (df['ATR'] * self.kc_mult)
         df['KC_Lower'] = df['BB_Mid'] - (df['ATR'] * self.kc_mult)
         
         # Squeeze Relativo (0.85)
-        # Evitamos division por cero
         kc_width = (df['KC_Upper'] - df['KC_Lower']).replace(0, np.nan)
         df['Squeeze_On'] = df['BB_Width'] < (kc_width * 0.85)
         
@@ -63,6 +65,9 @@ class BreakoutBotStrategy:
         neg_di = 100 * (neg_dm_smooth / tr_smooth)
         dx = 100 * abs(pos_di - neg_di) / (pos_di + neg_di)
         df['ADX'] = wilder_smooth(dx, self.adx_period)
+        
+        # PROMEDIO DE ADX (Para detectar aceleración de tendencia)
+        df['ADX_SMA'] = df['ADX'].rolling(window=10).mean()
 
         return df
 
@@ -99,7 +104,7 @@ class BreakoutBotStrategy:
                         return {'action': 'UPDATE_TRAILING', 'new_sl': new_sl, 'highest_price_post_tp': new_high}
             return {'action': 'HOLD'}
 
-        # --- ENTRADAS (QUALITY SCORE) ---
+        # --- ENTRADAS (ÉLITE SNIPER) ---
         if status == 'WAITING_BREAKOUT' or status == 'COOLDOWN':
             if status == 'COOLDOWN':
                  last_exit = pd.to_datetime(state_data.get('last_exit_time'))
@@ -107,34 +112,39 @@ class BreakoutBotStrategy:
                  if (curr.name - last_exit).total_seconds() / 3600 < (self.cooldown_candles * 4): 
                      return {'action': 'HOLD'}
 
-            # 1. Venimos de Squeeze?
+            # 1. Squeeze Reciente
             recent_squeeze = window['Squeeze_On'].iloc[-13:-1].any()
             if not recent_squeeze: return {'action': 'HOLD'}
             
-            # 2. ADX Rising
-            adx_rising = curr['ADX'] > prev['ADX']
+            # 2. ADX Élite (Fuerte y Acelerando)
+            # Debe ser > 20 y mayor que su promedio reciente
+            adx_ok = (curr['ADX'] > 20) and (curr['ADX'] > curr['ADX_SMA'])
+            if not adx_ok: return {'action': 'HOLD'}
             
             # 3. Momentum Temprano
             momentum_up = (curr['Close'] > prev['Close']) and (curr['Close'] > curr['BB_Mid'])
+            if not momentum_up: return {'action': 'HOLD'}
             
-            # --- FIX 1: ACELERACIÓN DE EXPANSIÓN ---
-            # La expansión actual debe ser mayor al promedio de las últimas 5 velas
-            avg_expansion = window['BB_Width_Change'].iloc[-6:-1].mean()
-            bb_accelerating = curr['BB_Width_Change'] > avg_expansion and curr['BB_Width_Change'] > 0
+            # 4. Expansión Relativa de Bandas (La clave)
+            # ¿Cuánto creció el ancho respecto al ancho promedio?
+            # Si avg_width es 100 y creció 5, ratio es 0.05 (5%). Queremos > 10% (0.1)
+            avg_width = curr['BB_Width_SMA']
+            if avg_width == 0: avg_width = 0.0001
             
-            if adx_rising and momentum_up and bb_accelerating:
+            expansion_change = curr['BB_Width_Change']
+            expansion_ratio = expansion_change / avg_width
+            
+            # Exigimos que se abra al menos un 10% respecto al promedio
+            bb_exploding = expansion_ratio > 0.10 
+            
+            if bb_exploding:
+                # 5. Score Final
+                # Score = ADX + (Expansion% * 100)
+                # Ejemplo: ADX 25 + (0.15 * 100) = 40
+                score = curr['ADX'] + (expansion_ratio * 100)
                 
-                # --- FIX 3: SCORE DE CALIDAD ---
-                # Score = ADX + (% de expansión relativa al ancho)
-                # Si el ancho se duplica, eso suma mucho puntaje.
-                
-                width = curr['BB_Width'] if curr['BB_Width'] > 0 else 0.0001
-                expansion_ratio = (curr['BB_Width_Change'] / width) * 100
-                
-                score = curr['ADX'] + expansion_ratio
-                
-                # SOLO ENTRAR SI EL SCORE ES ALTO (> 25)
-                if score > 25:
+                # UMBRAL ÉLITE: 35
+                if score > 35:
                     atr = curr['ATR']
                     entry = curr['Close']
                     
