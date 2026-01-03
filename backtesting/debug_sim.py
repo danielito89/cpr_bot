@@ -1,9 +1,10 @@
-print("🟢 INICIANDO SIMULACIÓN 'CLUSTER CONTROL' (Risk 1% + Category Filter)...")
+print("🟢 INICIANDO SIMULACIÓN 'FRANCOTIRADOR' (Score > 25 + Cluster Control)...")
 
 import sys
 import os
 import pandas as pd
 import glob
+import numpy as np # Importante
 
 PROJECT_ROOT = "/home/orangepi/bot_cpr"
 if PROJECT_ROOT not in sys.path: sys.path.append(PROJECT_ROOT)
@@ -14,13 +15,13 @@ try:
 except ImportError as e:
     sys.exit(1)
 
-# --- CONFIGURACIÓN DE GESTIÓN DE RIESGO ---
+# --- CONFIGURACIÓN ---
 INITIAL_CAPITAL = 5000
-MAX_OPEN_POSITIONS = 3      # Bajamos de 5 a 3 (Concentración)
-RISK_PER_TRADE = 0.01       # Bajamos de 3% a 1% (Supervivencia)
+MAX_OPEN_POSITIONS = 3
+RISK_PER_TRADE = 0.01 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
-# --- DEFINICIÓN DE CLUSTERS (Para evitar correlación) ---
+# --- CLUSTERS ---
 CATEGORIES = {
     'SOL/USDT': 'L1', 'INJ/USDT': 'L1', 'NEAR/USDT': 'L1', 'SUI/USDT': 'L1', 'APT/USDT': 'L1',
     'FET/USDT': 'AI', 'RNDR/USDT': 'AI', 'ARKM/USDT': 'AI', 'WLD/USDT': 'AI',
@@ -28,7 +29,6 @@ CATEGORIES = {
     'BTC/USDT': 'MACRO'
 }
 
-# Portfolio completo (Necesitamos cargar BTC para el filtro, aunque no lo operemos)
 PORTFOLIO = {k: {'tf': '4h'} for k in CATEGORIES.keys()}
 
 def clean_columns(df):
@@ -47,7 +47,6 @@ def run_debug_sim():
         pattern = os.path.join(DATA_DIR, f"{safe_symbol}_4h*.csv")
         files = glob.glob(pattern)
         
-        # Fallback 1h -> 4h
         if not files:
             pattern_1h = os.path.join(DATA_DIR, f"{safe_symbol}_1h*.csv")
             files = glob.glob(pattern_1h)
@@ -91,11 +90,10 @@ def run_debug_sim():
     active_positions = {} 
     trades_history = []
     
-    print(f"\n🚀 SIMULACIÓN BLINDADA ({len(full_timeline)} velas 4H)...")
+    print(f"\n🚀 SIMULACIÓN FRANCOTIRADOR ({len(full_timeline)} velas 4H)...")
     
     for i, current_time in enumerate(full_timeline):
         
-        # Filtro Macro BTC
         is_macro_bullish = True
         try:
             if 'BTC/USDT' in market_data:
@@ -111,7 +109,6 @@ def run_debug_sim():
             
             curr = df.loc[current_time]
             strat = strategies[sym]
-            
             st = {
                 'status': 'IN_POSITION', 'entry_price': pos['entry'], 'stop_loss': pos['sl'],
                 'tp_partial': pos['tp'], 'position_size_pct': pos['size_pct'],
@@ -150,21 +147,13 @@ def run_debug_sim():
         if len(active_positions) >= MAX_OPEN_POSITIONS: continue
         if not is_macro_bullish: continue
 
-        # --- LÓGICA DE CLUSTER ---
-        # Identificar qué categorías ya están activas
-        active_categories = []
-        for s in active_positions.keys():
-            cat = CATEGORIES.get(s, 'UNKNOWN')
-            active_categories.append(cat)
+        active_categories = [CATEGORIES.get(s, 'UNKNOWN') for s in active_positions.keys()]
             
         for sym in PORTFOLIO.keys():
             if sym in active_positions: continue
             if sym not in market_data: continue
-            
-            # 1. NO OPERAR BTC
             if sym == 'BTC/USDT': continue
             
-            # 2. FILTRO DE CLUSTER: Si ya hay un AI, no abro otro AI
             my_cat = CATEGORIES.get(sym, 'UNKNOWN')
             if my_cat in active_categories: continue
 
@@ -186,33 +175,27 @@ def run_debug_sim():
                     sl = signal['stop_loss']
                     dist = abs(entry - sl)
                     if dist > 0:
-                        # RIESGO 1% FIJO
                         risk_amt = wallet * RISK_PER_TRADE
+                        if risk_amt > wallet: risk_amt = wallet # Safety
                         
                         coins = risk_amt / dist
                         notional = coins * entry
                         
-                        # CAP DE SEGURIDAD 30% DEL WALLET (Para evitar locuras en monedas muy baratas)
                         if notional > wallet * 0.3: 
-                            coins = (wallet * 0.3) / entry
-                            risk_amt = coins * dist
+                            coins = (wallet * 0.3) / entry; risk_amt = coins * dist
                         
-                        # CHEQUEO DE LIQUIDEZ (Si risk_amt > wallet libre, no entra)
-                        if risk_amt > wallet: continue
-
                         wallet -= risk_amt
                         active_positions[sym] = {
                             'entry': entry, 'sl': sl, 'tp': signal['tp_partial'],
                             'coins': coins, 'size_pct': 1.0, 'trail': False, 
                             'h_post': 0.0, 'risk_blocked': risk_amt
                         }
-                        # Actualizamos la lista de categorías activas para que el siguiente del loop no entre
                         active_categories.append(my_cat)
             except: pass
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     print("\n" + "="*40)
-    print(f"📊 RESULTADO BLINDADO (Risk 1% + Cluster Filter)")
+    print(f"📊 RESULTADO FINAL (SCORE > 25)")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print(f"🔢 Trades:        {len(trades_history)}")
