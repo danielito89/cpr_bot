@@ -33,7 +33,7 @@ jobs:
             
             # Reiniciar el bot para aplicar cambios
             sudo systemctl restart cpr_dashboard
-            sudo systemctl restart cpr_bot
+            sudo systemctl restart cpr_bot_breakout
             sudo systemctl restart cpr_telegram
             echo "✅ Producción actualizada y reiniciada."
 
