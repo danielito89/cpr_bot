@@ -1,4 +1,4 @@
-print("🟢 INICIANDO SIMULACIÓN 'ALPHA SQUAD' (Portfolio Extendido)...")
+print("🟢 INICIANDO SIMULACIÓN 'CLUSTER CONTROL' (Risk 1% + Category Filter)...")
 
 import sys
 import os
@@ -14,28 +14,22 @@ try:
 except ImportError as e:
     sys.exit(1)
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DE GESTIÓN DE RIESGO ---
 INITIAL_CAPITAL = 5000
-MAX_OPEN_POSITIONS = 5 # Más cupos para más activos
+MAX_OPEN_POSITIONS = 3      # Bajamos de 5 a 3 (Concentración)
+RISK_PER_TRADE = 0.01       # Bajamos de 3% a 1% (Supervivencia)
 DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
-# --- PORTFOLIO EXPANDIDO ---
-PORTFOLIO = {
-    'BTC/USDT':      {'tf': '4h', 'params': {}}, 
-    'SOL/USDT':      {'tf': '4h', 'params': {}}, 
-    'INJ/USDT':      {'tf': '4h', 'params': {}}, 
-    'NEAR/USDT':     {'tf': '4h', 'params': {}}, 
-    'SUI/USDT':      {'tf': '4h', 'params': {}}, 
-    'APT/USDT':      {'tf': '4h', 'params': {}}, 
-    'FET/USDT':      {'tf': '4h', 'params': {}}, 
-    'RNDR/USDT':     {'tf': '4h', 'params': {}}, 
-    'ARKM/USDT':     {'tf': '4h', 'params': {}}, 
-    'WLD/USDT':      {'tf': '4h', 'params': {}}, 
-    'DOGE/USDT':     {'tf': '4h', 'params': {}}, 
-    'WIF/USDT':      {'tf': '4h', 'params': {}}, 
-    '1000PEPE/USDT': {'tf': '4h', 'params': {}}, 
-    'BONK/USDT':     {'tf': '4h', 'params': {}}, 
+# --- DEFINICIÓN DE CLUSTERS (Para evitar correlación) ---
+CATEGORIES = {
+    'SOL/USDT': 'L1', 'INJ/USDT': 'L1', 'NEAR/USDT': 'L1', 'SUI/USDT': 'L1', 'APT/USDT': 'L1',
+    'FET/USDT': 'AI', 'RNDR/USDT': 'AI', 'ARKM/USDT': 'AI', 'WLD/USDT': 'AI',
+    'DOGE/USDT': 'MEME', 'WIF/USDT': 'MEME', '1000PEPE/USDT': 'MEME', 'BONK/USDT': 'MEME',
+    'BTC/USDT': 'MACRO'
 }
+
+# Portfolio completo (Necesitamos cargar BTC para el filtro, aunque no lo operemos)
+PORTFOLIO = {k: {'tf': '4h'} for k in CATEGORIES.keys()}
 
 def clean_columns(df):
     df.columns = [c.strip().capitalize() for c in df.columns]
@@ -47,14 +41,13 @@ def run_debug_sim():
     market_data = {}
     strategies = {}
     
-    print("\n🛠️ CARGANDO DATOS 4H (Alpha Squad)...")
-    for symbol, conf in PORTFOLIO.items():
+    print("\n🛠️ CARGANDO DATOS 4H...")
+    for symbol in PORTFOLIO.keys():
         safe_symbol = symbol.replace('/', '_')
-        # Prioridad 4h
         pattern = os.path.join(DATA_DIR, f"{safe_symbol}_4h*.csv")
         files = glob.glob(pattern)
         
-        # Fallback 1h
+        # Fallback 1h -> 4h
         if not files:
             pattern_1h = os.path.join(DATA_DIR, f"{safe_symbol}_1h*.csv")
             files = glob.glob(pattern_1h)
@@ -62,11 +55,7 @@ def run_debug_sim():
         else:
             tf_source = '4h'
 
-        if not files: 
-            # Silenciamos el error para no ensuciar la consola si faltan archivos
-            # print(f"⚠️ {symbol}: No data found.") 
-            continue
-            
+        if not files: continue
         target_file = next((f for f in files if "FULL" in f), files[0])
         
         try:
@@ -86,9 +75,7 @@ def run_debug_sim():
             print(f"✅ {symbol} cargado.")
         except: pass
 
-    if not market_data: 
-        print("❌ No se cargaron datos. Revisa que tengas los CSV de los nuevos pares.")
-        return
+    if not market_data: return
 
     # REGIMEN BTC
     btc_regime = pd.Series(True, index=pd.date_range('2023-01-01', '2025-12-31', freq='4h'))
@@ -104,11 +91,11 @@ def run_debug_sim():
     active_positions = {} 
     trades_history = []
     
-    print(f"\n🚀 SIMULACIÓN ({len(full_timeline)} velas 4H)...")
+    print(f"\n🚀 SIMULACIÓN BLINDADA ({len(full_timeline)} velas 4H)...")
     
     for i, current_time in enumerate(full_timeline):
         
-        # Filtro Macro
+        # Filtro Macro BTC
         is_macro_bullish = True
         try:
             if 'BTC/USDT' in market_data:
@@ -161,11 +148,26 @@ def run_debug_sim():
 
         # B) ENTRADAS
         if len(active_positions) >= MAX_OPEN_POSITIONS: continue
-        if not is_macro_bullish: continue # Solo operamos si BTC es Bullish
+        if not is_macro_bullish: continue
 
+        # --- LÓGICA DE CLUSTER ---
+        # Identificar qué categorías ya están activas
+        active_categories = []
+        for s in active_positions.keys():
+            cat = CATEGORIES.get(s, 'UNKNOWN')
+            active_categories.append(cat)
+            
         for sym in PORTFOLIO.keys():
             if sym in active_positions: continue
             if sym not in market_data: continue
+            
+            # 1. NO OPERAR BTC
+            if sym == 'BTC/USDT': continue
+            
+            # 2. FILTRO DE CLUSTER: Si ya hay un AI, no abro otro AI
+            my_cat = CATEGORIES.get(sym, 'UNKNOWN')
+            if my_cat in active_categories: continue
+
             if len(active_positions) >= MAX_OPEN_POSITIONS: break
             
             df = market_data[sym]
@@ -184,24 +186,33 @@ def run_debug_sim():
                     sl = signal['stop_loss']
                     dist = abs(entry - sl)
                     if dist > 0:
-                        risk_amt = wallet * 0.03
-                        if risk_amt > wallet: risk_amt = wallet
+                        # RIESGO 1% FIJO
+                        risk_amt = wallet * RISK_PER_TRADE
+                        
                         coins = risk_amt / dist
                         notional = coins * entry
-                        # Cap de posición 30%
-                        if notional > wallet * 0.3: coins = (wallet * 0.3) / entry; risk_amt = coins * dist
                         
+                        # CAP DE SEGURIDAD 30% DEL WALLET (Para evitar locuras en monedas muy baratas)
+                        if notional > wallet * 0.3: 
+                            coins = (wallet * 0.3) / entry
+                            risk_amt = coins * dist
+                        
+                        # CHEQUEO DE LIQUIDEZ (Si risk_amt > wallet libre, no entra)
+                        if risk_amt > wallet: continue
+
                         wallet -= risk_amt
                         active_positions[sym] = {
                             'entry': entry, 'sl': sl, 'tp': signal['tp_partial'],
                             'coins': coins, 'size_pct': 1.0, 'trail': False, 
                             'h_post': 0.0, 'risk_blocked': risk_amt
                         }
+                        # Actualizamos la lista de categorías activas para que el siguiente del loop no entre
+                        active_categories.append(my_cat)
             except: pass
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     print("\n" + "="*40)
-    print(f"📊 RESULTADO ALPHA SQUAD")
+    print(f"📊 RESULTADO BLINDADO (Risk 1% + Cluster Filter)")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print(f"🔢 Trades:        {len(trades_history)}")
