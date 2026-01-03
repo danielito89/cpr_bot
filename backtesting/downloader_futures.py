@@ -11,7 +11,7 @@ if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 # Binance Futures usa simbolos sin '/' en la API interna, pero CCXT los normaliza.
 SYMBOLS = [
     # --- EQUIPO BREAKOUT (Hydra) ---
-    'FLOKI/USDT', 'WIF/USDT', 'NEAR/USDT', 'INJ/USDT', 'BONK/USDT', 
+    '1000FLOKI/USDT', 'WIF/USDT', 'NEAR/USDT', 'INJ/USDT', '1000BONK/USDT', 
     '1000PEPE/USDT', # Ojo: En Futuros suele ser 1000PEPE
     
     # --- EQUIPO REVERSIÓN (Shield) ---
