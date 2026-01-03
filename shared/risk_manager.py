@@ -1,39 +1,52 @@
+import sys
+import os
+
+# Agregamos root al path para importar config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+
 class RiskManager:
-    def __init__(self, exchange_handler):
-        self.exchange = exchange_handler
-        self.max_daily_drawdown_pct = 0.05  # 5% pérdida máxima diaria
-        self.max_positions_global = 3       # Máximo 3 trades abiertos a la vez (Scalper + Breakout)
-        self.blacklist = []                 # Monedas bloqueadas temporalmente
+    def __init__(self, balance):
+        self.balance = balance
+        self.max_slots = config.RISK_CONFIG['MAX_OPEN_POSITIONS']
+        self.risk_s = config.RISK_CONFIG['TIER_S']
+        self.risk_a = config.RISK_CONFIG['TIER_A']
 
-    def can_open_position(self, symbol):
-        """
-        Verifica si se permite abrir una nueva posición.
-        1. Revisa cantidad de posiciones abiertas.
-        2. (Futuro) Revisar Drawdown diario.
-        """
-        try:
-            # Obtener posiciones abiertas en Binance (Futuros)
-            balance = self.exchange.get_balance()
-            if not balance: return False
-            
-            # Filtramos posiciones con tamaño > 0
-            positions = [p for p in balance['info']['positions'] if float(p['positionAmt']) != 0]
-            
-            if len(positions) >= self.max_positions_global:
-                print(f"🛡️ RISK: Max positions reached ({len(positions)}/{self.max_positions_global})")
-                return False
+    def can_open_position(self, current_open_positions, symbol):
+        # 1. Chequeo de Cupos
+        if len(current_open_positions) >= self.max_slots:
+            return False, "MAX_SLOTS_REACHED"
+        
+        # 2. Chequeo de Duplicados
+        # (Si ya estamos dentro de ese par, no abrimos otro igual)
+        for pos in current_open_positions:
+            if pos['symbol'] == symbol:
+                return False, "ALREADY_IN_POSITION"
+                
+        return True, "OK"
 
-            if symbol in self.blacklist:
-                return False
+    def calculate_position_size(self, symbol, entry_price, stop_loss):
+        # Calcular distancia al stop
+        dist = abs(entry_price - stop_loss)
+        if dist == 0: return 0, 0 # Evitar div por cero
 
-            return True
-
-        except Exception as e:
-            print(f"⚠️ Risk Check Error: {e}")
-            # Ante la duda, NO operar (Fail-Safe)
-            return False
-
-    def get_position_size(self, symbol, risk_per_trade_usd=50):
-        """Calcula tamaño de posición. (Por ahora fijo, luego dinámico por ATR)."""
-        # Aquí podrías implementar lógica: Size = (Account * 0.01) / Distancia_Stop
-        return risk_per_trade_usd # Placeholder
+        # Determinar Tier del activo desde config
+        tier = config.PAIRS_CONFIG.get(symbol, {}).get('tier', 'TIER_A')
+        
+        # Asignar % de riesgo
+        risk_pct = self.risk_s if tier == 'TIER_S' else self.risk_a
+        
+        # Monto a arriesgar en USD
+        risk_usd = self.balance * risk_pct
+        
+        # Cantidad de monedas
+        qty = risk_usd / dist
+        
+        # Valor nocional (Total de la posición)
+        notional_value = qty * entry_price
+        
+        # CAP DE SEGURIDAD: Nunca poner más del 40% del balance en una sola jugada (aunque el SL esté cerca)
+        if notional_value > (self.balance * 0.4):
+            qty = (self.balance * 0.4) / entry_price
+        
+        return qty, notional_value

@@ -1,73 +1,63 @@
-# config.py
+"""
+CONFIGURACIÓN MAESTRA - ESTRATEGIA HYDRA (BREAKOUT)
+Define los pares, riesgos y parámetros operativos.
+"""
 
-# ==============================================================================
-# CONFIGURACIÓN MAESTRA HYDRA HYBRID (VERSION GOLD 443% ROI)
-# ==============================================================================
+# --- GESTIÓN DE RIESGO GLOBAL ---
+# Risk per Trade según Tier (Validado en Backtest)
+RISK_CONFIG = {
+    'TIER_S': 0.03,  # 3% Riesgo (Motores de ganancia)
+    'TIER_A': 0.02,  # 2% Riesgo (Acompañantes)
+    'MAX_OPEN_POSITIONS': 3,
+    'MAX_DAILY_DRAWDOWN': 0.06 # 6% (Si perdemos esto en un día, el bot se duerme)
+}
 
-# --- 1. ARQUITECTURA DE PARES ---
-
-# A) DIVISIÓN RÁPIDA "FAST" (1H) - Volatilidad Pura
-PAIRS_FAST = [
-    '1000PEPE/USDT', # El Alpha (ROI 72%)
-    'FET/USDT',      # El Francotirador (ROI 34%)
-    'WIF/USDT',      # El Volátil (ROI 27%)
-    'DOGE/USDT'      # El Veterano (ROI 16% - Opcional)
-]
-
-# B) DIVISIÓN LENTA "SLOW" (4H) - Estructura & Tendencia
-PAIRS_SLOW = [
-    'SOL/USDT',      # El Rey (ROI 193%)
-    'BTC/USDT'       # El Tanque (ROI 98%)
-]
-
-# Lista Maestra
-PAIRS = PAIRS_FAST + PAIRS_SLOW
-
-# --- 2. GESTIÓN DE CAPITAL ---
-TIMEFRAME_BREAKOUT = '4h'  # Default fallback
-LEVERAGE = 10              
-RISK_PER_TRADE = 0.03      # 3% de la cuenta por operación
-MAX_DRAWDOWN_SESSION = 0.10 
-
-# --- 3. PERFILES DE RIESGO OPTIMIZADOS (GOLD SETTINGS) ---
-
-RISK_PROFILES_BREAKOUT = {
-    # --- DIVISIÓN FAST (1H) ---
-    '1000PEPE/USDT': {
-        'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.9
-    },
-    'FET/USDT': {
-        'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0
+# --- PORTFOLIO "WINNER'S CIRCLE" ---
+# Nota: Usamos símbolos de Futuros (1000FLOKI, etc.)
+PAIRS_CONFIG = {
+    # --- TIER S (Los que pagan la fiesta) ---
+    '1000FLOKI/USDT': {
+        'tier': 'TIER_S',
+        'leverage': 5,       # Apalancamiento conservador
+        'trail_atr': 4.5,    # Aire para memes
+        'tp_atr': 5.5
     },
     'WIF/USDT': {
-        'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6
+        'tier': 'TIER_S',
+        'leverage': 5,
+        'trail_atr': 4.5,
+        'tp_atr': 5.5
     },
-    'DOGE/USDT': {
-        'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.9
+    'NEAR/USDT': {
+        'tier': 'TIER_S',
+        'leverage': 5,
+        'trail_atr': 4.0,    # Estándar para L1
+        'tp_atr': 5.0
+    },
+    'INJ/USDT': {
+        'tier': 'TIER_S',
+        'leverage': 5,
+        'trail_atr': 4.0,
+        'tp_atr': 5.0
     },
 
-    # --- DIVISIÓN SLOW (4H) ---
-    'SOL/USDT': {
-        'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5
+    # --- TIER A (Apoyo) ---
+    '1000BONK/USDT': {
+        'tier': 'TIER_A',
+        'leverage': 5,
+        'trail_atr': 4.5,
+        'tp_atr': 5.0
     },
-    'BTC/USDT': {
-        'sl_atr': 1.5,          # Stop amplio
-        'tp_partial_atr': 2.0,  # TP corto asegurado
-        'trailing_dist_atr': 1.5, 
-        'vol_multiplier': 1.1   # Casi sin filtro (Unlocked)
-    },
-
-    # --- DEFAULT (Seguridad) ---
-    'DEFAULT': {
-        'sl_atr': 1.5, 'tp_partial_atr': 3.0, 'trailing_dist_atr': 2.0, 'vol_multiplier': 1.5
+    'JUP/USDT': {
+        'tier': 'TIER_A',
+        'leverage': 5,
+        'trail_atr': 4.0,
+        'tp_atr': 5.0
     }
 }
 
-# --- 4. SISTEMA ---
-DRY_RUN = False          # False = Dinero Real
-LOG_FILE = "trading_log.txt"
-
-# Legacy (Dejar vacío)
-PAIRS_SCALPER = []
-PROFILES = {}
-MAX_OPEN_POSITIONS = 4
+# --- FILTROS GLOBALES ---
+TIMEFRAME = '4h'
+BTC_SYMBOL = 'BTC/USDT'  # Para el filtro de régimen Macro
+SCORE_THRESHOLD = 30     # Score mínimo de calidad (ADX + Expansion)
+COOLDOWN_CANDLES = 12    # 48hs de espera tras salida

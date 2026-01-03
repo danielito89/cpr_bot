@@ -1,88 +1,60 @@
 import requests
-import threading
-import time
+import os
+from dotenv import load_dotenv
 from datetime import datetime
 
+load_dotenv()
+
 class TelegramBot:
-    def __init__(self, token, chat_id):
-        self.token = token
-        self.chat_id = chat_id
-        self.base_url = f"https://api.telegram.org/bot{token}/sendMessage"
-        self.last_heartbeat_time = 0
+    def __init__(self):
+        self.token = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
-    def _send_request(self, message):
-        """
-        Método interno (privado) que ejecuta el envío.
-        Se ejecuta en un hilo aparte para no frenar al bot.
-        """
-        def _target():
-            try:
-                payload = {
-                    "chat_id": self.chat_id,
-                    "text": message,
-                    "parse_mode": "Markdown" # Permite usar negritas y monospaced
-                }
-                requests.post(self.base_url, json=payload, timeout=10)
-            except Exception as e:
-                print(f"⚠️ Error enviando a Telegram: {e}")
+    def _send(self, message):
+        if not self.token or not self.chat_id:
+            print("⚠️ Telegram no configurado en .env")
+            return
+        
+        try:
+            payload = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': 'HTML' # Permite usar <b>negrita</b>
+            }
+            requests.post(self.base_url, data=payload, timeout=10)
+        except Exception as e:
+            print(f"❌ Error enviando Telegram: {e}")
 
-        # Lanzar en hilo separado (Fire & Forget)
-        threading.Thread(target=_target).start()
-
-    def send_msg(self, message):
-        """Envío genérico (para errores o avisos simples)"""
-        self._send_request(message)
-
-    # --- 🟢 NUEVA ORDEN (Formato Bonito) ---
-    def send_trade_entry(self, symbol, strategy, side, entry, sl, tp):
-        emoji = "🚀" if side == 'LONG' else "📉"
+    def send_entry(self, symbol, price, size, risk_tier):
+        """Alerta de Entrada (Long)"""
+        now = datetime.now().strftime('%H:%M')
         msg = (
-            f"{emoji} *NUEVA ENTRADA: {symbol}*\n"
-            f"🤖 Bot: `{strategy}`\n"
-            f"🔹 Lado: *{side}*\n"
-            f"💵 Precio: `{entry}`\n"
-            f"🛑 Stop Loss: `{sl}`\n"
-            f"🎯 Take Profit: `{tp}`\n"
-            f"⏳ `Esperando desarrollo...`"
+            f"🚀 <b>HYDRA ENTRY ACTIVATED</b>\n\n"
+            f"Asset: <b>{symbol}</b>\n"
+            f"Price: <code>{price}</code>\n"
+            f"Size: {size:.0f} coins\n"
+            f"Tier: {risk_tier}\n"
+            f"⏰ Time: {now}"
         )
-        self._send_request(msg)
+        self._send(msg)
 
-    # --- 🔄 ACTUALIZACIÓN (Trailing / Parciales) ---
-    def send_trade_update(self, symbol, event, details):
-        """
-        event: 'PARTIAL', 'TRAILING', 'CLOSE'
-        details: Texto libre con precios o PnL
-        """
-        if event == 'PARTIAL':
-            icon = "💰"
-            title = "TAKE PROFIT PARCIAL"
-        elif event == 'TRAILING':
-            icon = "🛡️"
-            title = "TRAILING STOP SUBIDO"
-        elif event == 'CLOSE':
-            icon = "🏁"
-            title = "POSICIÓN CERRADA"
-        else:
-            icon = "ℹ️"
-            title = "UPDATE"
-
+    def send_exit(self, symbol, reason, pnl_usd, close_price):
+        """Alerta de Salida (TP o SL)"""
+        emoji = "💰" if pnl_usd >= 0 else "🛑"
         msg = (
-            f"{icon} *{title}: {symbol}*\n"
-            f"{details}"
+            f"{emoji} <b>HYDRA EXIT: {reason}</b>\n\n"
+            f"Asset: <b>{symbol}</b>\n"
+            f"PnL: <b>${pnl_usd:.2f}</b>\n"
+            f"Exit Price: <code>{close_price}</code>"
         )
-        self._send_request(msg)
+        self._send(msg)
 
-    # --- 💓 HEARTBEAT (Anti-Zombies) ---
-    def send_daily_report(self, active_bot_name, scanned_pairs, open_positions_count):
-        """
-        Envía un mensaje para confirmar que el VPS no se colgó.
-        """
-        now = datetime.now().strftime("%d/%m %H:%M")
-        msg = (
-            f"💓 *REPORTE DE VIDA: {active_bot_name}*\n"
-            f"📅 Hora: `{now}`\n"
-            f"👀 Escaneando: `{len(scanned_pairs)}` pares\n"
-            f"💼 Posiciones Abiertas: `{open_positions_count}`\n"
-            f"✅ *Sistema Operativo y Escuchando*"
-        )
-        self._send_request(msg)
+    def send_trailing_update(self, symbol, new_sl):
+        """Aviso de movimiento de Stop"""
+        msg = f"🛡️ <b>Trailing Update</b> ({symbol})\nNew Stop Loss: <code>{new_sl}</code>"
+        self._send(msg)
+        
+    def send_msg(self, text):
+        """Mensaje genérico"""
+        self._send(f"🤖 <b>SYSTEM MSG:</b> {text}")
