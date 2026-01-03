@@ -1,4 +1,4 @@
-print("🟢 INICIANDO SIMULACIÓN AGRESIVA (DIRECT BREAKOUT)...")
+print("🟢 INICIANDO SIMULACIÓN 'GOLD' (Direct + SMA200 + Params Optimizados)...")
 
 import sys
 import os
@@ -16,17 +16,37 @@ except ImportError as e:
 
 # --- CONFIGURACIÓN ---
 INITIAL_CAPITAL = 5000
-MAX_OPEN_POSITIONS = 4  # Damos más espacio para que entren los memes
+MAX_OPEN_POSITIONS = 4 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
-# --- PARÁMETROS AGRESIVOS (Vol 1.5 standard) ---
+# --- TUS PARÁMETROS OPTIMIZADOS (LA CLAVE DEL ÉXITO) ---
+# Volvimos a PEPE 1.9, FET 2.0, etc. Esto filtra el ruido.
 PORTFOLIO = {
-    '1000PEPE/USDT': {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.5}},
-    'FET/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 1.5}},
-    'WIF/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.5}},
-    'DOGE/USDT':     {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}},
-    'SOL/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}},
-    'BTC/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.1}}
+    '1000PEPE/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.9} # Alto Vol
+    },
+    'FET/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0} # Muy Alto Vol
+    },
+    'WIF/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}
+    },
+    'DOGE/USDT': {
+        'tf': '1h', 
+        'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.9}
+    },
+    # SLOW (4H)
+    'SOL/USDT': {
+        'tf': '4h', 
+        'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}
+    },
+    'BTC/USDT': {
+        'tf': '4h', 
+        'params': {'sl_atr': 1.5, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.1} # Low Vol
+    }
 }
 
 def clean_columns(df):
@@ -71,7 +91,7 @@ def run_debug_sim():
     active_positions = {} 
     trades_history = []
     
-    print(f"\n🚀 EJECUTANDO SIMULACIÓN AGRESIVA ({len(full_timeline)} pasos)...")
+    print(f"\n🚀 EJECUTANDO SIMULACIÓN GOLD ({len(full_timeline)} pasos)...")
     
     for i, current_time in enumerate(full_timeline):
         if i % 10000 == 0: print(f"   ... {int(i/len(full_timeline)*100)}%")
@@ -90,7 +110,7 @@ def run_debug_sim():
             }
             
             idx = df.index.get_loc(current_time)
-            # Solo necesitamos la última vela para salir
+            # Solo la última vela para salida es suficiente
             window = df.iloc[max(0, idx-50) : idx+1] 
             
             try:
@@ -122,7 +142,7 @@ def run_debug_sim():
 
         for sym in closed_ids: del active_positions[sym]
 
-        # B) ENTRADAS (Directas)
+        # B) ENTRADAS
         if len(active_positions) >= MAX_OPEN_POSITIONS: continue
             
         for sym in PORTFOLIO.keys():
@@ -135,10 +155,11 @@ def run_debug_sim():
             
             try:
                 idx = df.index.get_loc(current_time)
-                if idx < 50: continue
-                window = df.iloc[idx-50 : idx+1]
+                # --- FIX: Ventana de 300 velas para que SMA200 funcione ---
+                if idx < 300: continue
+                window = df.iloc[idx-300 : idx+1]
                 
-                st_dummy = {'status': 'WAITING_BREAKOUT'} # Siempre reseteamos a Waiting porque es Directo
+                st_dummy = {'status': 'WAITING_BREAKOUT'}
                 
                 signal = strategies[sym].get_signal(window, st_dummy)
                 
@@ -147,7 +168,6 @@ def run_debug_sim():
                     sl = signal['stop_loss']
                     dist = abs(entry - sl)
                     if dist > 0:
-                        # Gestión de riesgo simple: 3% riesgo fijo
                         risk = wallet * 0.03
                         coins = risk / dist
                         notional = coins * entry
@@ -161,7 +181,7 @@ def run_debug_sim():
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     print("\n" + "="*40)
-    print(f"📊 RESULTADO FINAL (Directo + Agresivo)")
+    print(f"📊 RESULTADO FINAL (Optimizada + SMA200)")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print(f"🔢 Trades:        {len(trades_history)}")
