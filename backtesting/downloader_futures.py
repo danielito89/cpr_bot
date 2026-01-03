@@ -4,24 +4,32 @@ import os
 import time
 
 # --- CONFIGURACIÓN ---
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+DATA_DIR = os.path.join(os.path.dirname(__file__), 'data_futures') # Guardamos en carpeta separada
 if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 
-# LISTA DEFINITIVA "HIGH OCTANE" (Squeeze Friendly)
+# LISTA COMPLETA (FUTUROS PERPETUOS)
+# Binance Futures usa simbolos sin '/' en la API interna, pero CCXT los normaliza.
 SYMBOLS = [
-    'BTC/USDT',   # Solo para filtro Macro
-    # --- TIER S (Los Reyes del Breakout) ---
-    'SOL/USDT', 'ETH/USDT'
+    # --- EQUIPO BREAKOUT (Hydra) ---
+    'FLOKI/USDT', 'WIF/USDT', 'NEAR/USDT', 'INJ/USDT', 'BONK/USDT', 
+    '1000PEPE/USDT', # Ojo: En Futuros suele ser 1000PEPE
+    
+    # --- EQUIPO REVERSIÓN (Shield) ---
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'ADA/USDT' 
 ]
 
 TIMEFRAME = '4h'
 START_DATE = "2023-01-01 00:00:00"
 
-def download_data():
-    exchange = ccxt.binance({'enableRateLimit': True})
-    since_ms = exchange.parse8601(START_DATE)
+def download_futures_data():
+    # INSTANCIAMOS BINANCE FUTURES
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'future'} # <--- LA CLAVE
+    })
     
-    print(f"🚀 DESCARGANDO DATA 'HIGH OCTANE' ({TIMEFRAME})...\n")
+    since_ms = exchange.parse8601(START_DATE)
+    print(f"🚀 DESCARGANDO FUTUROS PERPETUOS ({TIMEFRAME})...\n")
 
     for symbol in SYMBOLS:
         print(f"⏳ {symbol}...", end=" ")
@@ -38,6 +46,7 @@ def download_data():
                 time.sleep(exchange.rateLimit / 1000)
                 print(".", end="", flush=True)
             except Exception as e:
+                # A veces el ticker cambia nombre (ej: 1000PEPE vs PEPE)
                 print(f"❌ Error: {e}")
                 break
         
@@ -48,12 +57,13 @@ def download_data():
         df.set_index('Date', inplace=True)
         df.drop(columns=['Timestamp'], inplace=True)
         
-        safe_symbol = symbol.replace('/', '_')
-        if safe_symbol == 'PEPE_USDT': safe_symbol = '1000PEPE_USDT'
-            
-        path = os.path.join(DATA_DIR, f"{safe_symbol}_{TIMEFRAME}_FULL.csv")
+        # Nombre de archivo distintivo
+        safe_symbol = symbol.replace('/', '')
+        filename = f"{safe_symbol}_{TIMEFRAME}_FUTURES.csv"
+        path = os.path.join(DATA_DIR, filename)
+        
         df.to_csv(path)
-        print(f" ✅ ({len(df)})")
+        print(f" ✅ ({len(df)} velas)")
 
 if __name__ == "__main__":
-    download_data()
+    download_futures_data()
