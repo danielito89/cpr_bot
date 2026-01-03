@@ -9,10 +9,10 @@ class BreakoutBotStrategy:
         self.kc_length = 20
         self.kc_mult = 1.5
         
-        # --- OPT 3: DEJANDO CORRER GANANCIAS ---
+        # --- FIX 2: TP MÁS REALISTA ---
         self.sl_atr = 2.0
-        self.tp_partial_atr = 5.5      # Antes 4.0 -> Buscamos Home Runs
-        self.trailing_dist_atr = 2.5   # Antes 3.0 -> Aseguramos un poco más ajustado al subir
+        self.tp_partial_atr = 3.5      # Bajamos de 5.5 a 3.5 (Bank Profit)
+        self.trailing_dist_atr = 3.0   # Trailing un poco más holgado para dejar respirar
         
         self.adx_period = 14
         self.cooldown_candles = 10 
@@ -33,22 +33,20 @@ class BreakoutBotStrategy:
         df['BB_Upper'] = df['BB_Mid'] + (df['BB_Std'] * self.bb_mult)
         df['BB_Lower'] = df['BB_Mid'] - (df['BB_Std'] * self.bb_mult)
         
-        # --- OPT 1: DETECCIÓN DE EXPANSIÓN DE BANDAS ---
+        # Ancho y Cambio
         df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
-        # Cambio del ancho respecto a la vela anterior
         df['BB_Width_Change'] = df['BB_Width'] - df['BB_Width'].shift(1)
         
         # 3. Keltner Channels
         df['KC_Upper'] = df['BB_Mid'] + (df['ATR'] * self.kc_mult)
         df['KC_Lower'] = df['BB_Mid'] - (df['ATR'] * self.kc_mult)
         
-        # Squeeze Relativo (0.85 factor)
-        bb_width = df['BB_Width']
-        kc_width = df['KC_Upper'] - df['KC_Lower']
-        kc_width = kc_width.replace(0, np.nan)
-        df['Squeeze_On'] = bb_width < (kc_width * 0.85)
+        # Squeeze Relativo (0.85)
+        # Evitamos division por cero
+        kc_width = (df['KC_Upper'] - df['KC_Lower']).replace(0, np.nan)
+        df['Squeeze_On'] = df['BB_Width'] < (kc_width * 0.85)
         
-        # 4. ADX & Momentum
+        # 4. ADX (Wilder)
         up = df['High'] - df['High'].shift(1)
         down = df['Low'].shift(1) - df['Low']
         pos_dm = np.where((up > down) & (up > 0), up, 0.0)
@@ -101,41 +99,55 @@ class BreakoutBotStrategy:
                         return {'action': 'UPDATE_TRAILING', 'new_sl': new_sl, 'highest_price_post_tp': new_high}
             return {'action': 'HOLD'}
 
-        # --- ENTRADAS (HYDRA SQUEEZE 2.0) ---
+        # --- ENTRADAS (QUALITY SCORE) ---
         if status == 'WAITING_BREAKOUT' or status == 'COOLDOWN':
             if status == 'COOLDOWN':
                  last_exit = pd.to_datetime(state_data.get('last_exit_time'))
+                 # 40 horas cooldown
                  if (curr.name - last_exit).total_seconds() / 3600 < (self.cooldown_candles * 4): 
                      return {'action': 'HOLD'}
 
-            # 1. Venimos de Squeeze reciente?
+            # 1. Venimos de Squeeze?
             recent_squeeze = window['Squeeze_On'].iloc[-13:-1].any()
             if not recent_squeeze: return {'action': 'HOLD'}
             
             # 2. ADX Rising
             adx_rising = curr['ADX'] > prev['ADX']
             
-            # 3. Momentum Temprano (Precio sube y está en zona alta)
+            # 3. Momentum Temprano
             momentum_up = (curr['Close'] > prev['Close']) and (curr['Close'] > curr['BB_Mid'])
             
-            # 4. OPT 1: BANDAS EXPANDIÉNDOSE (Confirmación Física)
-            # La boca del cocodrilo se tiene que abrir.
-            bb_expanding = curr['BB_Width_Change'] > 0
+            # --- FIX 1: ACELERACIÓN DE EXPANSIÓN ---
+            # La expansión actual debe ser mayor al promedio de las últimas 5 velas
+            avg_expansion = window['BB_Width_Change'].iloc[-6:-1].mean()
+            bb_accelerating = curr['BB_Width_Change'] > avg_expansion and curr['BB_Width_Change'] > 0
             
-            if adx_rising and momentum_up and bb_expanding:
-                atr = curr['ATR']
-                entry = curr['Close']
+            if adx_rising and momentum_up and bb_accelerating:
                 
-                return {
-                    'action': 'ENTER_LONG',
-                    'new_status': 'IN_POSITION',
-                    'entry_price': entry,
-                    'stop_loss': entry - (atr * self.sl_atr),
-                    'tp_partial': entry + (atr * self.tp_partial_atr),
-                    'atr_at_breakout': atr,
-                    'position_size_pct': 1.0,
-                    'trailing_active': False,
-                    'highest_price_post_tp': 0.0
-                }
+                # --- FIX 3: SCORE DE CALIDAD ---
+                # Score = ADX + (% de expansión relativa al ancho)
+                # Si el ancho se duplica, eso suma mucho puntaje.
+                
+                width = curr['BB_Width'] if curr['BB_Width'] > 0 else 0.0001
+                expansion_ratio = (curr['BB_Width_Change'] / width) * 100
+                
+                score = curr['ADX'] + expansion_ratio
+                
+                # SOLO ENTRAR SI EL SCORE ES ALTO (> 25)
+                if score > 25:
+                    atr = curr['ATR']
+                    entry = curr['Close']
+                    
+                    return {
+                        'action': 'ENTER_LONG',
+                        'new_status': 'IN_POSITION',
+                        'entry_price': entry,
+                        'stop_loss': entry - (atr * self.sl_atr),
+                        'tp_partial': entry + (atr * self.tp_partial_atr),
+                        'atr_at_breakout': atr,
+                        'position_size_pct': 1.0,
+                        'trailing_active': False,
+                        'highest_price_post_tp': 0.0
+                    }
                 
         return {'action': 'HOLD'}
