@@ -100,11 +100,11 @@ def run_bot_cycle():
                         exchange.set_leverage(symbol.replace('/', ''), conf['leverage'])
                         
                         # 2. Market Buy
-                        # order = exchange.exchange.create_market_buy_order(symbol, qty)
+                        order = exchange.exchange.create_market_buy_order(symbol, qty)
                         # TODO: Descomentar linea de arriba para LIVE
                         
                         # 3. Stop Loss Order
-                        # exchange.exchange.create_order(symbol, 'stop_market', 'sell', qty, params={'stopPrice': sl_price})
+                        exchange.exchange.create_order(symbol, 'stop_market', 'sell', qty, params={'stopPrice': sl_price})
                         
                         bot_telegram.send_entry(symbol, entry_price, qty, conf['tier'])
                 else:
@@ -115,7 +115,7 @@ def run_bot_cycle():
                 # Si la estrategia dice EXIT
                 if 'EXIT' in action:
                     print(f"👋 CERRANDO POSICIÓN: {symbol} ({action})")
-                    # exchange.exchange.create_market_sell_order(symbol, current_pos['amount'])
+                    exchange.exchange.create_market_sell_order(symbol, current_pos['amount'])
                     # bot_telegram.send_exit(...)
                     pass
                 
@@ -124,7 +124,7 @@ def run_bot_cycle():
                     new_sl = signal['new_sl']
                     print(f"🛡️ ACTUALIZANDO SL: {symbol} a {new_sl}")
                     # Cancelar SL anterior y poner uno nuevo
-                    # bot_telegram.send_trailing_update(symbol, new_sl)
+                    bot_telegram.send_trailing_update(symbol, new_sl)
 
         except Exception as e:
             print(f"❌ Error procesando {symbol}: {e}")
