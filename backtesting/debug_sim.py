@@ -1,4 +1,4 @@
-print("🟢 INICIANDO SIMULACIÓN 'FRANCOTIRADOR' (Score > 25 + Cluster Control)...")
+print("🟢 INICIANDO SIMULACIÓN 'FRANCOTIRADOR' (DIAMANTE)...")
 
 import sys
 import os
@@ -195,7 +195,7 @@ def run_debug_sim():
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     print("\n" + "="*40)
-    print(f"📊 RESULTADO FINAL (SCORE > 25)")
+    print(f"📊 RESULTADO FINAL")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print(f"🔢 Trades:        {len(trades_history)}")

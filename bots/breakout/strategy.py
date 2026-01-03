@@ -9,10 +9,11 @@ class BreakoutBotStrategy:
         self.kc_length = 20
         self.kc_mult = 1.5
         
-        # Parámetros Salida
+        # --- AJUSTE FINO V3: PROTECCIÓN DE GANANCIAS ---
         self.sl_atr = 2.0
-        self.tp_partial_atr = 3.5      # Target rápido
-        self.trailing_dist_atr = 3.0   
+        self.tp_partial_atr = 3.5      
+        # Bajamos de 3.0 a 2.5. Aseguramos profit antes en la subida parabólica.
+        self.trailing_dist_atr = 2.5   
         
         self.adx_period = 14
         self.cooldown_candles = 10 
@@ -37,14 +38,14 @@ class BreakoutBotStrategy:
         df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
         df['BB_Width_Change'] = df['BB_Width'] - df['BB_Width'].shift(1)
         
-        # PROMEDIO DE ANCHO (Para detectar expansión relativa real)
+        # Promedio Ancho (Base para expansión relativa)
         df['BB_Width_SMA'] = df['BB_Width'].rolling(window=20).mean()
         
         # 3. Keltner Channels
         df['KC_Upper'] = df['BB_Mid'] + (df['ATR'] * self.kc_mult)
         df['KC_Lower'] = df['BB_Mid'] - (df['ATR'] * self.kc_mult)
         
-        # Squeeze Relativo (0.85)
+        # Squeeze Relativo
         kc_width = (df['KC_Upper'] - df['KC_Lower']).replace(0, np.nan)
         df['Squeeze_On'] = df['BB_Width'] < (kc_width * 0.85)
         
@@ -66,7 +67,7 @@ class BreakoutBotStrategy:
         dx = 100 * abs(pos_di - neg_di) / (pos_di + neg_di)
         df['ADX'] = wilder_smooth(dx, self.adx_period)
         
-        # PROMEDIO DE ADX (Para detectar aceleración de tendencia)
+        # Promedio ADX
         df['ADX_SMA'] = df['ADX'].rolling(window=10).mean()
 
         return df
@@ -104,47 +105,38 @@ class BreakoutBotStrategy:
                         return {'action': 'UPDATE_TRAILING', 'new_sl': new_sl, 'highest_price_post_tp': new_high}
             return {'action': 'HOLD'}
 
-        # --- ENTRADAS (ÉLITE SNIPER) ---
+        # --- ENTRADAS (HYPER-ÉLITE) ---
         if status == 'WAITING_BREAKOUT' or status == 'COOLDOWN':
             if status == 'COOLDOWN':
                  last_exit = pd.to_datetime(state_data.get('last_exit_time'))
-                 # 40 horas cooldown
                  if (curr.name - last_exit).total_seconds() / 3600 < (self.cooldown_candles * 4): 
                      return {'action': 'HOLD'}
 
-            # 1. Squeeze Reciente
+            # 1. Squeeze
             recent_squeeze = window['Squeeze_On'].iloc[-13:-1].any()
             if not recent_squeeze: return {'action': 'HOLD'}
             
-            # 2. ADX Élite (Fuerte y Acelerando)
-            # Debe ser > 20 y mayor que su promedio reciente
+            # 2. ADX Strong
             adx_ok = (curr['ADX'] > 20) and (curr['ADX'] > curr['ADX_SMA'])
             if not adx_ok: return {'action': 'HOLD'}
             
-            # 3. Momentum Temprano
+            # 3. Momentum
             momentum_up = (curr['Close'] > prev['Close']) and (curr['Close'] > curr['BB_Mid'])
             if not momentum_up: return {'action': 'HOLD'}
             
-            # 4. Expansión Relativa de Bandas (La clave)
-            # ¿Cuánto creció el ancho respecto al ancho promedio?
-            # Si avg_width es 100 y creció 5, ratio es 0.05 (5%). Queremos > 10% (0.1)
+            # 4. Expansión Relativa > 10%
             avg_width = curr['BB_Width_SMA']
             if avg_width == 0: avg_width = 0.0001
-            
-            expansion_change = curr['BB_Width_Change']
-            expansion_ratio = expansion_change / avg_width
-            
-            # Exigimos que se abra al menos un 10% respecto al promedio
+            expansion_ratio = curr['BB_Width_Change'] / avg_width
             bb_exploding = expansion_ratio > 0.10 
             
             if bb_exploding:
-                # 5. Score Final
-                # Score = ADX + (Expansion% * 100)
-                # Ejemplo: ADX 25 + (0.15 * 100) = 40
+                # 5. SCORE DE CALIDAD
                 score = curr['ADX'] + (expansion_ratio * 100)
                 
-                # UMBRAL ÉLITE: 35
-                if score > 35:
+                # --- AJUSTE FINO V3: VARA ALTA ---
+                # Subimos de 35 a 40.
+                if score > 40:
                     atr = curr['ATR']
                     entry = curr['Close']
                     
