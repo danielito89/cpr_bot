@@ -1,10 +1,9 @@
-print("🟢 INICIANDO SIMULACIÓN 'FRANCOTIRADOR' (DIAMANTE)...")
+print("🟢 INICIANDO SIMULACIÓN 'HIGH OCTANE' CON REPORTE DETALLADO...")
 
 import sys
 import os
 import pandas as pd
 import glob
-import numpy as np # Importante
 
 PROJECT_ROOT = "/home/orangepi/bot_cpr"
 if PROJECT_ROOT not in sys.path: sys.path.append(PROJECT_ROOT)
@@ -23,9 +22,10 @@ DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
 # --- CLUSTERS ---
 CATEGORIES = {
-    'SOL/USDT': 'L1', 'INJ/USDT': 'L1', 'NEAR/USDT': 'L1', 'SUI/USDT': 'L1', 'APT/USDT': 'L1',
-    'FET/USDT': 'AI', 'RNDR/USDT': 'AI', 'ARKM/USDT': 'AI', 'WLD/USDT': 'AI',
-    'DOGE/USDT': 'MEME', 'WIF/USDT': 'MEME', '1000PEPE/USDT': 'MEME', 'BONK/USDT': 'MEME',
+    'SOL/USDT': 'L1', 'INJ/USDT': 'L1', 'NEAR/USDT': 'L1', 'SUI/USDT': 'L1', 'APT/USDT': 'L1', 'SEI/USDT': 'L1', 'TIA/USDT': 'L1',
+    'FET/USDT': 'AI', 'RNDR/USDT': 'AI',
+    'DOGE/USDT': 'MEME', 'WIF/USDT': 'MEME', 'BONK/USDT': 'MEME', 'FLOKI/USDT': 'MEME',
+    'JUP/USDT': 'DEFI', 'PYTH/USDT': 'DEFI',
     'BTC/USDT': 'MACRO'
 }
 
@@ -48,6 +48,7 @@ def run_debug_sim():
         files = glob.glob(pattern)
         
         if not files:
+            # Fallback 1h
             pattern_1h = os.path.join(DATA_DIR, f"{safe_symbol}_1h*.csv")
             files = glob.glob(pattern_1h)
             tf_source = '1h'
@@ -88,9 +89,11 @@ def run_debug_sim():
     wallet = INITIAL_CAPITAL
     bot_memory = {sym: {'status': 'WAITING_BREAKOUT', 'last_exit_time': None} for sym in PORTFOLIO}
     active_positions = {} 
-    trades_history = []
     
-    print(f"\n🚀 SIMULACIÓN FRANCOTIRADOR ({len(full_timeline)} velas 4H)...")
+    # --- ESTADÍSTICAS POR PAR ---
+    symbol_stats = {sym: {'trades': 0, 'pnl': 0.0, 'wins': 0} for sym in PORTFOLIO}
+    
+    print(f"\n🚀 SIMULACIÓN ({len(full_timeline)} velas 4H)...")
     
     for i, current_time in enumerate(full_timeline):
         
@@ -124,18 +127,26 @@ def run_debug_sim():
                 exit_price = pos['tp']
                 realized = (pos['coins'] * 0.5 * exit_price) - (pos['coins'] * 0.5 * pos['entry'])
                 wallet += (pos['risk_blocked'] * 0.5) + realized
+                
                 pos['coins'] *= 0.5; pos['risk_blocked'] *= 0.5; pos['size_pct'] = 0.5
                 pos['sl'] = signal['new_sl']; pos['trail'] = True; pos['h_post'] = signal['highest_price_post_tp']
                 active_positions[sym] = pos
-                trades_history.append([current_time, sym, 'TP1', realized])
+                
+                # Stats (Contamos TP parcial como parte del PnL pero no cerramos trade aun)
+                symbol_stats[sym]['pnl'] += realized
 
             elif act in ['EXIT_SL', 'EXIT_TRAILING']:
                 exit_price = min(curr['Low'], pos['sl'])
                 realized = (pos['coins'] * exit_price) - (pos['coins'] * pos['entry'])
                 wallet += pos['risk_blocked'] + realized
                 closed_ids.append(sym)
-                trades_history.append([current_time, sym, act, realized])
+                
                 bot_memory[sym] = {'status': 'COOLDOWN', 'last_exit_time': str(current_time)}
+                
+                # Stats
+                symbol_stats[sym]['pnl'] += realized
+                symbol_stats[sym]['trades'] += 1
+                if realized > 0: symbol_stats[sym]['wins'] += 1
 
             elif act == 'UPDATE_TRAILING':
                 pos['sl'] = signal['new_sl']; pos['h_post'] = signal['highest_price_post_tp']
@@ -152,7 +163,7 @@ def run_debug_sim():
         for sym in PORTFOLIO.keys():
             if sym in active_positions: continue
             if sym not in market_data: continue
-            if sym == 'BTC/USDT': continue
+            if sym == 'BTC/USDT': continue # No operamos BTC
             
             my_cat = CATEGORIES.get(sym, 'UNKNOWN')
             if my_cat in active_categories: continue
@@ -176,13 +187,10 @@ def run_debug_sim():
                     dist = abs(entry - sl)
                     if dist > 0:
                         risk_amt = wallet * RISK_PER_TRADE
-                        if risk_amt > wallet: risk_amt = wallet # Safety
-                        
+                        if risk_amt > wallet: risk_amt = wallet
                         coins = risk_amt / dist
                         notional = coins * entry
-                        
-                        if notional > wallet * 0.3: 
-                            coins = (wallet * 0.3) / entry; risk_amt = coins * dist
+                        if notional > wallet * 0.3: coins = (wallet * 0.3) / entry; risk_amt = coins * dist
                         
                         wallet -= risk_amt
                         active_positions[sym] = {
@@ -194,12 +202,30 @@ def run_debug_sim():
             except: pass
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
-    print("\n" + "="*40)
+    
+    print("\n" + "="*50)
     print(f"📊 RESULTADO FINAL")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
-    print(f"🔢 Trades:        {len(trades_history)}")
-    print("="*40)
+    print("="*50)
+    
+    print("\n📋 DESGLOSE POR ACTIVO:")
+    print(f"{'PAR':<15} | {'TRADES':<8} | {'PnL ($)':<12} | {'WIN RATE':<10}")
+    print("-" * 55)
+    
+    total_trades = 0
+    
+    # Ordenar por PnL
+    sorted_stats = sorted(symbol_stats.items(), key=lambda x: x[1]['pnl'], reverse=True)
+    
+    for sym, s in sorted_stats:
+        if s['trades'] > 0:
+            wr = (s['wins'] / s['trades']) * 100
+            print(f"{sym:<15} | {s['trades']:<8} | {s['pnl']:<12.2f} | {wr:<9.1f}%")
+            total_trades += s['trades']
+            
+    print("-" * 55)
+    print(f"TOTAL TRADES: {total_trades}")
 
 if __name__ == "__main__":
     run_debug_sim()
