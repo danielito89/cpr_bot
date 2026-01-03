@@ -4,12 +4,15 @@ import numpy as np
 class BreakoutBotStrategy:
     def __init__(self):
         self.lookback = 20
-        # Valores por defecto (serán sobrescritos por el simulador)
         self.sl_atr = 1.5
         self.tp_partial_atr = 2.0
         self.trailing_dist_atr = 1.5
         self.vol_multiplier = 1.5 
-        self.sma_period = 200 
+        
+        # --- EL CAMBIO CLAVE ---
+        # Bajamos de 200 a 50. 
+        # Esto permite entrar en la recuperación temprana, pero filtra la caída libre.
+        self.sma_period = 50 
 
     def calculate_indicators(self, df):
         df = df.copy()
@@ -27,7 +30,6 @@ class BreakoutBotStrategy:
         return df
 
     def get_signal(self, window, state_data):
-        # Necesitamos datos suficientes para SMA 200
         if len(window) < self.sma_period: return {'action': 'HOLD'}
             
         curr = window.iloc[-1]
@@ -59,9 +61,8 @@ class BreakoutBotStrategy:
                         return {'action': 'UPDATE_TRAILING', 'new_sl': new_sl, 'highest_price_post_tp': new_high}
             return {'action': 'HOLD'}
 
-        # --- ENTRADAS (DIRECTAS + FILTROS) ---
+        # --- ENTRADAS (Directas + SMA 50) ---
         if status == 'WAITING_BREAKOUT' or status == 'COOLDOWN':
-            # Cooldown simple
             if status == 'COOLDOWN':
                  last_exit = pd.to_datetime(state_data.get('last_exit_time'))
                  if (curr.name - last_exit).total_seconds() / 3600 < 3: return {'action': 'HOLD'}
@@ -74,9 +75,9 @@ class BreakoutBotStrategy:
             
             # 1. Breakout Precio
             if curr['Close'] > res:
-                # 2. Filtro Volumen (El parámetro clave)
+                # 2. Filtro Volumen (Usamos el multiplicador que viene del config)
                 if curr['Volume'] > (vol_sma * self.vol_multiplier):
-                    # 3. Filtro Tendencia (Seguridad anti -98%)
+                    # 3. Filtro Tendencia (SMA 50)
                     if curr['Close'] > trend_sma:
                         
                         atr = curr['ATR']
