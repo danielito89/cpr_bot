@@ -1,4 +1,4 @@
-print("🟢 INICIANDO SIMULACIÓN 'HYDRA SQUEEZE' (4H Only)...")
+print("🟢 INICIANDO SIMULACIÓN 'HYDRA PHASE 2' (BTC Filter + Expanding BB)...")
 
 import sys
 import os
@@ -16,18 +16,15 @@ except ImportError as e:
 
 # --- CONFIGURACIÓN ---
 INITIAL_CAPITAL = 5000
-MAX_OPEN_POSITIONS = 3 # Reducimos a 3 para concentrar capital en calidad
+MAX_OPEN_POSITIONS = 3
 DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
-# --- PORTFOLIO ESTRUCTURAL (4H) ---
-# Nota: Usamos los mismos archivos CSV si tienen datos, pero forzamos el análisis a 4H
-# Asegúrate de tener los archivos _4h_FULL.csv. Si no, el script intentará usar lo que haya.
+# Portfolio Estructural 4H
 PORTFOLIO = {
-    'SOL/USDT':      {'tf': '4h', 'params': {}},
-    'BTC/USDT':      {'tf': '4h', 'params': {}},
-    'FET/USDT':      {'tf': '4h', 'params': {}}, # FET en 4H es mucho más limpio
-    'DOGE/USDT':     {'tf': '4h', 'params': {}}, # DOGE en 4H evita ruido
-    # Opcional: Si tienes datos de ETH o BNB, agrégalos aquí.
+    'SOL/USDT': {'tf': '4h', 'params': {}},
+    'BTC/USDT': {'tf': '4h', 'params': {}},
+    'FET/USDT': {'tf': '4h', 'params': {}}, 
+    'DOGE/USDT': {'tf': '4h', 'params': {}},
 }
 
 def clean_columns(df):
@@ -40,62 +37,77 @@ def run_debug_sim():
     market_data = {}
     strategies = {}
     
+    # 1. CARGA DE DATOS
     print("\n🛠️ CARGANDO DATOS 4H...")
     for symbol, conf in PORTFOLIO.items():
         safe_symbol = symbol.replace('/', '_')
-        # Buscamos prioritariamente archivos 4H
         pattern = os.path.join(DATA_DIR, f"{safe_symbol}_4h*.csv")
         files = glob.glob(pattern)
         
-        # Fallback: Si no hay 4h, buscamos 1h y resampleamos CORRECTAMENTE (no ffill fantasma, sino resample matemático)
-        if not files:
+        if not files: # Fallback 1h -> 4h
             pattern_1h = os.path.join(DATA_DIR, f"{safe_symbol}_1h*.csv")
             files = glob.glob(pattern_1h)
             tf_source = '1h'
         else:
             tf_source = '4h'
 
-        if not files: 
-            print(f"⚠️ {symbol}: No files found.")
-            continue
-            
+        if not files: continue
         target_file = next((f for f in files if "FULL" in f), files[0])
         
         try:
             df = pd.read_csv(target_file, index_col=0, parse_dates=True)
             df = clean_columns(df)
             
-            # RESAMPLE CORRECTO SI VIENE DE 1H -> 4H
             if tf_source == '1h':
                 logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
                 df = df.resample('4h').agg(logic).dropna()
             
-            # Calculamos indicadores
             strat = BreakoutBotStrategy()
             df = strat.calculate_indicators(df)
-            
-            # Filtro fecha
             df = df[(df.index >= '2023-01-01') & (df.index <= '2025-12-31')]
             
             market_data[symbol] = df
             strategies[symbol] = strat
             print(f"✅ {symbol} ({tf_source}->4h) cargado.")
-        except Exception as e: 
-            print(f"❌ {symbol}: {e}")
+        except: pass
 
     if not market_data: return
 
-    # TIMELINE (Eventos cada 4H)
+    # --- OPT 2: PRE-CÁLCULO DE RÉGIMEN DE BTC ---
+    print("🧠 Calculando Régimen Macro (BTC SMA 200)...")
+    btc_regime = pd.Series(True, index=pd.date_range('2023-01-01', '2025-12-31', freq='4h')) # Default Bullish
+    
+    if 'BTC/USDT' in market_data:
+        btc_df = market_data['BTC/USDT']
+        # SMA 200 periodos en 4H (son 33 días aprox, buena tendencia macro)
+        btc_sma = btc_df['Close'].rolling(window=200).mean()
+        # True si BTC > SMA, False si BTC < SMA
+        btc_is_bullish = btc_df['Close'] > btc_sma
+        btc_regime = btc_is_bullish.reindex(btc_regime.index, method='ffill').fillna(False)
+    else:
+        print("⚠️ ALERTA: BTC no está en la data. No se aplicará filtro de régimen.")
+
+    # SIMULACIÓN
     full_timeline = sorted(list(set().union(*[df.index for df in market_data.values()])))
     wallet = INITIAL_CAPITAL
     bot_memory = {sym: {'status': 'WAITING_BREAKOUT', 'last_exit_time': None} for sym in PORTFOLIO}
     active_positions = {} 
     trades_history = []
     
-    print(f"\n🚀 SIMULACIÓN SQUEEZE ({len(full_timeline)} velas 4H)...")
+    print(f"\n🚀 SIMULACIÓN HYDRA PHASE 2 ({len(full_timeline)} velas 4H)...")
     
     for i, current_time in enumerate(full_timeline):
         
+        # Estado Macro (BTC Bullish?)
+        # Usamos try/except por si la fecha exacta no coincide, usamos asof para buscar la anterior mas cercana
+        is_macro_bullish = True
+        try:
+            if 'BTC/USDT' in market_data:
+                # Busca el valor en btc_regime. Si no está la hora exacta, pilla la anterior.
+                idx = btc_regime.index.get_indexer([current_time], method='pad')[0]
+                if idx != -1: is_macro_bullish = btc_regime.iloc[idx]
+        except: pass
+
         # A) SALIDAS
         closed_ids = []
         for sym, pos in active_positions.items():
@@ -104,14 +116,12 @@ def run_debug_sim():
             
             curr = df.loc[current_time]
             strat = strategies[sym]
-            
             st = {
                 'status': 'IN_POSITION', 'entry_price': pos['entry'], 'stop_loss': pos['sl'],
                 'tp_partial': pos['tp'], 'position_size_pct': pos['size_pct'],
                 'trailing_active': pos['trail'], 'highest_price_post_tp': pos['h_post']
             }
             
-            # Ventana mínima
             idx = df.index.get_loc(current_time)
             window = df.iloc[max(0, idx-50):idx+1]
             signal = strat.get_signal(window, st)
@@ -121,12 +131,8 @@ def run_debug_sim():
                 exit_price = pos['tp']
                 realized = (pos['coins'] * 0.5 * exit_price) - (pos['coins'] * 0.5 * pos['entry'])
                 wallet += (pos['risk_blocked'] * 0.5) + realized
-                pos['coins'] *= 0.5
-                pos['risk_blocked'] *= 0.5
-                pos['size_pct'] = 0.5
-                pos['sl'] = signal['new_sl']
-                pos['trail'] = True
-                pos['h_post'] = signal['highest_price_post_tp']
+                pos['coins'] *= 0.5; pos['risk_blocked'] *= 0.5; pos['size_pct'] = 0.5
+                pos['sl'] = signal['new_sl']; pos['trail'] = True; pos['h_post'] = signal['highest_price_post_tp']
                 active_positions[sym] = pos
                 trades_history.append([current_time, sym, 'TP1', realized])
 
@@ -139,8 +145,7 @@ def run_debug_sim():
                 bot_memory[sym] = {'status': 'COOLDOWN', 'last_exit_time': str(current_time)}
 
             elif act == 'UPDATE_TRAILING':
-                pos['sl'] = signal['new_sl']
-                pos['h_post'] = signal['highest_price_post_tp']
+                pos['sl'] = signal['new_sl']; pos['h_post'] = signal['highest_price_post_tp']
                 active_positions[sym] = pos
 
         for sym in closed_ids: del active_positions[sym]
@@ -148,6 +153,9 @@ def run_debug_sim():
         # B) ENTRADAS
         if len(active_positions) >= MAX_OPEN_POSITIONS: continue
         
+        # --- FILTRO MACRO: Si BTC está bajista, NO ABRIMOS NUEVOS LONGS (salvo en BTC mismo si se quiere) ---
+        if not is_macro_bullish: continue
+
         for sym in PORTFOLIO.keys():
             if sym in active_positions: continue
             if sym not in market_data: continue
@@ -159,7 +167,6 @@ def run_debug_sim():
             idx = df.index.get_loc(current_time)
             if idx < 50: continue
             window = df.iloc[idx-50 : idx+1]
-            
             st_mem = bot_memory.get(sym, {'status': 'WAITING_BREAKOUT'})
             
             try:
@@ -169,28 +176,24 @@ def run_debug_sim():
                     entry = signal['entry_price']
                     sl = signal['stop_loss']
                     dist = abs(entry - sl)
-                    
                     if dist > 0:
-                        risk_amount = wallet * 0.03 # 3% riesgo
-                        if risk_amount > wallet: risk_amount = wallet
-                        
-                        coins = risk_amount / dist
+                        risk_amt = wallet * 0.03
+                        if risk_amt > wallet: risk_amt = wallet
+                        coins = risk_amt / dist
                         notional = coins * entry
-                        if notional > wallet * 0.4: 
-                            coins = (wallet * 0.4) / entry
-                            risk_amount = coins * dist
+                        if notional > wallet * 0.4: coins = (wallet * 0.4) / entry; risk_amt = coins * dist
                         
-                        wallet -= risk_amount
+                        wallet -= risk_amt
                         active_positions[sym] = {
                             'entry': entry, 'sl': sl, 'tp': signal['tp_partial'],
                             'coins': coins, 'size_pct': 1.0, 'trail': False, 
-                            'h_post': 0.0, 'risk_blocked': risk_amount
+                            'h_post': 0.0, 'risk_blocked': risk_amt
                         }
             except: pass
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     print("\n" + "="*40)
-    print(f"📊 RESULTADO HYDRA SQUEEZE (4H Estructural)")
+    print(f"📊 RESULTADO HYDRA PHASE 2 (Refinado)")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print(f"🔢 Trades:        {len(trades_history)}")
