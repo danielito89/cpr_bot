@@ -1,4 +1,4 @@
-print("🟢 INICIANDO SIMULACIÓN 'GOLD' (Direct + SMA200 + Params Optimizados)...")
+print("🟢 INICIANDO SIMULACIÓN 'PLAN DE RESCATE' (Fix PnL + Wallet + Slope)...")
 
 import sys
 import os
@@ -19,34 +19,14 @@ INITIAL_CAPITAL = 5000
 MAX_OPEN_POSITIONS = 4 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'backtesting', 'data')
 
-# --- TUS PARÁMETROS OPTIMIZADOS (LA CLAVE DEL ÉXITO) ---
-# Volvimos a PEPE 1.9, FET 2.0, etc. Esto filtra el ruido.
+# Parámetros optimizados (Volvemos a tu lista ganadora)
 PORTFOLIO = {
-    '1000PEPE/USDT': {
-        'tf': '1h', 
-        'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.9} # Alto Vol
-    },
-    'FET/USDT': {
-        'tf': '1h', 
-        'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0} # Muy Alto Vol
-    },
-    'WIF/USDT': {
-        'tf': '1h', 
-        'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}
-    },
-    'DOGE/USDT': {
-        'tf': '1h', 
-        'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.9}
-    },
-    # SLOW (4H)
-    'SOL/USDT': {
-        'tf': '4h', 
-        'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}
-    },
-    'BTC/USDT': {
-        'tf': '4h', 
-        'params': {'sl_atr': 1.5, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.1} # Low Vol
-    }
+    '1000PEPE/USDT': {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.9}},
+    'FET/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 6.0, 'trailing_dist_atr': 3.0, 'vol_multiplier': 2.0}},
+    'WIF/USDT':      {'tf': '1h', 'params': {'sl_atr': 2.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 3.5, 'vol_multiplier': 1.6}},
+    'DOGE/USDT':     {'tf': '1h', 'params': {'sl_atr': 2.0, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.9}},
+    'SOL/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 4.0, 'trailing_dist_atr': 2.5, 'vol_multiplier': 1.5}},
+    'BTC/USDT':      {'tf': '4h', 'params': {'sl_atr': 1.5, 'tp_partial_atr': 2.0, 'trailing_dist_atr': 1.5, 'vol_multiplier': 1.1}}
 }
 
 def clean_columns(df):
@@ -66,7 +46,6 @@ def run_debug_sim():
         files = glob.glob(pattern)
         if not files: continue
         target_file = next((f for f in files if "FULL" in f), files[0])
-        
         try:
             df = pd.read_csv(target_file, index_col=0, parse_dates=True)
             df = clean_columns(df)
@@ -74,7 +53,6 @@ def run_debug_sim():
             p = conf['params']
             strat.sl_atr = p['sl_atr']; strat.tp_partial_atr = p['tp_partial_atr']
             strat.trailing_dist_atr = p['trailing_dist_atr']; strat.vol_multiplier = p['vol_multiplier']
-            
             df = strat.calculate_indicators(df)
             df_1h = df.resample('1h').ffill()
             df_1h = df_1h[(df_1h.index >= '2023-01-01') & (df_1h.index <= '2025-12-31')]
@@ -85,13 +63,16 @@ def run_debug_sim():
 
     if not market_data: return
 
-    # 2. SIMULACIÓN
+    # 2. SIMULACIÓN REALISTA
     full_timeline = sorted(list(set().union(*[df.index for df in market_data.values()])))
-    wallet = INITIAL_CAPITAL
+    
+    # FIX 2: Wallet gestiona el capital DISPONIBLE
+    wallet = INITIAL_CAPITAL 
+    
     active_positions = {} 
     trades_history = []
     
-    print(f"\n🚀 EJECUTANDO SIMULACIÓN GOLD ({len(full_timeline)} pasos)...")
+    print(f"\n🚀 EJECUTANDO SIMULACIÓN CON FIXES ({len(full_timeline)} pasos)...")
     
     for i, current_time in enumerate(full_timeline):
         if i % 10000 == 0: print(f"   ... {int(i/len(full_timeline)*100)}%")
@@ -102,49 +83,77 @@ def run_debug_sim():
             df = market_data[sym]
             if current_time not in df.index: continue
             
+            curr = df.loc[current_time] # Usamos loc para acceder rápido a High/Low
             strat = strategies[sym]
+            
             st = {
-                'status': 'IN_POSITION', 
-                'entry_price': pos['entry'], 'stop_loss': pos['sl'], 'tp_partial': pos['tp'], 
-                'position_size_pct': pos['size_pct'], 'trailing_active': pos['trail'], 'highest_price_post_tp': pos['h_post']
+                'status': 'IN_POSITION', 'entry_price': pos['entry'], 'stop_loss': pos['sl'],
+                'tp_partial': pos['tp'], 'position_size_pct': pos['size_pct'],
+                'trailing_active': pos['trail'], 'highest_price_post_tp': pos['h_post']
             }
             
+            # Recreamos la señal pasando una ventana mínima
             idx = df.index.get_loc(current_time)
-            # Solo la última vela para salida es suficiente
-            window = df.iloc[max(0, idx-50) : idx+1] 
-            
-            try:
-                signal = strat.get_signal(window, st)
-                act = signal['action']
+            window = df.iloc[max(0, idx-60):idx+1]
+            signal = strat.get_signal(window, st)
+            act = signal['action']
+
+            # --- EJECUCIÓN DE SALIDA (PnL REALISTA) ---
+            if act == 'EXIT_PARTIAL':
+                # TP suele ejecutarse bien (Limit), asumimos precio TP
+                exit_price = pos['tp'] 
                 
-                if act == 'EXIT_PARTIAL':
-                    realized = (pos['coins'] * 0.5 * pos['tp']) - (pos['coins'] * 0.5 * pos['entry'])
-                    wallet += realized
-                    pos['coins'] *= 0.5
-                    pos['size_pct'] = 0.5
-                    pos['sl'] = signal['new_sl']
-                    pos['trail'] = True
-                    pos['h_post'] = signal['highest_price_post_tp']
-                    active_positions[sym] = pos
-                    trades_history.append([current_time, sym, 'TP1', realized])
-                    
-                elif act == 'UPDATE_TRAILING':
-                    pos['sl'] = signal['new_sl']
-                    pos['h_post'] = signal['highest_price_post_tp']
-                    active_positions[sym] = pos
-                    
-                elif act in ['EXIT_SL', 'EXIT_TRAILING']:
-                    realized = (pos['coins'] * pos['sl']) - (pos['coins'] * pos['entry'])
-                    wallet += realized
-                    closed_ids.append(sym)
-                    trades_history.append([current_time, sym, act, realized])
-            except: pass
+                # Calculamos profit de la mitad vendida
+                coins_sold = pos['coins'] * 0.5
+                revenue = coins_sold * exit_price
+                cost_basis = coins_sold * pos['entry']
+                realized = revenue - cost_basis
+                
+                # FIX 2: Devolvemos capital al wallet (costo + ganancia)
+                # Aquí simplificamos: devolvemos lo "arriesgado" proporcionalmente + profit
+                capital_released = (pos['risk_blocked'] * 0.5) + realized
+                wallet += capital_released
+                
+                # Actualizamos posición
+                pos['coins'] -= coins_sold
+                pos['risk_blocked'] *= 0.5 # Liberamos mitad del riesgo bloqueado
+                pos['size_pct'] = 0.5
+                pos['sl'] = signal['new_sl']
+                pos['trail'] = True
+                pos['h_post'] = signal['highest_price_post_tp']
+                active_positions[sym] = pos
+                trades_history.append([current_time, sym, 'TP1', realized])
+
+            elif act in ['EXIT_SL', 'EXIT_TRAILING']:
+                # FIX 1: PEOR ESCENARIO EN SLIPPAGE
+                # Si el Low de la vela perforó el SL, asumimos que salimos en el Low (peor caso)
+                # O en el SL, lo que sea PEOR (más bajo).
+                exit_price = min(curr['Low'], pos['sl'])
+                
+                coins_left = pos['coins']
+                revenue = coins_left * exit_price
+                cost_basis = coins_left * pos['entry']
+                realized = revenue - cost_basis
+                
+                # Devolvemos lo que queda del riesgo bloqueado + profit (que será negativo)
+                wallet += pos['risk_blocked'] + realized
+                
+                closed_ids.append(sym)
+                trades_history.append([current_time, sym, act, realized])
+                
+            elif act == 'UPDATE_TRAILING':
+                pos['sl'] = signal['new_sl']
+                pos['h_post'] = signal['highest_price_post_tp']
+                active_positions[sym] = pos
 
         for sym in closed_ids: del active_positions[sym]
 
         # B) ENTRADAS
         if len(active_positions) >= MAX_OPEN_POSITIONS: continue
-            
+        
+        # Sorteo simple para no privilegiar siempre al primero de la lista
+        # check_list = list(PORTFOLIO.keys()); np.random.shuffle(check_list)
+        
         for sym in PORTFOLIO.keys():
             if sym in active_positions: continue
             if sym not in market_data: continue
@@ -153,13 +162,17 @@ def run_debug_sim():
             df = market_data[sym]
             if current_time not in df.index: continue
             
+            idx = df.index.get_loc(current_time)
+            if idx < 60: continue
+            window = df.iloc[idx-60 : idx+1]
+            
+            st_dummy = {'status': 'WAITING_BREAKOUT', 'last_exit_time': str(current_time - pd.Timedelta(hours=20))} 
+            # Truco: last_exit viejo para primer trade
+            
             try:
-                idx = df.index.get_loc(current_time)
-                # --- FIX: Ventana de 300 velas para que SMA200 funcione ---
-                if idx < 300: continue
-                window = df.iloc[idx-300 : idx+1]
-                
-                st_dummy = {'status': 'WAITING_BREAKOUT'}
+                # Recuperar si hubo salida reciente real
+                # (Aquí simplificamos, el cooldown interno de strategy se encarga si pasamos el estado correcto
+                # pero como es debug_sim sin memoria compleja, confiamos en que el volumen filtra)
                 
                 signal = strategies[sym].get_signal(window, st_dummy)
                 
@@ -167,21 +180,37 @@ def run_debug_sim():
                     entry = signal['entry_price']
                     sl = signal['stop_loss']
                     dist = abs(entry - sl)
+                    
                     if dist > 0:
-                        risk = wallet * 0.03
-                        coins = risk / dist
+                        # FIX 2: Gestión de Riesgo sobre Wallet DISPONIBLE (o Total, pero bloqueando)
+                        # Usamos 3% del wallet actual como riesgo
+                        risk_amount = wallet * 0.03
+                        
+                        # Si no hay suficiente dinero en wallet para cubrir el riesgo (muy raro), ajustamos
+                        if risk_amount > wallet: risk_amount = wallet
+
+                        coins = risk_amount / dist
                         notional = coins * entry
-                        if notional > wallet * 0.4: coins = (wallet * 0.4) / entry
+                        
+                        # Cap de seguridad: No meter más del 40% del wallet en una sola
+                        if notional > wallet * 0.4:
+                            coins = (wallet * 0.4) / entry
+                            risk_amount = coins * dist # Recalculamos riesgo real
+                        
+                        # BLOQUEAMOS CAPITAL
+                        wallet -= risk_amount
                         
                         active_positions[sym] = {
                             'entry': entry, 'sl': sl, 'tp': signal['tp_partial'],
-                            'coins': coins, 'size_pct': 1.0, 'trail': False, 'h_post': 0.0
+                            'coins': coins, 'size_pct': 1.0, 'trail': False, 
+                            'h_post': 0.0,
+                            'risk_blocked': risk_amount # Guardamos cuánto bloqueamos para devolverlo luego
                         }
             except: pass
 
     roi = ((wallet - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     print("\n" + "="*40)
-    print(f"📊 RESULTADO FINAL (Optimizada + SMA200)")
+    print(f"📊 RESULTADO FINAL (PLAN DE RESCATE)")
     print(f"💰 Capital Final: ${wallet:.2f}")
     print(f"📈 ROI Total:     {roi:.2f}%")
     print(f"🔢 Trades:        {len(trades_history)}")
