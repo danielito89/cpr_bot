@@ -14,8 +14,7 @@ class BreakoutBotStrategy:
         self.tp_partial_atr = 4.0
         self.trailing_dist_atr = 3.0
         
-        # Filtros
-        self.adx_threshold = 20 # Tendencia mínima
+        # Filtros ADX
         self.adx_period = 14
         
         # Cooldown Estructural (Velas)
@@ -38,38 +37,38 @@ class BreakoutBotStrategy:
         df['BB_Lower'] = df['BB_Mid'] - (df['BB_Std'] * self.bb_mult)
         
         # 3. Keltner Channels (KC)
-        # Usamos SMA para la linea media de KC (igual que BB)
         df['KC_Upper'] = df['BB_Mid'] + (df['ATR'] * self.kc_mult)
         df['KC_Lower'] = df['BB_Mid'] - (df['ATR'] * self.kc_mult)
         
-        # 4. SQUEEZE DETECTOR
-        # True si las bandas de Bollinger están DENTRO de las de Keltner
-        df['Squeeze_On'] = (df['BB_Upper'] < df['KC_Upper']) & (df['BB_Lower'] > df['KC_Lower'])
+        # --- FIX 1: SQUEEZE RELATIVO (CRYPTO ADAPTED) ---
+        # No exigimos que BB esté 100% dentro de KC.
+        # Exigimos que el ancho de BB sea menor al 85% del ancho de KC.
+        bb_width = df['BB_Upper'] - df['BB_Lower']
+        kc_width = df['KC_Upper'] - df['KC_Lower']
         
-        # 5. ADX (Fuerza de tendencia)
-        # Cálculo simplificado de ADX para no depender de talib
+        # Evitamos división por cero o NaNs
+        kc_width = kc_width.replace(0, np.nan) 
+        
+        # True si hay contracción relativa
+        df['Squeeze_On'] = bb_width < (kc_width * 0.85)
+        
+        # 4. ADX (Cálculo standard Wilder)
         up = df['High'] - df['High'].shift(1)
         down = df['Low'].shift(1) - df['Low']
         pos_dm = np.where((up > down) & (up > 0), up, 0.0)
         neg_dm = np.where((down > up) & (down > 0), down, 0.0)
-        tr = df['TR']
         
-        # Suavizado Wilder
         def wilder_smooth(series, period):
             return series.ewm(alpha=1/period, adjust=False).mean()
 
-        tr_smooth = wilder_smooth(pd.Series(tr), self.adx_period)
-        pos_dm_smooth = wilder_smooth(pd.Series(pos_dm), self.adx_period)
-        neg_dm_smooth = wilder_smooth(pd.Series(neg_dm), self.adx_period)
+        tr_smooth = wilder_smooth(df['TR'], self.adx_period)
+        pos_dm_smooth = wilder_smooth(pd.Series(pos_dm, index=df.index), self.adx_period)
+        neg_dm_smooth = wilder_smooth(pd.Series(neg_dm, index=df.index), self.adx_period)
         
         pos_di = 100 * (pos_dm_smooth / tr_smooth)
         neg_di = 100 * (neg_dm_smooth / tr_smooth)
         dx = 100 * abs(pos_di - neg_di) / (pos_di + neg_di)
         df['ADX'] = wilder_smooth(dx, self.adx_period)
-
-        # 6. Momentum (Linear Regression o simple Delta)
-        # Usamos cambio de precio vs hace 5 periodos como proxy de momentum
-        df['Momentum'] = df['Close'] - df['Close'].shift(5)
 
         return df
 
@@ -77,7 +76,7 @@ class BreakoutBotStrategy:
         if len(window) < 30: return {'action': 'HOLD'}
             
         curr = window.iloc[-1]
-        prev = window.iloc[-2]
+        prev = window.iloc[-2] # Necesitamos la vela anterior para comparar
         status = state_data.get('status', 'WAITING_BREAKOUT')
         
         # --- SALIDAS ---
@@ -106,29 +105,37 @@ class BreakoutBotStrategy:
                         return {'action': 'UPDATE_TRAILING', 'new_sl': new_sl, 'highest_price_post_tp': new_high}
             return {'action': 'HOLD'}
 
-        # --- ENTRADAS (SQUEEZE BREAKOUT) ---
+        # --- ENTRADAS (CRYPTO SQUEEZE) ---
         if status == 'WAITING_BREAKOUT' or status == 'COOLDOWN':
-            # Cooldown
+            # Cooldown check
             if status == 'COOLDOWN':
                  last_exit = pd.to_datetime(state_data.get('last_exit_time'))
-                 if (curr.name - last_exit).total_seconds() / 3600 < (self.cooldown_candles * 4): # *4 si es 4H
+                 # En 4H, cada vela es 1 unidad de cooldown_candles si el simulador pasa velas.
+                 # Pero debug_sim pasa tiempo real. 10 velas * 4 horas = 40 horas.
+                 if (curr.name - last_exit).total_seconds() / 3600 < (self.cooldown_candles * 4): 
                      return {'action': 'HOLD'}
 
-            # LÓGICA DE ENTRADA:
-            # 1. Venimos de un Squeeze? (Miramos si hubo squeeze en las últimas 5 velas)
-            recent_squeeze = window['Squeeze_On'].iloc[-6:-1].any()
+            # 1. FIX 4: Ventana de Squeeze más larga (12 velas hacia atrás)
+            # Buscamos si hubo ALGÚN momento de compresión recientemente
+            # -13:-1 mira las ultimas 12 velas antes de la actual
+            recent_squeeze = window['Squeeze_On'].iloc[-13:-1].any()
             
-            # 2. El Squeeze se rompió? (Ahora Squeeze es False y las bandas se abren)
-            squeeze_fired = (not curr['Squeeze_On']) and recent_squeeze
+            # El disparo ocurre si venimos de squeeze y ahora estamos rompiendo
+            if not recent_squeeze: return {'action': 'HOLD'}
             
-            # 3. Confirmación de Trend (ADX)
-            adx_ok = curr['ADX'] > self.adx_threshold
+            # 2. FIX 2: ADX Rising (Nacimiento de tendencia)
+            # No pedimos > 25, pedimos que esté subiendo
+            adx_rising = curr['ADX'] > prev['ADX']
             
-            # 4. Momentum Positivo (Precio rompe Upper BB o Momentum > 0)
-            momentum_up = curr['Close'] > curr['BB_Upper'] or (curr['Momentum'] > 0 and curr['Close'] > curr['BB_Mid'])
-
-            if squeeze_fired and adx_ok and momentum_up:
-                
+            # 3. FIX 3: Momentum Temprano
+            # Precio sube vs vela anterior Y está sobre la media (zona alcista)
+            momentum_up = (curr['Close'] > prev['Close']) and (curr['Close'] > curr['BB_Mid'])
+            
+            # 4. Confirmación extra: Que el precio esté por encima de la banda superior?
+            # Opcional. Tu Fix 3 dice "Momentum temprano", así que con momentum_up basta.
+            # Pero para seguridad, pedimos que NO esté colapsando la volatilidad (BB Width expandiendose levemente es bueno)
+            
+            if adx_rising and momentum_up:
                 atr = curr['ATR']
                 entry = curr['Close']
                 
