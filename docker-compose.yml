@@ -1,33 +1,56 @@
 version: '3.8'
 
 services:
+  # Servicio 1: El Cerebro (Trading)
   hydra_bot:
     build: .
     container_name: hydra_bot_prod
     restart: always
-    
-    # Cargar variables de entorno (API Keys) desde el archivo .env del servidor
     env_file:
       - .env
-    
-    # Volúmenes: Esto es CRUCIAL para no perder datos al reiniciar
     volumes:
-      # Guardar el estado del bot (posiciones abiertas, etc)
       - ./bot_state.json:/app/bot_state.json
-      # Guardar la base de datos de trades históricos
       - ./trades_db.sqlite:/app/trades_db.sqlite
-      # (Opcional) Si generas logs en archivo, descomenta esto:
-      # - ./logs:/app/logs
-
-    # Configuración de Logs para que no llenen el disco duro del VPS
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-
-    # Límites para proteger tu servidor (dejar recursos para Odoo)
     deploy:
       resources:
         limits:
           memory: 1G
+    # Comando explícito para el bot de trading
+    command: ["python", "bots/scalper_pro/main_multipair.py"]
+
+  # Servicio 2: El Oído (Telegram Listener)
+  telegram_listener:
+    build: .
+    container_name: telegram_listener_prod
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Necesita acceso a los mismos archivos para leer el estado y responder
+      - ./bot_state.json:/app/bot_state.json
+      - ./trades_db.sqlite:/app/trades_db.sqlite
+    deploy:
+      resources:
+        limits:
+          memory: 256M # Consume muy poco
+    # Comando explícito para el servicio de Telegram
+    command: ["python", "telegram_service.py"]
+
+  # Servicio 3: El Dashboard Web (Opcional - Descomentar si lo usas)
+  web_dashboard:
+    build: .
+    container_name: dashboard_prod
+    restart: always
+    ports:
+      - "8501:8501" # O el puerto que use Streamlit/Flask
+    env_file:
+      - .env
+    volumes:
+      - ./bot_state.json:/app/bot_state.json
+      - ./trades_db.sqlite:/app/trades_db.sqlite
+    command: ["streamlit", "run", "web_dashboard.py"]
