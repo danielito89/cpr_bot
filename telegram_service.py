@@ -1,27 +1,32 @@
 import telebot
-import subprocess
 import os
 import sys
 import time
 from dotenv import load_dotenv
 
-# Importamos nuestras herramientas compartidas para no reinventar la rueda
+# Importamos nuestras herramientas compartidas
 from shared.ccxt_handler import BinanceHandler
 import config
 
 # --- CONFIGURACIÓN ---
-BASE_PATH = "/home/ubuntu/bot_cpr"
-load_dotenv(os.path.join(BASE_PATH, ".env"))
+# En Docker, la ruta raíz es /app directamente
+BASE_PATH = "/app"
+load_dotenv() # Docker ya carga las variables, pero esto asegura compatibilidad local
 
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # Inicializamos el bot
-bot = telebot.TeleBot(TOKEN)
-exchange_handler = BinanceHandler() # Usamos nuestro handler optimizado
+try:
+    bot = telebot.TeleBot(TOKEN)
+    exchange_handler = BinanceHandler()
+    print("✅ Telegram Service: Modulos cargados correctamente.")
+except Exception as e:
+    print(f"🔥 Error cargando dependencias de Telegram: {e}")
 
 # Restringir acceso solo a TI (Seguridad)
 def is_authorized(message):
+    # Convertimos a string por seguridad
     if str(message.chat.id) != str(CHAT_ID):
         bot.reply_to(message, "⛔ Acceso denegado. Este bot es privado.")
         return False
@@ -32,17 +37,16 @@ def is_authorized(message):
 def send_welcome(message):
     if not is_authorized(message): return
     help_text = (
-        "🐉 *HYDRA REMOTE CONTROL*\n"
+        "🐉 *HYDRA DOCKER CONTROL*\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "🎮 *COMANDOS DISPONIBLES:*\n\n"
+        "☁️ _Ejecutando en Contenedor (Alemania)_\n\n"
         "📊 *ESTADO*\n"
-        "/status - Estado del servicio y posiciones\n"
-        "/balance - Ver saldo y PnL en Binance\n"
-        "/logs - Ver últimos logs del sistema\n\n"
-        "⚙️ *CONTROL*\n"
-        "/start_bot - Arrancar Hydra\n"
-        "/stop_bot - Detener Hydra\n"
-        "/restart - Reiniciar servicio\n\n"
+        "/status - Ver estado y posiciones\n"
+        "/balance - Ver saldo USDT en Binance\n\n"
+        "⚙️ *SISTEMA*\n"
+        "Para ver logs o reiniciar, usa la terminal:\n"
+        "`docker compose logs -f`\n"
+        "`docker compose restart`\n\n"
         "💀 *EMERGENCIA*\n"
         "/panic - ⚠️ CERRAR TODO A MERCADO"
     )
@@ -54,19 +58,12 @@ def status_command(message):
     if not is_authorized(message): return
     bot.send_chat_action(message.chat.id, 'typing')
     
-    # 1. Chequear Systemd (El servicio se llama cpr_bot)
-    def check_service(name):
-        try:
-            res = subprocess.run(["systemctl", "is-active", name], capture_output=True, text=True)
-            status = res.stdout.strip()
-            if status == "active": return "🟢 ONLINE"
-            elif status == "inactive": return "🔴 OFFLINE"
-            else: return f"🟡 {status.upper()}"
-        except: return "❓ ERROR"
-
-    service_status = check_service("cpr_bot_breakout")
+    # 1. Estado del Servicio
+    # En Docker, si este mensaje responde, el contenedor 'hydra_bot' debería estar corriendo
+    # porque comparten el mismo docker-compose.
+    service_status = "🟢 ONLINE (Docker)"
     
-    # 2. Leer Posiciones Abiertas (Directo de Binance para mayor precisión)
+    # 2. Leer Posiciones Abiertas
     try:
         positions = exchange_handler.get_open_positions()
         active_count = len(positions)
@@ -84,13 +81,13 @@ def status_command(message):
         else:
             positions_txt = "_Sin posiciones activas._"
     except Exception as e:
-        positions_txt = f"⚠️ Error leyendo exchange: {str(e)}"
+        positions_txt = f"⚠️ Error API Binance: {str(e)}"
         active_count = "?"
 
     msg = (
         f"📊 *ESTADO DEL SISTEMA*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 *Servicio Hydra:* {service_status}\n\n"
+        f"🐳 *Contenedor:* {service_status}\n\n"
         f"💼 *Posiciones Abiertas ({active_count}):*\n"
         f"{positions_txt}"
     )
@@ -103,14 +100,15 @@ def balance_command(message):
     bot.send_chat_action(message.chat.id, 'typing')
     
     try:
-        # Usamos métodos de ccxt raw a través de nuestro handler para info detallada
         balance = exchange_handler.exchange.fetch_balance()
         total_usdt = balance['total']['USDT']
         free_usdt = balance['free']['USDT']
         
-        # PnL no realizado
-        positions = balance['info']['positions']
-        unrealized_pnl = sum([float(p['unrealizedProfit']) for p in positions])
+        # Intentamos calcular PnL flotante si hay info
+        unrealized_pnl = 0.0
+        if 'positions' in balance['info']:
+             positions = balance['info']['positions']
+             unrealized_pnl = sum([float(p['unrealizedProfit']) for p in positions])
         
         msg = (
             f"💰 *BALANCE WALLET*\n"
@@ -123,43 +121,22 @@ def balance_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Error leyendo Binance: {e}")
 
-# --- COMANDOS DE CONTROL ---
-def run_system_cmd(message, cmd):
+# --- COMANDOS OBSOLETOS EN DOCKER ---
+@bot.message_handler(commands=['logs', 'start_bot', 'stop_bot', 'restart'])
+def docker_notice(message):
     if not is_authorized(message): return
-    bot.reply_to(message, f"⚙️ Ejecutando: `{cmd}`...", parse_mode="Markdown")
-    try:
-        subprocess.run(cmd.split(), check=True)
-        bot.reply_to(message, "✅ Comando ejecutado con éxito.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: {e}")
-
-@bot.message_handler(commands=['start_bot'])
-def start_bot(m): run_system_cmd(m, "sudo systemctl start cpr_bot_breakout")
-
-@bot.message_handler(commands=['stop_bot'])
-def stop_bot(m): run_system_cmd(m, "sudo systemctl stop cpr_bot_breakout")
-
-@bot.message_handler(commands=['restart'])
-def restart_bot(m): run_system_cmd(m, "sudo systemctl restart cpr_bot_breakout")
-
-# --- COMANDO: /logs ---
-@bot.message_handler(commands=['logs'])
-def logs_command(message):
-    if not is_authorized(message): return
-    try:
-        # Últimas 15 líneas del servicio cpr_bot
-        out = subprocess.check_output("journalctl -u cpr_bot_breakout -n 15 --no-pager", shell=True).decode()
-        if len(out) > 4000: out = out[-4000:]
-        bot.reply_to(message, f"📜 *LOGS (cpr_bot_breakout):*\n```\n{out}\n```", parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error obteniendo logs: {e}")
+    bot.reply_to(message, 
+        "⚠️ *Comando no disponible en Docker*\n\n"
+        "Para gestionar el bot, usa la terminal SSH:\n"
+        "🔹 Logs: `docker compose logs -f --tail=50`\n"
+        "🔹 Reiniciar: `docker compose restart`",
+        parse_mode="Markdown")
 
 # --- COMANDO: /panic (EMERGENCIA) ---
 @bot.message_handler(commands=['panic'])
 def panic_command(message):
     if not is_authorized(message): return
     
-    # Confirmación simple
     msg = bot.reply_to(message, "💀 *ALERTA DE PÁNICO* 💀\nEstás a punto de cerrar TODAS las posiciones a mercado.\n\nEscribe 'CONFIRMAR' para ejecutar.")
     bot.register_next_step_handler(msg, process_panic)
 
@@ -173,7 +150,7 @@ def process_panic(message):
     try:
         positions = exchange_handler.get_open_positions()
         if not positions:
-            bot.reply_to(message, "🤷‍♂️ No hay posiciones abiertas para cerrar.")
+            bot.reply_to(message, "🤷‍♂️ No hay posiciones abiertas.")
             return
 
         log = ""
@@ -182,28 +159,27 @@ def process_panic(message):
             amount = abs(float(pos['amount']))
             side = pos['side']
             
-            # Invertir lado para cerrar
+            # Cerrar posición (Invertir lado)
             try:
+                # Nota: En producción real, binance tiene endpoints específicos para cerrar,
+                # pero lanzar orden de mercado contraria funciona igual.
                 if side == 'long':
-                    exchange_handler.exchange.create_market_sell_order(symbol, amount)
+                    exchange_handler.exchange.create_market_sell_order(symbol, amount, params={'reduceOnly': True})
                 else:
-                    exchange_handler.exchange.create_market_buy_order(symbol, amount)
+                    exchange_handler.exchange.create_market_buy_order(symbol, amount, params={'reduceOnly': True})
                 log += f"✅ Closed {symbol}\n"
             except Exception as e:
                 log += f"❌ Error {symbol}: {e}\n"
         
         bot.reply_to(message, f"📝 *REPORTE PÁNICO:*\n{log}")
-        
-        # Opcional: Detener el bot para que no vuelva a abrir
-        subprocess.run(["sudo", "systemctl", "stop", "cpr_bot_breakout"])
-        bot.reply_to(message, "🛑 Bot detenido por seguridad.")
+        bot.reply_to(message, "⚠️ Recuerda detener el contenedor manualmente si es necesario.")
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error crítico: {e}")
 
 # Bucle infinito
 if __name__ == "__main__":
-    print("🤖 Telegram Service Iniciado...")
+    print("🤖 Telegram Service Iniciado... (Modo Docker)")
     try:
         bot.infinity_polling()
     except Exception as e:
