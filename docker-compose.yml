@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  hydra_bot:
+    build: .
+    container_name: hydra_bot_prod
+    restart: always
+    
+    # Cargar variables de entorno (API Keys) desde el archivo .env del servidor
+    env_file:
+      - .env
+    
+    # Volúmenes: Esto es CRUCIAL para no perder datos al reiniciar
+    volumes:
+      # Guardar el estado del bot (posiciones abiertas, etc)
+      - ./bot_state.json:/app/bot_state.json
+      # Guardar la base de datos de trades históricos
+      - ./trades_db.sqlite:/app/trades_db.sqlite
+      # (Opcional) Si generas logs en archivo, descomenta esto:
+      # - ./logs:/app/logs
+
+    # Configuración de Logs para que no llenen el disco duro del VPS
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Límites para proteger tu servidor (dejar recursos para Odoo)
+    deploy:
+      resources:
+        limits:
+          memory: 1G

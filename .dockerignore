@@ -1,0 +1,24 @@
+# Archivos de control de versiones
+.git
+.github
+.gitignore
+
+# Archivos de entorno y secretos (se inyectan, no se copian)
+.env
+venv/
+env/
+
+# Archivos temporales de Python y cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+
+# Logs locales y bases de datos temporales (opcional, depende de tu gusto)
+*.log
+.DS_Store
+.vscode
