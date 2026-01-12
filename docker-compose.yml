@@ -21,7 +21,7 @@ services:
         limits:
           memory: 1G
     # Comando explícito para el bot de trading
-    command: ["python", "bots/scalper_pro/main_multipair.py"]
+    command: ["python", "bots/breakout/main_breakout.py"]
 
   # Servicio 2: El Oído (Telegram Listener)
   telegram_listener:
