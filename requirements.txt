@@ -14,3 +14,4 @@ pytz                # Para manejar zonas horarias correctamente (evita líos de 
 
 # --- Mensajería (Opcional si usas Telegram) ---
 python-telegram-bot # Si tu bot te avisa por Telegram
+pyTelegramBotAPI
