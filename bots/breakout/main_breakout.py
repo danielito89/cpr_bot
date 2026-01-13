@@ -48,9 +48,18 @@ def run_bot_cycle():
     # 2. Iterar sobre el Portfolio Configurado
     for symbol, conf in config.PAIRS_CONFIG.items():
         try:
-            # ¿Tenemos posición abierta en este par?
-            current_pos = next((p for p in open_positions if p['symbol'] == symbol.replace('/', '')), None)
+            # --- FIX: NORMALIZACIÓN DE SÍMBOLOS ROBUSTA ---
+            # Objetivo: Que 'WIF/USDT', 'WIFUSDT', 'WIF/USDT:USDT' sean iguales.
+            target_clean = symbol.split(':')[0].replace('/', '').replace('1000', '') 
             
+            current_pos = None
+            for p in open_positions:
+                pos_sym_clean = p['symbol'].split(':')[0].replace('/', '').replace('1000', '')
+                if pos_sym_clean == target_clean:
+                    current_pos = p
+                    break
+            # -----------------------------------------------
+
             # Descargar datos (Velas 4H)
             df = exchange.fetch_candles(symbol, timeframe=config.TIMEFRAME, limit=100)
             if df is None: continue
@@ -61,24 +70,21 @@ def run_bot_cycle():
             # Construir Estado Actual para la Estrategia
             state_data = {'status': 'WAITING_BREAKOUT'}
             
+            # SEGURIDAD EXTRA: Forzar estado si ya hay posición
             if current_pos:
                 state_data = {
                     'status': 'IN_POSITION',
-                    'entry_price': current_pos['entry_price'],
-                    'stop_loss': 0.0, # TODO: Leer SL real de orden abierta si es posible, o gestionarlo interno
-                    'position_size_pct': 1.0, # Asumimos 100% por ahora
-                    'tp_partial': 999999, # Se recalcula o se mantiene
-                    'trailing_active': True, 
-                    'highest_price_post_tp': df['High'].iloc[-1] # Simplificación para trailing
+                    'entry_price': float(current_pos['entry_price']),
+                    'stop_loss': 0.0, # Se actualizará abajo
+                    'position_size_pct': 1.0,
+                    'tp_partial': 999999,
+                    'trailing_active': True,
+                    'highest_price_post_tp': df['High'].iloc[-1]
                 }
-                # Aquí deberíamos tener una base de datos local (SQLite/JSON) para persistir 
-                # el SL exacto y el estado del TP parcial. 
-                # Para la V1, asumimos que la estrategia recalcula niveles dinámicos.
 
             # Obtener Señal
             window = df.iloc[-60:] # Ventana suficiente
             signal = strategy.get_signal(window, state_data)
-            
             action = signal['action']
             
             # --- EJECUCIÓN DE LÓGICA ---
@@ -99,12 +105,11 @@ def run_bot_cycle():
                         # 1. Set Leverage
                         exchange.set_leverage(symbol.replace('/', ''), conf['leverage'])
                         
-                        # 2. Market Buy
+                        # 2. Market Buy (ACTIVADO)
                         order = exchange.exchange.create_market_buy_order(symbol, qty)
-                        # TODO: Descomentar linea de arriba para LIVE
                         
-                        # 3. Stop Loss Order
-                        exchange.exchange.create_order(symbol, 'stop_market', 'sell', qty, params={'stopPrice': sl_price})
+                        # 3. Stop Loss Order (ACTIVADO)
+                        exchange.exchange.create_order(symbol, 'stop_market', 'sell', qty, params={'stopPrice': sl_price, 'reduceOnly': True})
                         
                         bot_telegram.send_entry(symbol, entry_price, qty, conf['tier'])
                 else:
@@ -112,32 +117,75 @@ def run_bot_cycle():
 
             # CASO B: GESTIÓN DE POSICIÓN (Trailing / Salida)
             elif current_pos:
-                # Si la estrategia dice EXIT
+                
+                # --- SUB-CASO 1: SALIDA TOTAL (TP, SL o Trailing Hit) ---
                 if 'EXIT' in action:
                     print(f"👋 CERRANDO POSICIÓN: {symbol} ({action})")
-                    exchange.exchange.create_market_sell_order(symbol, current_pos['amount'])
-                    # bot_telegram.send_exit(...)
-                    pass
-                
-                # Si la estrategia dice UPDATE TRAILING
+                    
+                    try:
+                        # 1. Cerrar la posición a Mercado
+                        qty = abs(float(current_pos['amount']))
+                        exchange.exchange.create_market_sell_order(symbol, qty, params={'reduceOnly': True})
+                        
+                        # 2. Cancelar órdenes pendientes (SL viejo)
+                        exchange.exchange.cancel_all_orders(symbol)
+                        
+                        # 3. Notificar
+                        pnl = float(current_pos['pnl'])
+                        close_price = df['Close'].iloc[-1]
+                        bot_telegram.send_exit(symbol, action, pnl, close_price)
+                        
+                    except Exception as e:
+                        print(f"❌ Error crítico cerrando {symbol}: {e}")
+                        bot_telegram.send_msg(f"⚠️ FALLO AL CERRAR {symbol}: {e}")
+
+                # --- SUB-CASO 2: ACTUALIZAR EL TRAILING STOP ---
                 elif action == 'UPDATE_TRAILING':
                     new_sl = signal['new_sl']
                     print(f"🛡️ ACTUALIZANDO SL: {symbol} a {new_sl}")
-                    # Cancelar SL anterior y poner uno nuevo
-                    bot_telegram.send_trailing_update(symbol, new_sl)
+                    
+                    try:
+                        # 1. Cancelar el Stop Loss anterior
+                        exchange.exchange.cancel_all_orders(symbol)
+                        
+                        # 2. Crear el nuevo Stop Loss más arriba
+                        qty = abs(float(current_pos['amount']))
+                        exchange.exchange.create_order(
+                            symbol, 
+                            'stop_market', 
+                            'sell', 
+                            qty, 
+                            params={'stopPrice': new_sl, 'reduceOnly': True}
+                        )
+                        
+                        bot_telegram.send_trailing_update(symbol, new_sl)
+                        
+                    except Exception as e:
+                        print(f"⚠️ Error actualizando SL para {symbol}: {e}")
 
         except Exception as e:
             print(f"❌ Error procesando {symbol}: {e}")
-            # bot_telegram.send_msg(f"Error en {symbol}: {e}")
 
 if __name__ == "__main__":
-    bot_telegram.send_msg("🤖 <b>HYDRA BOT INICIADO</b> (Production Mode)")
+    bot_telegram.send_msg("🤖 <b>HYDRA BOT INICIADO</b> (Docker Mode)")
+    
+    # Limpiar señal de parada al inicio
+    if os.path.exists("STOP_SIGNAL"):
+        os.remove("STOP_SIGNAL")
+
     while True:
+        # Check de Parada Suave
+        if os.path.exists("STOP_SIGNAL"):
+            print("🛑 SEÑAL DE PARADA DETECTADA. Cerrando bot...")
+            bot_telegram.send_msg("🛑 <b>BOT DETENIDO POR COMANDO</b>")
+            os.remove("STOP_SIGNAL")
+            sys.exit(0)
+
         try:
             run_bot_cycle()
         except Exception as e:
             print(f"💥 Error crítico en main loop: {e}")
             time.sleep(60)
         
-        # Esperar 5 minutos para el siguiente ciclo
+        # Esperar 5 minutos
         time.sleep(300)
