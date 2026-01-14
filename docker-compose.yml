@@ -20,8 +20,7 @@ services:
       resources:
         limits:
           memory: 1G
-    # Comando explícito para el bot de trading
-    command: ["python", "bots/breakout/main_breakout.py"]
+    command: ["python", "bots/scalper_pro/main_multipair.py"]
 
   # Servicio 2: El Oído (Telegram Listener)
   telegram_listener:
@@ -31,23 +30,21 @@ services:
     env_file:
       - .env
     volumes:
-      # Necesita acceso a los mismos archivos para leer el estado y responder
       - ./bot_state.json:/app/bot_state.json
       - ./trades_db.sqlite:/app/trades_db.sqlite
     deploy:
       resources:
         limits:
-          memory: 256M # Consume muy poco
-    # Comando explícito para el servicio de Telegram
+          memory: 256M
     command: ["python", "telegram_service.py"]
 
-  # Servicio 3: El Dashboard Web (Opcional - Descomentar si lo usas)
+  # Servicio 3: El Dashboard Web (ACTIVADO)
   web_dashboard:
     build: .
     container_name: dashboard_prod
     restart: always
     ports:
-      - "8501:8501" # O el puerto que use Streamlit/Flask
+      - "8501:8501"
     env_file:
       - .env
     volumes:
