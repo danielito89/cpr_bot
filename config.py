@@ -64,3 +64,4 @@ COOLDOWN_CANDLES = 12    # 48hs de espera tras salida
 LEVERAGE = 5
 DRY_RUN = False
 PAIRS = list(PAIRS_CONFIG.keys())
+ATR_PERCENTILE = 95
