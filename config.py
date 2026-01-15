@@ -62,3 +62,4 @@ BTC_SYMBOL = 'BTC/USDT'  # Para el filtro de régimen Macro
 SCORE_THRESHOLD = 30     # Score mínimo de calidad (ADX + Expansion)
 COOLDOWN_CANDLES = 12    # 48hs de espera tras salida
 LEVERAGE = 5
+DRY_RUN = False
