@@ -8,11 +8,18 @@ load_dotenv()
 
 class BinanceHandler:
     def __init__(self):
+        # Leemos directo del sistema
         self.api_key = os.getenv('BINANCE_API_KEY')
         self.api_secret = os.getenv('BINANCE_API_SECRET')
         
+        # DEBUG: Imprimir si encontró algo (SIN MOSTRAR LA CLAVE)
+        if self.api_key:
+            print(f"🔑 API Key detectada: {self.api_key[:4]}***")
+        else:
+            print("❌ API Key es None/Vacio")
+
         if not self.api_key or not self.api_secret:
-            raise ValueError("❌ CRÍTICO: No se encontraron API KEYS en .env")
+            raise ValueError("❌ CRÍTICO: No se encontraron API KEYS en variables de entorno.")
 
         # Configuración para FUTUROS
         self.exchange = ccxt.binance({
